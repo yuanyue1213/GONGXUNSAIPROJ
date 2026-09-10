@@ -27,10 +27,24 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
+typedef struct
+{
+  uint16_t speed_us;
+  uint16_t start_angle_cdeg;
+  uint16_t distance_mm[16];
+  uint8_t intensity[16];
+  uint16_t stop_angle_cdeg;
+} N10_ScanFrame;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+#define N10_DMA_RX_BUFFER_SIZE  256U
+#define N10_FRAME_SIZE           58U
+#define N10_POINTS_PER_FRAME     16U
+#define ESP_UART_TX_RING_SIZE    4096U
 
 /* USER CODE END PD */
 
@@ -51,8 +65,32 @@ UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 UART_HandleTypeDef huart6;
 UART_HandleTypeDef huart10;
+DMA_HandleTypeDef hdma_uart4_rx;
+DMA_HandleTypeDef hdma_uart5_tx;
 
 /* USER CODE BEGIN PV */
+
+/* DMA1 cannot access the default DTCM .bss on STM32H723.  The linker places
+ * this buffer in RAM_D2, which is accessible by DMA1. */
+uint8_t n10_dma_rx_buffer[N10_DMA_RX_BUFFER_SIZE]
+    __attribute__((section(".dma_buffer"), aligned(32)));
+uint8_t esp_uart_tx_ring[ESP_UART_TX_RING_SIZE]
+    __attribute__((section(".dma_buffer"), aligned(32)));
+
+volatile uint32_t n10_valid_frame_count;
+volatile uint32_t n10_invalid_frame_count;
+volatile N10_ScanFrame n10_last_frame;
+volatile uint32_t esp_uart_tx_frame_count;
+volatile uint32_t esp_uart_tx_overrun_count;
+volatile uint32_t esp_uart_tx_error_count;
+
+static uint8_t n10_frame[N10_FRAME_SIZE];
+static uint16_t n10_dma_last_position;
+static uint8_t n10_frame_index;
+static uint16_t esp_uart_tx_head;
+static uint16_t esp_uart_tx_tail;
+static uint16_t esp_uart_tx_dma_length;
+static uint8_t esp_uart_tx_busy;
 
 /* USER CODE END PV */
 
@@ -60,6 +98,7 @@ UART_HandleTypeDef huart10;
 void SystemClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_UART4_Init(void);
 static void MX_UART5_Init(void);
 static void MX_UART7_Init(void);
@@ -72,10 +111,231 @@ static void MX_USART6_UART_Init(void);
 static void MX_USART10_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
+static void N10_StartReception(void);
+static void N10_ProcessDmaBytes(uint16_t position);
+static void N10_ProcessByte(uint8_t byte);
+static void N10_DecodeFrame(const uint8_t *frame);
+static void ESP_QueueRawN10Frame(const uint8_t *frame);
+static void ESP_StartQueuedTransmit(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+static void N10_StartReception(void)
+{
+  n10_dma_last_position = 0U;
+  n10_frame_index = 0U;
+
+  if (HAL_UARTEx_ReceiveToIdle_DMA(&huart4, n10_dma_rx_buffer,
+                                   N10_DMA_RX_BUFFER_SIZE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* The N10 is a continuous stream; half-transfer callbacks add no value. */
+  __HAL_DMA_DISABLE_IT(huart4.hdmarx, DMA_IT_HT);
+}
+
+static void N10_ProcessDmaBytes(uint16_t position)
+{
+  uint16_t index;
+
+  if (position > N10_DMA_RX_BUFFER_SIZE || position == n10_dma_last_position)
+  {
+    return;
+  }
+
+  if (position > n10_dma_last_position)
+  {
+    for (index = n10_dma_last_position; index < position; ++index)
+    {
+      N10_ProcessByte(n10_dma_rx_buffer[index]);
+    }
+  }
+  else
+  {
+    for (index = n10_dma_last_position; index < N10_DMA_RX_BUFFER_SIZE; ++index)
+    {
+      N10_ProcessByte(n10_dma_rx_buffer[index]);
+    }
+    for (index = 0U; index < position; ++index)
+    {
+      N10_ProcessByte(n10_dma_rx_buffer[index]);
+    }
+  }
+
+  n10_dma_last_position = position;
+}
+
+static void N10_ProcessByte(uint8_t byte)
+{
+  if (n10_frame_index == 0U)
+  {
+    if (byte == 0xA5U)
+    {
+      n10_frame[0] = byte;
+      n10_frame_index = 1U;
+    }
+    return;
+  }
+
+  if (n10_frame_index == 1U)
+  {
+    if (byte == 0x5AU)
+    {
+      n10_frame[1] = byte;
+      n10_frame_index = 2U;
+    }
+    else if (byte == 0xA5U)
+    {
+      n10_frame[0] = byte;
+    }
+    else
+    {
+      n10_frame_index = 0U;
+    }
+    return;
+  }
+
+  n10_frame[n10_frame_index++] = byte;
+
+  if (n10_frame_index == 3U && n10_frame[2] != N10_FRAME_SIZE)
+  {
+    ++n10_invalid_frame_count;
+    n10_frame_index = 0U;
+    return;
+  }
+
+  if (n10_frame_index == N10_FRAME_SIZE)
+  {
+    uint8_t checksum = 0U;
+    uint16_t index;
+
+    for (index = 0U; index < (N10_FRAME_SIZE - 1U); ++index)
+    {
+      checksum = (uint8_t)(checksum + n10_frame[index]);
+    }
+
+    if (checksum == n10_frame[N10_FRAME_SIZE - 1U])
+    {
+      N10_DecodeFrame(n10_frame);
+      ESP_QueueRawN10Frame(n10_frame);
+      ++n10_valid_frame_count;
+    }
+    else
+    {
+      ++n10_invalid_frame_count;
+    }
+
+    n10_frame_index = 0U;
+  }
+}
+
+static void N10_DecodeFrame(const uint8_t *frame)
+{
+  uint16_t point;
+  uint16_t offset;
+
+  n10_last_frame.speed_us = ((uint16_t)frame[3] << 8U) | frame[4];
+  n10_last_frame.start_angle_cdeg = ((uint16_t)frame[5] << 8U) | frame[6];
+
+  for (point = 0U; point < N10_POINTS_PER_FRAME; ++point)
+  {
+    offset = 7U + (point * 3U);
+    n10_last_frame.distance_mm[point] = ((uint16_t)frame[offset] << 8U) |
+                                         frame[offset + 1U];
+    n10_last_frame.intensity[point] = frame[offset + 2U];
+  }
+
+  n10_last_frame.stop_angle_cdeg = ((uint16_t)frame[55] << 8U) | frame[56];
+}
+
+/* Queue complete, checksum-verified N10 frames for the ESP32-C3.  The queue
+ * keeps UART4's receive interrupt short, so the lidar stream is not stalled
+ * while UART5 is transmitting the previous frame. */
+static void ESP_QueueRawN10Frame(const uint8_t *frame)
+{
+  uint16_t index;
+  uint16_t free_bytes;
+  uint32_t primask = __get_PRIMASK();
+
+  __disable_irq();
+  if (esp_uart_tx_head >= esp_uart_tx_tail)
+  {
+    free_bytes = (ESP_UART_TX_RING_SIZE - esp_uart_tx_head) + esp_uart_tx_tail - 1U;
+  }
+  else
+  {
+    free_bytes = esp_uart_tx_tail - esp_uart_tx_head - 1U;
+  }
+
+  if (free_bytes < N10_FRAME_SIZE)
+  {
+    ++esp_uart_tx_overrun_count;
+  }
+  else
+  {
+    for (index = 0U; index < N10_FRAME_SIZE; ++index)
+    {
+      esp_uart_tx_ring[esp_uart_tx_head] = frame[index];
+      esp_uart_tx_head = (esp_uart_tx_head + 1U) % ESP_UART_TX_RING_SIZE;
+    }
+    ++esp_uart_tx_frame_count;
+    ESP_StartQueuedTransmit();
+  }
+
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
+}
+
+static void ESP_StartQueuedTransmit(void)
+{
+  uint16_t length;
+
+  if (esp_uart_tx_busy != 0U || esp_uart_tx_head == esp_uart_tx_tail)
+  {
+    return;
+  }
+
+  if (esp_uart_tx_head > esp_uart_tx_tail)
+  {
+    length = esp_uart_tx_head - esp_uart_tx_tail;
+  }
+  else
+  {
+    length = ESP_UART_TX_RING_SIZE - esp_uart_tx_tail;
+  }
+
+  esp_uart_tx_busy = 1U;
+  esp_uart_tx_dma_length = length;
+  if (HAL_UART_Transmit_DMA(&huart5, &esp_uart_tx_ring[esp_uart_tx_tail], length) != HAL_OK)
+  {
+    esp_uart_tx_busy = 0U;
+    ++esp_uart_tx_error_count;
+  }
+}
+
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+  if (huart->Instance == UART4)
+  {
+    N10_ProcessDmaBytes(Size);
+  }
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == UART5)
+  {
+    esp_uart_tx_tail = (esp_uart_tx_tail + esp_uart_tx_dma_length) % ESP_UART_TX_RING_SIZE;
+    esp_uart_tx_busy = 0U;
+    ESP_StartQueuedTransmit();
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -111,6 +371,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_UART4_Init();
   MX_UART5_Init();
   MX_UART7_Init();
@@ -122,6 +383,8 @@ int main(void)
   MX_USART6_UART_Init();
   MX_USART10_UART_Init();
   /* USER CODE BEGIN 2 */
+
+  N10_StartReception();
 
   /* USER CODE END 2 */
 
@@ -210,7 +473,7 @@ static void MX_UART4_Init(void)
 
   /* USER CODE END UART4_Init 1 */
   huart4.Instance = UART4;
-  huart4.Init.BaudRate = 115200;
+  huart4.Init.BaudRate = 230400;
   huart4.Init.WordLength = UART_WORDLENGTH_8B;
   huart4.Init.StopBits = UART_STOPBITS_1;
   huart4.Init.Parity = UART_PARITY_NONE;
@@ -258,7 +521,7 @@ static void MX_UART5_Init(void)
 
   /* USER CODE END UART5_Init 1 */
   huart5.Instance = UART5;
-  huart5.Init.BaudRate = 115200;
+  huart5.Init.BaudRate = 230400;
   huart5.Init.WordLength = UART_WORDLENGTH_8B;
   huart5.Init.StopBits = UART_STOPBITS_1;
   huart5.Init.Parity = UART_PARITY_NONE;
@@ -671,6 +934,25 @@ static void MX_USART10_UART_Init(void)
   /* USER CODE BEGIN USART10_Init 2 */
 
   /* USER CODE END USART10_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  /* DMA1_Stream1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 
 }
 

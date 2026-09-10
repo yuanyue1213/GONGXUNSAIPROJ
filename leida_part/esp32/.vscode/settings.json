@@ -12,6 +12,8 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=d:\\Documents\\GONGXUNSAIPROJ\\leida_part\\esp32\\build"
-  ]
+    "--compile-commands-dir=${workspaceFolder}/build"
+  ],
+  "idf.flashType": "UART",
+  "idf.portWin": "COM6"
 }

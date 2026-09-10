@@ -241,6 +241,13 @@ SECTIONS
     . = ALIGN(8);
   } >DTCMRAM
 
+  /* DMA1/2 cannot access DTCM.  Place peripheral DMA buffers in SRAM D2. */
+  .dma_buffer (NOLOAD) : ALIGN(32)
+  {
+    *(.dma_buffer)
+    . = ALIGN(32);
+  } >RAM_D2
+
 
 
   /* Remove information from the standard libraries */
