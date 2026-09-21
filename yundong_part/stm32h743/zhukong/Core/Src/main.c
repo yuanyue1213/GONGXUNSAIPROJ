@@ -34,13 +34,12 @@
 /* USER CODE BEGIN PD */
 
 /*
- * 设为 1 后，程序仅执行一次四轮逐个低速测试：
- * 左上(1) -> 右上(2) -> 右下(3) -> 左下(4)。
- * 默认关闭，避免下载固件后小车立即运动。
+ * 设为 1 后，程序仅执行一次四轮同时低速前进测试。
+ * 当前已启用；如需禁止上电测试，将该宏改回 0U。
  */
-#define ZDT_MOTOR_TEST_ENABLE        0U
-#define ZDT_TEST_SPEED_RPM_X10        300U  /* 30.0 RPM */
-#define ZDT_TEST_ACCEL_RPM_S_X10      1000U /* 100.0 RPM/s */
+#define ZDT_MOTOR_TEST_ENABLE        1U
+#define ZDT_TEST_SPEED_RPM             30U  /* 30 RPM */
+#define ZDT_TEST_ACCELERATION          10U  /* Emm 加速度档位 10 */
 #define ZDT_TEST_RUN_TIME_MS          1500U
 
 /* USER CODE END PD */
@@ -260,12 +259,19 @@ static void MX_GPIO_Init(void)
 #if ZDT_MOTOR_TEST_ENABLE
 static void ZDT_Motor_Test(void)
 {
-  static const ZDT_WheelId wheels[] =
+  static const ZDT_WheelId wheels[ZDT_MOTOR_WHEEL_COUNT] =
   {
     ZDT_WHEEL_LEFT_UP,
     ZDT_WHEEL_RIGHT_UP,
     ZDT_WHEEL_RIGHT_DOWN,
     ZDT_WHEEL_LEFT_DOWN
+  };
+  static const int16_t test_wheel_speed_rpm[ZDT_MOTOR_WHEEL_COUNT] =
+  {
+    ZDT_TEST_SPEED_RPM,
+    ZDT_TEST_SPEED_RPM,
+    ZDT_TEST_SPEED_RPM,
+    ZDT_TEST_SPEED_RPM
   };
   uint32_t index;
 
@@ -278,19 +284,11 @@ static void ZDT_Motor_Test(void)
     }
   }
 
-  /* 逐个低速正转，方便核对轮位与实际转向。 */
-  for (index = 0U; index < (sizeof(wheels) / sizeof(wheels[0])); ++index)
+  /* 正轮速表示前进；左逆右顺的电机方向由驱动层统一转换。 */
+  if (ZDT_Motor_SetWheelSpeeds(test_wheel_speed_rpm,
+                               ZDT_TEST_ACCELERATION) == HAL_OK)
   {
-    if (ZDT_Motor_SetVelocity((uint8_t)wheels[index], ZDT_DIRECTION_CW,
-                              ZDT_TEST_ACCEL_RPM_S_X10,
-                              ZDT_TEST_SPEED_RPM_X10, false) != HAL_OK)
-    {
-      break;
-    }
-
     HAL_Delay(ZDT_TEST_RUN_TIME_MS);
-    (void)ZDT_Motor_Stop((uint8_t)wheels[index], false);
-    HAL_Delay(200U);
   }
 
   /* 测试结束后停车并释放电机，确保底盘处于安全状态。 */
