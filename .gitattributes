@@ -1,0 +1,9 @@
+# Do not force line-ending conversion in this mixed Android / ESP-IDF /
+# STM32CubeMX workspace. Repository-local Git settings preserve the line
+# endings written by each tool.
+* text=auto
+
+# Generated binaries and firmware images must never undergo text conversion.
+*.bin  binary
+*.elf  binary
+*.apk  binary
