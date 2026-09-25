@@ -62,12 +62,15 @@ class MainActivity : ComponentActivity() {
     private var activeDirection: Char? = null
     private var repeatedLiftCommand: Runnable? = null
     private var activeLiftDirection: Char? = null
+    private var repeatedForeAftCommand: Runnable? = null
+    private var activeForeAftDirection: Char? = null
     private val pendingServoValues = mutableMapOf<Char, Int>()
     private val pendingServoTasks = mutableMapOf<Char, Runnable>()
     private lateinit var robotClient: RobotTcpClient
 
     private var connectionText by mutableStateOf("未连接")
     private var lastMessage by mutableStateOf("等待连接 ESP32-S3")
+    private var lastStmMessage by mutableStateOf("尚未收到 STM32 回包")
     private var isConnected by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,11 +83,17 @@ class MainActivity : ComponentActivity() {
                     if (!connected) {
                         cancelRepeatedCommand()
                         cancelRepeatedLiftCommand()
+                        cancelRepeatedForeAftCommand()
                         cancelPendingServos()
                     }
                 }
             },
-            onMessage = { message -> runOnUiThread { lastMessage = message } },
+            onMessage = { message ->
+                runOnUiThread {
+                    lastMessage = message
+                    if (message.startsWith("STM,")) lastStmMessage = message
+                }
+            },
         )
 
         enableEdgeToEdge()
@@ -94,12 +103,19 @@ class MainActivity : ComponentActivity() {
                     connected = isConnected,
                     connectionText = connectionText,
                     lastMessage = lastMessage,
-                    onConnect = { host, port -> robotClient.connect(host, port) },
-                    onDisconnect = { stopMotion(); stopLift(); robotClient.disconnect() },
+                    lastStmMessage = lastStmMessage,
+                    onConnect = { host, port ->
+                        lastStmMessage = "尚未收到 STM32 回包"
+                        robotClient.connect(host, port)
+                    },
+                    onDisconnect = { stopMotion(); stopLift(); stopForeAft(); robotClient.disconnect() },
+                    onDiagnose = { robotClient.sendDiagnostic() },
                     onStartMotion = ::startMotion,
                     onStopMotion = ::stopMotion,
                     onStartLift = ::startLift,
                     onStopLift = ::stopLift,
+                    onStartForeAft = ::startForeAft,
+                    onStopForeAft = ::stopForeAft,
                     onServoChange = ::queueServoAngle,
                     onServoFinished = ::sendServoAngle,
                 )
@@ -111,12 +127,14 @@ class MainActivity : ComponentActivity() {
         super.onStop()
         stopMotion()
         stopLift()
+        stopForeAft()
         cancelPendingServos()
     }
 
     override fun onDestroy() {
         stopMotion()
         stopLift()
+        stopForeAft()
         cancelPendingServos()
         robotClient.close()
         super.onDestroy()
@@ -174,6 +192,32 @@ class MainActivity : ComponentActivity() {
         repeatedLiftCommand = null
     }
 
+    private fun startForeAft(direction: Char) {
+        if (!isConnected) return
+        cancelRepeatedForeAftCommand()
+        activeForeAftDirection = direction
+        robotClient.sendMotion(direction)
+        repeatedForeAftCommand = object : Runnable {
+            override fun run() {
+                if (activeForeAftDirection == direction && isConnected) {
+                    robotClient.sendMotion(direction)
+                    commandHandler.postDelayed(this, COMMAND_INTERVAL_MS)
+                }
+            }
+        }.also { commandHandler.postDelayed(it, COMMAND_INTERVAL_MS) }
+    }
+
+    private fun stopForeAft() {
+        cancelRepeatedForeAftCommand()
+        activeForeAftDirection = null
+        robotClient.sendMotion('Q')
+    }
+
+    private fun cancelRepeatedForeAftCommand() {
+        repeatedForeAftCommand?.let(commandHandler::removeCallbacks)
+        repeatedForeAftCommand = null
+    }
+
     private fun queueServoAngle(channel: Char, angle: Int) {
         if (!isConnected) return
         pendingServoValues[channel] = angle
@@ -204,12 +248,16 @@ private fun RemoteControlScreen(
     connected: Boolean,
     connectionText: String,
     lastMessage: String,
+    lastStmMessage: String,
     onConnect: (String, Int) -> Unit,
     onDisconnect: () -> Unit,
+    onDiagnose: () -> Unit,
     onStartMotion: (Char) -> Unit,
     onStopMotion: () -> Unit,
     onStartLift: (Char) -> Unit,
     onStopLift: () -> Unit,
+    onStartForeAft: (Char) -> Unit,
+    onStopForeAft: () -> Unit,
     onServoChange: (Char, Int) -> Unit,
     onServoFinished: (Char, Int) -> Unit,
 ) {
@@ -291,6 +339,13 @@ private fun RemoteControlScreen(
             MotionButton("升", 'U', connected, onStartLift, onStopLift)
             MotionButton("降", 'D', connected, onStartLift, onStopLift)
         }
+        Spacer(Modifier.height(12.dp))
+        Text("机械臂前后：按住运动，松手停止", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            MotionButton("前", 'E', connected, onStartForeAft, onStopForeAft)
+            MotionButton("后", 'C', connected, onStartForeAft, onStopForeAft)
+        }
         Spacer(Modifier.height(16.dp))
         HorizontalDivider()
         Spacer(Modifier.height(12.dp))
@@ -299,6 +354,13 @@ private fun RemoteControlScreen(
         ServoAngleSlider("转盘 · PA8", 'T', 270, connected, onServoChange, onServoFinished)
         ServoAngleSlider("基座 · PC6", 'B', 360, connected, onServoChange, onServoFinished)
         Spacer(Modifier.height(16.dp))
+        Button(onClick = onDiagnose, enabled = connected, modifier = Modifier.fillMaxWidth()) {
+            Text("检测 USART2 与电机 ID 1/2")
+        }
+        Spacer(Modifier.height(8.dp))
+        Text("STM32 执行 / 诊断", style = MaterialTheme.typography.labelLarge)
+        Text(lastStmMessage, modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(8.dp))
         Text("ESP32 回复", style = MaterialTheme.typography.labelLarge)
         Text(lastMessage, modifier = Modifier.fillMaxWidth())
     }
@@ -410,7 +472,7 @@ private class RobotTcpClient(
     }
 
     fun sendMotion(direction: Char) {
-        if (direction !in charArrayOf('F', 'B', 'L', 'R', 'S', 'U', 'D', 'H')) return
+        if (direction !in charArrayOf('F', 'B', 'L', 'R', 'S', 'U', 'D', 'H', 'E', 'C', 'Q')) return
         val command = "CMD,${sequence.incrementAndGet()},$direction\n"
         sendExecutor.execute {
             val activeWriter = synchronized(lock) { writer } ?: return@execute
@@ -429,6 +491,21 @@ private class RobotTcpClient(
         val maximum = if (channel == 'B') 360 else 270
         if (channel !in charArrayOf('G', 'T', 'B') || angle !in 0..maximum) return
         val command = "SERVO,${sequence.incrementAndGet()},$channel,$angle\n"
+        sendExecutor.execute {
+            val activeWriter = synchronized(lock) { writer } ?: return@execute
+            try {
+                synchronized(activeWriter) {
+                    activeWriter.write(command)
+                    activeWriter.flush()
+                }
+            } catch (_: Exception) {
+                disconnect()
+            }
+        }
+    }
+
+    fun sendDiagnostic() {
+        val command = "DIAG,${sequence.incrementAndGet()}\n"
         sendExecutor.execute {
             val activeWriter = synchronized(lock) { writer } ?: return@execute
             try {
@@ -465,12 +542,16 @@ private fun RemoteControlPreview() {
             connected = false,
             connectionText = "未连接",
             lastMessage = "等待连接 ESP32-S3",
+            lastStmMessage = "尚未收到 STM32 回包",
             onConnect = { _, _ -> },
             onDisconnect = {},
+            onDiagnose = {},
             onStartMotion = {},
             onStopMotion = {},
             onStartLift = {},
             onStopLift = {},
+            onStartForeAft = {},
+            onStopForeAft = {},
             onServoChange = { _, _ -> },
             onServoFinished = { _, _ -> },
         )

@@ -24,6 +24,7 @@
 #define ROBOT_UART_TX_TIMEOUT_MS       20U
 
 static UART_HandleTypeDef *s_command_uart;
+static bool s_wheel_uart_ready;
 static char s_frame[ROBOT_COMMAND_MAX_LENGTH + 1U];
 static uint16_t s_frame_length;
 static bool s_dropping_frame;
@@ -31,29 +32,39 @@ static char s_motion = 'S';
 static bool s_motors_enabled;
 static uint32_t s_last_command_tick;
 static char s_lift_motion = 'H';
+static bool s_lift_command_ok = true;
 static uint32_t s_last_lift_tick;
+static char s_fore_aft_motion = 'Q';
+static bool s_fore_aft_command_ok = true;
+static uint32_t s_last_fore_aft_tick;
 
 static void RobotControl_Send(const char *message);
 static bool RobotControl_Parse(const char *frame, uint32_t *sequence,
                                char *direction);
 static bool RobotControl_ParseServo(const char *frame, uint32_t *sequence,
                                     char *channel, uint16_t *angle);
+static bool RobotControl_ParseDiag(const char *frame, uint32_t *sequence);
 static HAL_StatusTypeDef RobotControl_EnableMotors(void);
 static HAL_StatusTypeDef RobotControl_StopMotors(void);
 static HAL_StatusTypeDef RobotControl_ApplyMotion(char direction);
 static void RobotControl_HandleFrame(const char *frame);
 static void RobotControl_RecoverReceiveErrors(void);
 
-void RobotControl_Init(UART_HandleTypeDef *command_uart)
+void RobotControl_Init(UART_HandleTypeDef *command_uart, bool wheel_uart_ready)
 {
     s_command_uart = command_uart;
+    s_wheel_uart_ready = wheel_uart_ready;
     s_frame_length = 0U;
     s_dropping_frame = false;
     s_motion = 'S';
     s_motors_enabled = false;
     s_last_command_tick = HAL_GetTick();
     s_lift_motion = 'H';
+    s_lift_command_ok = true;
     s_last_lift_tick = HAL_GetTick();
+    s_fore_aft_motion = 'Q';
+    s_fore_aft_command_ok = true;
+    s_last_fore_aft_tick = HAL_GetTick();
 
     /* 上电时不使能电机；收到第一条有效运动命令时才使能。 */
     RobotControl_Send("READY\n");
@@ -126,7 +137,19 @@ void RobotControl_Tick(void)
         if (LiftMotor_Stop() == HAL_OK)
         {
             s_lift_motion = 'H';
+            s_lift_command_ok = true;
             RobotControl_Send("EVENT,LIFT,STOP,TIMEOUT\n");
+        }
+    }
+    if ((s_fore_aft_motion != 'Q') &&
+        ((uint32_t)(HAL_GetTick() - s_last_fore_aft_tick) >=
+         ROBOT_COMMAND_TIMEOUT_MS))
+    {
+        if (ArmMotor_StopForeAft() == HAL_OK)
+        {
+            s_fore_aft_motion = 'Q';
+            s_fore_aft_command_ok = true;
+            RobotControl_Send("EVENT,ARM_FORE_AFT,STOP,TIMEOUT\n");
         }
     }
 }
@@ -185,6 +208,9 @@ static bool RobotControl_Parse(const char *frame, uint32_t *sequence,
     case 'U':
     case 'D':
     case 'H':
+    case 'E':
+    case 'C':
+    case 'Q':
         *sequence = value;
         *direction = cursor[1];
         return true;
@@ -225,6 +251,23 @@ static bool RobotControl_ParseServo(const char *frame, uint32_t *sequence,
     if ((errno == ERANGE) || (*end != '\0') || (value > maximum))
         return false;
     *angle = (uint16_t)value;
+    return true;
+}
+
+static bool RobotControl_ParseDiag(const char *frame, uint32_t *sequence)
+{
+    char *end;
+    const char *cursor;
+    unsigned long value;
+
+    if (strncmp(frame, "DIAG,", 5U) != 0) return false;
+    cursor = frame + 5U;
+    if ((*cursor < '0') || (*cursor > '9')) return false;
+    errno = 0;
+    value = strtoul(cursor, &end, 10);
+    if ((errno == ERANGE) || (value > UINT32_MAX) || (*end != '\0'))
+        return false;
+    *sequence = (uint32_t)value;
     return true;
 }
 
@@ -360,7 +403,38 @@ static void RobotControl_HandleFrame(const char *frame)
     uint32_t sequence;
     char direction;
     uint16_t angle;
-    char response[40];
+    char response[64];
+
+    if (strncmp(frame, "DIAG,", 5U) == 0)
+    {
+        uint8_t uart_ready;
+        uint8_t id1_ready;
+        uint8_t id2_ready;
+        uint8_t status1 = 0xFFU;
+        uint8_t status2 = 0xFFU;
+        char diagnostic[80];
+        if (!RobotControl_ParseDiag(frame, &sequence))
+        {
+            RobotControl_Send("ERR,0,BAD_FRAME\n");
+            return;
+        }
+        snprintf(response, sizeof(response), "DIAG_BEGIN,%lu,UART1=%u\n",
+                 (unsigned long)sequence, (unsigned int)s_wheel_uart_ready);
+        RobotControl_Send(response);
+        uart_ready = LiftMotor_UartReady() ? 1U : 0U;
+        id1_ready = LiftMotor_Probe(1U) ? 1U : 0U;
+        id2_ready = LiftMotor_Probe(2U) ? 1U : 0U;
+        if (id1_ready != 0U) (void)LiftMotor_ReadStatus(1U, &status1);
+        if (id2_ready != 0U) (void)LiftMotor_ReadStatus(2U, &status2);
+        snprintf(diagnostic, sizeof(diagnostic),
+                 "DIAG,%lu,UART2=%u,ID1=%u,FW1=%c,S1=%02X,ID2=%u,FW2=%c,S2=%02X\n",
+                 (unsigned long)sequence, (unsigned int)uart_ready,
+                 (unsigned int)id1_ready, LiftMotor_FirmwareCode(1U),
+                 (unsigned int)status1, (unsigned int)id2_ready,
+                 LiftMotor_FirmwareCode(2U), (unsigned int)status2);
+        RobotControl_Send(diagnostic);
+        return;
+    }
 
     if (strncmp(frame, "SERVO,", 6U) == 0)
     {
@@ -392,19 +466,48 @@ static void RobotControl_HandleFrame(const char *frame)
     if ((direction == 'U') || (direction == 'D') || (direction == 'H'))
     {
         s_last_lift_tick = HAL_GetTick();
-        if (direction == s_lift_motion)
+        if ((direction == s_lift_motion) && s_lift_command_ok)
         {
             return;
         }
         if (((direction == 'H') ? LiftMotor_Stop() :
              LiftMotor_Move(direction)) != HAL_OK)
         {
-            snprintf(response, sizeof(response), "ERR,%lu,LIFT_MOTOR\n",
-                     (unsigned long)sequence);
+            /* The command may have reached the motor even without an ACK. */
+            if (direction != 'H') s_lift_motion = direction;
+            s_lift_command_ok = false;
+            snprintf(response, sizeof(response), "ERR,%lu,LIFT_MOTOR,%s\n",
+                     (unsigned long)sequence, LiftMotor_LastError(1U));
             RobotControl_Send(response);
             return;
         }
         s_lift_motion = direction;
+        s_lift_command_ok = true;
+        snprintf(response, sizeof(response), "EXEC,%lu,%c\n",
+                 (unsigned long)sequence, direction);
+        RobotControl_Send(response);
+        return;
+    }
+
+    if ((direction == 'E') || (direction == 'C') || (direction == 'Q'))
+    {
+        s_last_fore_aft_tick = HAL_GetTick();
+        if ((direction == s_fore_aft_motion) && s_fore_aft_command_ok)
+        {
+            return;
+        }
+        if (((direction == 'Q') ? ArmMotor_StopForeAft() :
+             ArmMotor_MoveForeAft(direction)) != HAL_OK)
+        {
+            if (direction != 'Q') s_fore_aft_motion = direction;
+            s_fore_aft_command_ok = false;
+            snprintf(response, sizeof(response), "ERR,%lu,ARM_FORE_AFT_MOTOR,%s\n",
+                     (unsigned long)sequence, LiftMotor_LastError(2U));
+            RobotControl_Send(response);
+            return;
+        }
+        s_fore_aft_motion = direction;
+        s_fore_aft_command_ok = true;
         snprintf(response, sizeof(response), "EXEC,%lu,%c\n",
                  (unsigned long)sequence, direction);
         RobotControl_Send(response);

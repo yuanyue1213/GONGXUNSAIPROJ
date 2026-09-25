@@ -66,7 +66,7 @@ UART_HandleTypeDef huart3;
 void SystemClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_USART1_UART_Init(void);
+static bool MX_USART1_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 static bool MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
@@ -90,6 +90,7 @@ int main(void)
 
   /* USER CODE BEGIN 1 */
   bool lift_uart_ready;
+  bool wheel_uart_ready;
 
   /* USER CODE END 1 */
 
@@ -114,14 +115,14 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_USART1_UART_Init();
   MX_USART3_UART_Init();
+  wheel_uart_ready = MX_USART1_UART_Init();
   lift_uart_ready = MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  ZDT_Motor_Init(&huart1, true, 20U);
+  ZDT_Motor_Init(wheel_uart_ready ? &huart1 : NULL, true, 20U);
   LiftMotor_Init(lift_uart_ready ? &huart2 : NULL);
   ServoControl_Init();
-  RobotControl_Init(&huart3);
+  RobotControl_Init(&huart3, wheel_uart_ready);
 
 #if ZDT_MOTOR_TEST_ENABLE
   ZDT_Motor_Test();
@@ -205,7 +206,7 @@ void SystemClock_Config(void)
   * @param None
   * @retval None
   */
-static void MX_USART1_UART_Init(void)
+static bool MX_USART1_UART_Init(void)
 {
 
   /* USER CODE BEGIN USART1_Init 0 */
@@ -228,24 +229,25 @@ static void MX_USART1_UART_Init(void)
   huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
   if (HAL_UART_Init(&huart1) != HAL_OK)
   {
-    Error_Handler();
+    return false;
   }
   if (HAL_UARTEx_SetTxFifoThreshold(&huart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
   {
-    Error_Handler();
+    return false;
   }
   if (HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
   {
-    Error_Handler();
+    return false;
   }
   if (HAL_UARTEx_DisableFifoMode(&huart1) != HAL_OK)
   {
-    Error_Handler();
+    return false;
   }
   /* USER CODE BEGIN USART1_Init 2 */
 
   /* USER CODE END USART1_Init 2 */
 
+  return true;
 }
 
 /**

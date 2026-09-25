@@ -42,10 +42,14 @@ typedef enum {
     LIFT_UP = 'U',
     LIFT_DOWN = 'D',
     LIFT_HOLD = 'H',
+    ARM_FORWARD = 'E',
+    ARM_BACKWARD = 'C',
+    ARM_FORE_AFT_HOLD = 'Q',
 } motion_t;
 
 static motion_t current_motion = MOTION_STOP;
 static motion_t current_lift = LIFT_HOLD;
+static motion_t current_fore_aft = ARM_FORE_AFT_HOLD;
 
 static void set_motion(motion_t motion)
 {
@@ -139,6 +143,9 @@ static bool parse_command(const char *frame, uint32_t *sequence, motion_t *motio
     case 'U':
     case 'D':
     case 'H':
+    case 'E':
+    case 'C':
+    case 'Q':
         *sequence = value;
         *motion = (motion_t)cursor[1];
         return true;
@@ -173,6 +180,22 @@ static bool parse_servo(const char *frame, uint32_t *sequence,
     value = strtoul(cursor, &end, 10);
     if (errno == ERANGE || *end != '\0' || value > maximum) return false;
     *angle = (uint16_t)value;
+    return true;
+}
+
+static bool parse_diagnostic(const char *frame, uint32_t *sequence)
+{
+    const char *cursor;
+    char *end;
+    unsigned long value;
+
+    if (strncmp(frame, "DIAG,", 5) != 0) return false;
+    cursor = frame + 5;
+    if (*cursor < '0' || *cursor > '9') return false;
+    errno = 0;
+    value = strtoul(cursor, &end, 10);
+    if (errno == ERANGE || value > UINT32_MAX || *end != '\0') return false;
+    *sequence = (uint32_t)value;
     return true;
 }
 
@@ -211,10 +234,27 @@ static bool forward_stm32_messages(int socket_fd, char *frame,
 
 static bool handle_frame(int socket_fd, const char *frame,
                          int64_t *last_command_us,
-                         int64_t *last_lift_us)
+                         int64_t *last_lift_us,
+                         int64_t *last_fore_aft_us)
 {
     uint32_t sequence;
     motion_t motion;
+    if (strncmp(frame, "DIAG,", 5) == 0) {
+        char response[40];
+        char stm32_frame[MAX_FRAME_LENGTH + 2];
+        if (!parse_diagnostic(frame, &sequence)) {
+            return send_all(socket_fd, "ERR,0,BAD_FRAME\n");
+        }
+        snprintf(stm32_frame, sizeof(stm32_frame), "%s\n", frame);
+        if (!send_to_stm32(stm32_frame)) {
+            snprintf(response, sizeof(response), "ERR,%lu,STM_TX\n",
+                     (unsigned long)sequence);
+        } else {
+            snprintf(response, sizeof(response), "ACK,%lu,DIAG\n",
+                     (unsigned long)sequence);
+        }
+        return send_all(socket_fd, response);
+    }
     if (strncmp(frame, "SERVO,", 6) == 0) {
         char channel;
         uint16_t angle;
@@ -249,6 +289,10 @@ static bool handle_frame(int socket_fd, const char *frame,
     if (motion == LIFT_UP || motion == LIFT_DOWN || motion == LIFT_HOLD) {
         current_lift = motion;
         *last_lift_us = esp_timer_get_time();
+    } else if (motion == ARM_FORWARD || motion == ARM_BACKWARD ||
+               motion == ARM_FORE_AFT_HOLD) {
+        current_fore_aft = motion;
+        *last_fore_aft_us = esp_timer_get_time();
     } else {
         set_motion(motion);
         *last_command_us = esp_timer_get_time();
@@ -273,8 +317,10 @@ static void handle_client(int socket_fd)
 
     set_motion(MOTION_STOP);
     current_lift = LIFT_HOLD;
+    current_fore_aft = ARM_FORE_AFT_HOLD;
     (void)send_to_stm32("CMD,0,S\n");
     (void)send_to_stm32("CMD,0,H\n");
+    (void)send_to_stm32("CMD,0,Q\n");
     if (!send_all(socket_fd, "HELLO,1\n")) {
         return;
     }
@@ -286,6 +332,7 @@ static void handle_client(int socket_fd)
     bool dropping_oversized_frame = false;
     int64_t last_command_us = esp_timer_get_time();
     int64_t last_lift_us = esp_timer_get_time();
+    int64_t last_fore_aft_us = esp_timer_get_time();
 
     while (true) {
         if (!forward_stm32_messages(socket_fd, stm32_frame,
@@ -316,7 +363,7 @@ static void handle_client(int socket_fd)
                         }
                         frame[frame_length] = '\0';
                         if (!handle_frame(socket_fd, frame, &last_command_us,
-                                          &last_lift_us)) {
+                                          &last_lift_us, &last_fore_aft_us)) {
                             goto disconnected;
                         }
                     }
@@ -350,13 +397,23 @@ static void handle_client(int socket_fd)
                 break;
             }
         }
+        if (current_fore_aft != ARM_FORE_AFT_HOLD &&
+            esp_timer_get_time() - last_fore_aft_us >= COMMAND_TIMEOUT_MS * 1000LL) {
+            current_fore_aft = ARM_FORE_AFT_HOLD;
+            (void)send_to_stm32("CMD,0,Q\n");
+            if (!send_all(socket_fd, "EVENT,ARM_FORE_AFT,STOP,TIMEOUT\n")) {
+                break;
+            }
+        }
     }
 
 disconnected:
     set_motion(MOTION_STOP);
     current_lift = LIFT_HOLD;
+    current_fore_aft = ARM_FORE_AFT_HOLD;
     (void)send_to_stm32("CMD,0,S\n");
     (void)send_to_stm32("CMD,0,H\n");
+    (void)send_to_stm32("CMD,0,Q\n");
     ESP_LOGI(TAG, "client disconnected; motion stopped");
 }
 
