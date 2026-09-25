@@ -7,6 +7,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -25,9 +27,11 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -48,6 +52,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.roundToInt
 
 private const val COMMAND_INTERVAL_MS = 50L
 
@@ -55,6 +60,10 @@ class MainActivity : ComponentActivity() {
     private val commandHandler = Handler(Looper.getMainLooper())
     private var repeatedCommand: Runnable? = null
     private var activeDirection: Char? = null
+    private var repeatedLiftCommand: Runnable? = null
+    private var activeLiftDirection: Char? = null
+    private val pendingServoValues = mutableMapOf<Char, Int>()
+    private val pendingServoTasks = mutableMapOf<Char, Runnable>()
     private lateinit var robotClient: RobotTcpClient
 
     private var connectionText by mutableStateOf("未连接")
@@ -68,7 +77,11 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread {
                     isConnected = connected
                     connectionText = message
-                    if (!connected) cancelRepeatedCommand()
+                    if (!connected) {
+                        cancelRepeatedCommand()
+                        cancelRepeatedLiftCommand()
+                        cancelPendingServos()
+                    }
                 }
             },
             onMessage = { message -> runOnUiThread { lastMessage = message } },
@@ -82,9 +95,13 @@ class MainActivity : ComponentActivity() {
                     connectionText = connectionText,
                     lastMessage = lastMessage,
                     onConnect = { host, port -> robotClient.connect(host, port) },
-                    onDisconnect = { stopMotion(); robotClient.disconnect() },
+                    onDisconnect = { stopMotion(); stopLift(); robotClient.disconnect() },
                     onStartMotion = ::startMotion,
                     onStopMotion = ::stopMotion,
+                    onStartLift = ::startLift,
+                    onStopLift = ::stopLift,
+                    onServoChange = ::queueServoAngle,
+                    onServoFinished = ::sendServoAngle,
                 )
             }
         }
@@ -93,10 +110,14 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         stopMotion()
+        stopLift()
+        cancelPendingServos()
     }
 
     override fun onDestroy() {
         stopMotion()
+        stopLift()
+        cancelPendingServos()
         robotClient.close()
         super.onDestroy()
     }
@@ -126,6 +147,56 @@ class MainActivity : ComponentActivity() {
         repeatedCommand?.let(commandHandler::removeCallbacks)
         repeatedCommand = null
     }
+
+    private fun startLift(direction: Char) {
+        if (!isConnected) return
+        cancelRepeatedLiftCommand()
+        activeLiftDirection = direction
+        robotClient.sendMotion(direction)
+        repeatedLiftCommand = object : Runnable {
+            override fun run() {
+                if (activeLiftDirection == direction && isConnected) {
+                    robotClient.sendMotion(direction)
+                    commandHandler.postDelayed(this, COMMAND_INTERVAL_MS)
+                }
+            }
+        }.also { commandHandler.postDelayed(it, COMMAND_INTERVAL_MS) }
+    }
+
+    private fun stopLift() {
+        cancelRepeatedLiftCommand()
+        activeLiftDirection = null
+        robotClient.sendMotion('H')
+    }
+
+    private fun cancelRepeatedLiftCommand() {
+        repeatedLiftCommand?.let(commandHandler::removeCallbacks)
+        repeatedLiftCommand = null
+    }
+
+    private fun queueServoAngle(channel: Char, angle: Int) {
+        if (!isConnected) return
+        pendingServoValues[channel] = angle
+        if (pendingServoTasks.containsKey(channel)) return
+        val task = Runnable {
+            pendingServoTasks.remove(channel)
+            pendingServoValues.remove(channel)?.let { robotClient.sendServo(channel, it) }
+        }
+        pendingServoTasks[channel] = task
+        commandHandler.postDelayed(task, 50L)
+    }
+
+    private fun sendServoAngle(channel: Char, angle: Int) {
+        pendingServoTasks.remove(channel)?.let(commandHandler::removeCallbacks)
+        pendingServoValues.remove(channel)
+        if (isConnected) robotClient.sendServo(channel, angle)
+    }
+
+    private fun cancelPendingServos() {
+        pendingServoTasks.values.forEach(commandHandler::removeCallbacks)
+        pendingServoTasks.clear()
+        pendingServoValues.clear()
+    }
 }
 
 @Composable
@@ -137,13 +208,18 @@ private fun RemoteControlScreen(
     onDisconnect: () -> Unit,
     onStartMotion: (Char) -> Unit,
     onStopMotion: () -> Unit,
+    onStartLift: (Char) -> Unit,
+    onStopLift: () -> Unit,
+    onServoChange: (Char, Int) -> Unit,
+    onServoFinished: (Char, Int) -> Unit,
 ) {
     var host by mutableStateOf("192.168.4.1")
     var portText by mutableStateOf("3333")
     var addressError by mutableStateOf<String?>(null)
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 28.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text("小车遥控", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
@@ -206,9 +282,53 @@ private fun RemoteControlScreen(
         }
         Spacer(Modifier.height(8.dp))
         MotionButton("↓", 'B', connected, onStartMotion, onStopMotion)
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(12.dp))
+        Text("机械臂升降：按住运动，松手停止", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            MotionButton("升", 'U', connected, onStartLift, onStopLift)
+            MotionButton("降", 'D', connected, onStartLift, onStopLift)
+        }
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(12.dp))
+        Text("舵机角度（首次拖动后生效）", style = MaterialTheme.typography.titleMedium)
+        ServoAngleSlider("夹子 · PC8", 'G', 270, connected, onServoChange, onServoFinished)
+        ServoAngleSlider("转盘 · PA8", 'T', 270, connected, onServoChange, onServoFinished)
+        ServoAngleSlider("基座 · PC6", 'B', 360, connected, onServoChange, onServoFinished)
+        Spacer(Modifier.height(16.dp))
         Text("ESP32 回复", style = MaterialTheme.typography.labelLarge)
         Text(lastMessage, modifier = Modifier.fillMaxWidth())
+    }
+}
+
+@Composable
+private fun ServoAngleSlider(
+    label: String,
+    channel: Char,
+    maximum: Int,
+    enabled: Boolean,
+    onChange: (Char, Int) -> Unit,
+    onFinished: (Char, Int) -> Unit,
+) {
+    var angle by remember(channel) { mutableStateOf(maximum / 2) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text("$label：$angle°")
+        Slider(
+            value = angle.toFloat(),
+            onValueChange = {
+                val next = it.roundToInt().coerceIn(0, maximum)
+                if (next != angle) {
+                    angle = next
+                    onChange(channel, next)
+                }
+            },
+            onValueChangeFinished = { onFinished(channel, angle) },
+            valueRange = 0f..maximum.toFloat(),
+            enabled = enabled,
+        )
     }
 }
 
@@ -290,8 +410,25 @@ private class RobotTcpClient(
     }
 
     fun sendMotion(direction: Char) {
-        if (direction !in charArrayOf('F', 'B', 'L', 'R', 'S')) return
+        if (direction !in charArrayOf('F', 'B', 'L', 'R', 'S', 'U', 'D', 'H')) return
         val command = "CMD,${sequence.incrementAndGet()},$direction\n"
+        sendExecutor.execute {
+            val activeWriter = synchronized(lock) { writer } ?: return@execute
+            try {
+                synchronized(activeWriter) {
+                    activeWriter.write(command)
+                    activeWriter.flush()
+                }
+            } catch (_: Exception) {
+                disconnect()
+            }
+        }
+    }
+
+    fun sendServo(channel: Char, angle: Int) {
+        val maximum = if (channel == 'B') 360 else 270
+        if (channel !in charArrayOf('G', 'T', 'B') || angle !in 0..maximum) return
+        val command = "SERVO,${sequence.incrementAndGet()},$channel,$angle\n"
         sendExecutor.execute {
             val activeWriter = synchronized(lock) { writer } ?: return@execute
             try {
@@ -332,6 +469,10 @@ private fun RemoteControlPreview() {
             onDisconnect = {},
             onStartMotion = {},
             onStopMotion = {},
+            onStartLift = {},
+            onStopLift = {},
+            onServoChange = { _, _ -> },
+            onServoFinished = { _, _ -> },
         )
     }
 }

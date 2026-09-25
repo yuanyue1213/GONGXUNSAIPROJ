@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include "zdt_motor.h"
 #include "robot_control.h"
+#include "lift_motor.h"
+#include "servo_control.h"
 
 /* USER CODE END Includes */
 
@@ -53,6 +55,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
@@ -65,6 +68,7 @@ static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART3_UART_Init(void);
+static bool MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 #if ZDT_MOTOR_TEST_ENABLE
 static void ZDT_Motor_Test(void);
@@ -85,6 +89,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+  bool lift_uart_ready;
 
   /* USER CODE END 1 */
 
@@ -111,8 +116,11 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
+  lift_uart_ready = MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   ZDT_Motor_Init(&huart1, true, 20U);
+  LiftMotor_Init(lift_uart_ready ? &huart2 : NULL);
+  ServoControl_Init();
   RobotControl_Init(&huart3);
 
 #if ZDT_MOTOR_TEST_ENABLE
@@ -241,6 +249,56 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static bool MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    return false;
+  }
+  if (__HAL_RCC_USART2_IS_CLK_ENABLED() == 0U) return false;
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    return false;
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    return false;
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
+  {
+    return false;
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+  return true;
+}
+
+/**
   * @brief USART3 Initialization Function
   * @param None
   * @retval None
@@ -301,8 +359,8 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
