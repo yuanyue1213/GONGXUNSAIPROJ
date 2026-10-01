@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/robot_control.c
     Core/Src/lift_motor.c
     Core/Src/servo_control.c
+    Core/Src/camera_link.c
 )
 
 # Add include paths

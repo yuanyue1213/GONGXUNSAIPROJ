@@ -1,5 +1,7 @@
 #include "servo_control.h"
 
+/* 舵机 PWM：20 ms 周期即 50 Hz，脉宽 500~2500 us 对应角度范围。
+ * G 夹子 PC8/TIM3_CH3，T 转盘 PA8/TIM1_CH1，B 基座 PC6/TIM3_CH1。 */
 #define SERVO_PERIOD_US  20000U
 #define SERVO_MIN_US       500U
 #define SERVO_MAX_US      2500U
@@ -12,6 +14,7 @@ static bool s_gripper_started;
 static bool s_turntable_started;
 static bool s_base_started;
 
+/* 定时器分频为 1 MHz，即每个计数 1 us，方便直接使用脉宽更新比较值。 */
 static bool ServoControl_InitTimer(TIM_HandleTypeDef *timer,
                                    TIM_TypeDef *instance,
                                    uint32_t timer_clock)
@@ -86,6 +89,8 @@ void ServoControl_Init(void)
     s_tim3_ready = ServoControl_InitTimer(&s_tim3, TIM3, tim3_clock);
 }
 
+/* G/T 使用 0~270°，B 使用 0~360°；先校验再线性换算 PWM 脉宽。
+ * 每个通道首次收到角度才启动 PWM，避免上电初始化就改变舵机姿态。 */
 bool ServoControl_SetAngle(char channel, uint16_t angle)
 {
     TIM_HandleTypeDef *timer;
@@ -122,6 +127,7 @@ bool ServoControl_SetAngle(char channel, uint16_t angle)
     }
     if (angle > max_angle) return false;
 
+    /* pulse = 500 + round(angle / max_angle × 2000)，单位 us。 */
     pulse = SERVO_MIN_US + ((uint32_t)angle *
             (SERVO_MAX_US - SERVO_MIN_US) + max_angle / 2U) / max_angle;
     __HAL_TIM_SET_COMPARE(timer, tim_channel, pulse);

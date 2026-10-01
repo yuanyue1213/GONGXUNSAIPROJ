@@ -1,3 +1,10 @@
+/*
+ * ESP32-S3 小车遥控桥接程序。
+ * 数据路径：手机 App --Wi-Fi/TCP--> ESP32 --UART1--> STM32。
+ * STM32 负责距离换算后的四轮电机控制、机械臂和舵机执行；
+ * ESP32 负责命令校验、单向转发及通信中断时请求停车。
+ * ASCII 协议每行以 \n 结束，具体字段见 esp32s3/PROTOCOL.md。
+ */
 #include <errno.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -8,6 +15,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #include "esp_err.h"
 #include "esp_event.h"
@@ -17,15 +25,22 @@
 #include "esp_wifi.h"
 #include "driver/uart.h"
 #include "nvs_flash.h"
+#include "../../../shared/robot_distance_protocol.h"
+#include "../../../shared/camera_position_protocol.h"
 
+/* 手机连接此热点，再连接 TCP 3333 端口；最多允许一个 Wi-Fi 客户端。 */
 #define WIFI_SSID               "RobotCar-ESP32S3"
 #define WIFI_PASSWORD           "robotcar123"
 #define TCP_PORT                3333
+/* 机械臂升降超过 250 ms 未续期时请求停止；底盘和前后定距无心跳超时。
+ * socket 最多等待 100 ms，让主循环定期处理机械臂超时检查。
+ * 命令上限为 63 字节（不含换行），超长命令丢弃到下一换行。 */
 #define COMMAND_TIMEOUT_MS      250
 #define SOCKET_TIMEOUT_MS       100
 #define MAX_FRAME_LENGTH        63
 #define STM32_UART_PORT         UART_NUM_1
-/* ESP32-S3 TX -> STM32 PB11, ESP32-S3 RX <- STM32 PB10. */
+/* 交叉接线：GPIO17 TX -> STM32 PB11 RX，GPIO18 RX <- STM32 PB10 TX。
+ * 两板必须共地；ESP32 的 UART1 对接 STM32 的 USART3，串口编号无需相同。 */
 #define STM32_UART_TX_GPIO      17
 #define STM32_UART_RX_GPIO      18
 #define STM32_UART_BAUD_RATE    115200
@@ -33,6 +48,8 @@
 
 static const char *TAG = "robot_remote";
 
+/* 协议字符：S 停底盘，U/D/H 升/降/停，Q 停止前后移动；E/C 只用于 ARM_MOVE 的方向。
+ * F/B/L/R 只作为 MOVE 的方向，不再接受旧的连续底盘 CMD 命令。 */
 typedef enum {
     MOTION_STOP = 'S',
     MOTION_FORWARD = 'F',
@@ -42,23 +59,14 @@ typedef enum {
     LIFT_UP = 'U',
     LIFT_DOWN = 'D',
     LIFT_HOLD = 'H',
-    ARM_FORWARD = 'E',
-    ARM_BACKWARD = 'C',
     ARM_FORE_AFT_HOLD = 'Q',
 } motion_t;
 
-static motion_t current_motion = MOTION_STOP;
+/* 仅升降维护续期状态；底盘和前后定距只转发命令，不等待回包。 */
 static motion_t current_lift = LIFT_HOLD;
-static motion_t current_fore_aft = ARM_FORE_AFT_HOLD;
 
-static void set_motion(motion_t motion)
-{
-    if (current_motion != motion) {
-        current_motion = motion;
-        ESP_LOGI(TAG, "motion=%c", (char)motion);
-    }
-}
-
+/* 初始化桥接串口：115200 波特率、8 数据位、无校验、1 停止位。
+ * 驱动提供发送缓冲；应用不读取或转发 STM32 回包。 */
 static void start_stm32_uart(void)
 {
     const uart_config_t config = {
@@ -78,11 +86,10 @@ static void start_stm32_uart(void)
                                         STM32_UART_BUFFER_SIZE,
                                         STM32_UART_BUFFER_SIZE,
                                         0, NULL, 0));
-    ESP_LOGI(TAG, "STM32 UART ready: UART%d TX=%d RX=%d, %d baud",
-             STM32_UART_PORT, STM32_UART_TX_GPIO, STM32_UART_RX_GPIO,
-             STM32_UART_BAUD_RATE);
 }
 
+/* frame 必须已包含换行。成功仅表示全部字节交给 UART 驱动，
+ * 不保证 STM32 已收到或执行；本协议不返回执行结果。 */
 static bool send_to_stm32(const char *frame)
 {
     int expected = (int)strlen(frame);
@@ -95,20 +102,8 @@ static bool send_to_stm32(const char *frame)
     return true;
 }
 
-static bool send_all(int socket_fd, const char *data)
-{
-    size_t remaining = strlen(data);
-    while (remaining > 0) {
-        ssize_t sent = send(socket_fd, data, remaining, 0);
-        if (sent <= 0) {
-            return false;
-        }
-        data += sent;
-        remaining -= (size_t)sent;
-    }
-    return true;
-}
-
+/* 校验 CMD,<无符号32位序号>,<单字符动作>，不含换行。
+ * 检查数字溢出、字段分隔和尾部字符；序号 0 用于自动停车命令。 */
 static bool parse_command(const char *frame, uint32_t *sequence, motion_t *motion)
 {
     if (strncmp(frame, "CMD,", 4) != 0) {
@@ -135,16 +130,14 @@ static bool parse_command(const char *frame, uint32_t *sequence, motion_t *motio
     }
 
     switch (cursor[1]) {
+    case 'I': /* App 启动原点初始化 */
+    case 'O': /* 返回启动原点 */
+    case 'A': /* 抓取固定状态 */
+    case 'Z': /* 取消自动舵机步骤 */
     case 'S':
-    case 'F':
-    case 'B':
-    case 'L':
-    case 'R':
     case 'U':
     case 'D':
     case 'H':
-    case 'E':
-    case 'C':
     case 'Q':
         *sequence = value;
         *motion = (motion_t)cursor[1];
@@ -154,6 +147,8 @@ static bool parse_command(const char *frame, uint32_t *sequence, motion_t *motio
     }
 }
 
+/* SERVO,seq,channel,angle：G 夹子、T 转盘、B 基座。
+ * G/T 最大 270°，B 最大 360°；角度校验后原样转交 STM32。 */
 static bool parse_servo(const char *frame, uint32_t *sequence,
                         char *channel, uint16_t *angle)
 {
@@ -183,129 +178,57 @@ static bool parse_servo(const char *frame, uint32_t *sequence,
     return true;
 }
 
-static bool parse_diagnostic(const char *frame, uint32_t *sequence)
-{
-    const char *cursor;
-    char *end;
-    unsigned long value;
-
-    if (strncmp(frame, "DIAG,", 5) != 0) return false;
-    cursor = frame + 5;
-    if (*cursor < '0' || *cursor > '9') return false;
-    errno = 0;
-    value = strtoul(cursor, &end, 10);
-    if (errno == ERANGE || value > UINT32_MAX || *end != '\0') return false;
-    *sequence = (uint32_t)value;
-    return true;
-}
-
-/* Forwards complete STM32 lines to the phone as STM,<original line>\n. */
-static bool forward_stm32_messages(int socket_fd, char *frame,
-                                   size_t *frame_length)
-{
-    uint8_t incoming[128];
-    int received = uart_read_bytes(STM32_UART_PORT, incoming,
-                                   sizeof(incoming), 0);
-
-    for (int index = 0; index < received; ++index) {
-        char character = (char)incoming[index];
-        if (character == '\n') {
-            if (*frame_length > 0 && frame[*frame_length - 1] == '\r') {
-                --*frame_length;
-            }
-            frame[*frame_length] = '\0';
-            if (*frame_length > 0) {
-                char response[MAX_FRAME_LENGTH + 6];
-                snprintf(response, sizeof(response), "STM,%s\n", frame);
-                if (!send_all(socket_fd, response)) {
-                    return false;
-                }
-            }
-            *frame_length = 0;
-        } else if (*frame_length < MAX_FRAME_LENGTH) {
-            frame[(*frame_length)++] = character;
-        } else {
-            /* Drop the malformed line and resume on its next newline. */
-            *frame_length = 0;
-        }
-    }
-    return true;
-}
-
-static bool handle_frame(int socket_fd, const char *frame,
-                         int64_t *last_command_us,
-                         int64_t *last_lift_us,
-                         int64_t *last_fore_aft_us)
+/* 单向命令：非法帧直接丢弃，UART 写失败则结束连接并请求停车。
+ * ESP32 不维护底盘 BUSY 状态，由 STM32 在本地判断是否接受新 MOVE。 */
+static bool handle_frame(const char *frame, int64_t *last_lift_us)
 {
     uint32_t sequence;
     motion_t motion;
-    if (strncmp(frame, "DIAG,", 5) == 0) {
-        char response[40];
-        char stm32_frame[MAX_FRAME_LENGTH + 2];
-        if (!parse_diagnostic(frame, &sequence)) {
-            return send_all(socket_fd, "ERR,0,BAD_FRAME\n");
-        }
-        snprintf(stm32_frame, sizeof(stm32_frame), "%s\n", frame);
-        if (!send_to_stm32(stm32_frame)) {
-            snprintf(response, sizeof(response), "ERR,%lu,STM_TX\n",
-                     (unsigned long)sequence);
-        } else {
-            snprintf(response, sizeof(response), "ACK,%lu,DIAG\n",
-                     (unsigned long)sequence);
-        }
-        return send_all(socket_fd, response);
-    }
-    if (strncmp(frame, "SERVO,", 6) == 0) {
+    if (strncmp(frame, "ARM_POSE,", 9U) == 0) {
+        RobotArmPoseCommand command;
+        if (!RobotProtocol_ParseArmPose(frame, &command)) return true;
+    } else if (strncmp(frame, "LIFT_MOVE,", 10U) == 0) {
+        RobotLiftDistanceCommand command;
+        if (!RobotProtocol_ParseLiftDistance(frame, &command)) return true;
+    } else if (strncmp(frame, "LIFT_ANGLE,", 11U) == 0) {
+        RobotLiftAngleCommand command;
+        if (!RobotProtocol_ParseLiftAngle(frame, &command)) return true;
+    } else if (strncmp(frame, "ALIGN,", 6U) == 0) {
+        CameraAlignCommand command;
+        if (!CameraProtocol_ParseAlign(frame, &command)) return true;
+    } else if (strncmp(frame, "ARM_MOVE,", 9U) == 0) {
+        RobotArmDistanceCommand command;
+        if (!RobotProtocol_ParseArmDistance(frame, &command)) return true;
+    } else if (strncmp(frame, "MOVE,", 5U) == 0) {
+        RobotDistanceCommand command;
+        if (!RobotProtocol_ParseMove(frame, &command) ||
+            RobotProtocol_MovePulses(&command) == 0U) return true;
+    } else if (strncmp(frame, "SERVO,", 6U) == 0) {
         char channel;
         uint16_t angle;
-        char response[48];
-        if (!parse_servo(frame, &sequence, &channel, &angle)) {
-            return send_all(socket_fd, "ERR,0,BAD_FRAME\n");
-        }
-        char stm32_frame[MAX_FRAME_LENGTH + 2];
-        snprintf(stm32_frame, sizeof(stm32_frame), "%s\n", frame);
-        if (!send_to_stm32(stm32_frame)) {
-            snprintf(response, sizeof(response), "ERR,%lu,STM_TX\n",
-                     (unsigned long)sequence);
-        } else {
-            snprintf(response, sizeof(response), "ACK,%lu,SERVO,%c,%u\n",
-                     (unsigned long)sequence, channel, (unsigned int)angle);
-        }
-        return send_all(socket_fd, response);
-    }
-    if (!parse_command(frame, &sequence, &motion)) {
-        return send_all(socket_fd, "ERR,0,BAD_FRAME\n");
-    }
-
-    char stm32_frame[MAX_FRAME_LENGTH + 2];
-    snprintf(stm32_frame, sizeof(stm32_frame), "%s\n", frame);
-    if (!send_to_stm32(stm32_frame)) {
-        char error[40];
-        snprintf(error, sizeof(error), "ERR,%lu,STM_TX\n",
-                 (unsigned long)sequence);
-        return send_all(socket_fd, error);
-    }
-
-    if (motion == LIFT_UP || motion == LIFT_DOWN || motion == LIFT_HOLD) {
-        current_lift = motion;
-        *last_lift_us = esp_timer_get_time();
-    } else if (motion == ARM_FORWARD || motion == ARM_BACKWARD ||
-               motion == ARM_FORE_AFT_HOLD) {
-        current_fore_aft = motion;
-        *last_fore_aft_us = esp_timer_get_time();
+        if (!parse_servo(frame, &sequence, &channel, &angle)) return true;
     } else {
-        set_motion(motion);
-        *last_command_us = esp_timer_get_time();
+        if (!parse_command(frame, &sequence, &motion)) return true;
+        char command[MAX_FRAME_LENGTH + 2];
+        snprintf(command, sizeof(command), "%s\n", frame);
+        if (!send_to_stm32(command)) return false;
+        if (motion == LIFT_UP || motion == LIFT_DOWN || motion == LIFT_HOLD) {
+            current_lift = motion;
+            *last_lift_us = esp_timer_get_time();
+        }
+        return true;
     }
-
-    char response[40];
-    /* ACK confirms that ESP32 accepted and forwarded the command. STM32's
-     * execution result arrives later as STM,EXEC,<seq>,<dir>. */
-    snprintf(response, sizeof(response), "ACK,%lu,%c\n",
-             (unsigned long)sequence, (char)motion);
-    return send_all(socket_fd, response);
+    char command[MAX_FRAME_LENGTH + 2];
+    snprintf(command, sizeof(command), "%s\n", frame);
+    bool sent = send_to_stm32(command);
+    /* Autonomous lift angle tests do not use the continuous-lift renewal timer. */
+    if (sent && (strncmp(frame, "ARM_POSE,", 9U) == 0 || strncmp(frame, "LIFT_ANGLE,", 11U) == 0 ||
+                 strncmp(frame, "LIFT_MOVE,", 10U) == 0)) current_lift = LIFT_HOLD;
+    return sent;
 }
 
+/* 在同一个循环内处理一个 TCP 客户端：命令组帧和机械臂超时停车。
+ * recv 等待超时不是断线；返回 0 或其他网络错误才退出。 */
 static void handle_client(int socket_fd)
 {
     struct timeval timeout = {
@@ -313,33 +236,25 @@ static void handle_client(int socket_fd)
         .tv_usec = SOCKET_TIMEOUT_MS * 1000,
     };
     setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    /* 小型命令/STOP 帧立即提交 TCP，减少 Nagle 合包造成的延迟。 */
+    int no_delay = 1;
+    setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay));
 
-    set_motion(MOTION_STOP);
+    /* 新连接先请求三轴停止，避免继承上次连接的运动。 */
     current_lift = LIFT_HOLD;
-    current_fore_aft = ARM_FORE_AFT_HOLD;
+    (void)send_to_stm32("CMD,0,Z\n");
     (void)send_to_stm32("CMD,0,S\n");
     (void)send_to_stm32("CMD,0,H\n");
     (void)send_to_stm32("CMD,0,Q\n");
-    if (!send_all(socket_fd, "HELLO,1\n")) {
-        return;
-    }
 
+    /* TCP 是字节流，一次 recv 可以包含半条或多条命令。
+     * frame_length 保留半帧；超长时丢弃到换行后再接收下一帧。 */
     char frame[MAX_FRAME_LENGTH + 1];
-    char stm32_frame[MAX_FRAME_LENGTH + 1];
     size_t frame_length = 0;
-    size_t stm32_frame_length = 0;
     bool dropping_oversized_frame = false;
-    int64_t last_command_us = esp_timer_get_time();
     int64_t last_lift_us = esp_timer_get_time();
-    int64_t last_fore_aft_us = esp_timer_get_time();
 
     while (true) {
-        if (!forward_stm32_messages(socket_fd, stm32_frame,
-                                    &stm32_frame_length)) {
-            break;
-        }
-
         char incoming[128];
         ssize_t received = recv(socket_fd, incoming, sizeof(incoming), 0);
         if (received == 0) {
@@ -353,17 +268,14 @@ static void handle_client(int socket_fd)
             for (ssize_t index = 0; index < received; ++index) {
                 char character = incoming[index];
                 if (character == '\n') {
-                    if (dropping_oversized_frame) {
-                        if (!send_all(socket_fd, "ERR,0,TOO_LONG\n")) {
-                            goto disconnected;
-                        }
-                    } else {
+                    if (!dropping_oversized_frame) {
+                        /* 同时兼容 LF 和 CRLF 行结束符。 */
                         if (frame_length > 0 && frame[frame_length - 1] == '\r') {
                             --frame_length;
                         }
                         frame[frame_length] = '\0';
-                        if (!handle_frame(socket_fd, frame, &last_command_us,
-                                          &last_lift_us, &last_fore_aft_us)) {
+                        if (!handle_frame(frame,
+                                          &last_lift_us)) {
                             goto disconnected;
                         }
                     }
@@ -379,44 +291,26 @@ static void handle_client(int socket_fd)
             }
         }
 
-        /* A deliberate S command already stopped the car.  Only report a
-         * timeout when a moving car actually loses its command stream. */
-        if (current_motion != MOTION_STOP &&
-            esp_timer_get_time() - last_command_us >= COMMAND_TIMEOUT_MS * 1000LL) {
-            set_motion(MOTION_STOP);
-            (void)send_to_stm32("CMD,0,S\n");
-            if (!send_all(socket_fd, "EVENT,STOP,TIMEOUT\n")) {
-                break;
-            }
-        }
+        /* 升降按住时由 App 连续发 U/D 续期，松手 H 或超时都会请求停止。 */
         if (current_lift != LIFT_HOLD &&
             esp_timer_get_time() - last_lift_us >= COMMAND_TIMEOUT_MS * 1000LL) {
             current_lift = LIFT_HOLD;
             (void)send_to_stm32("CMD,0,H\n");
-            if (!send_all(socket_fd, "EVENT,LIFT,STOP,TIMEOUT\n")) {
-                break;
-            }
         }
-        if (current_fore_aft != ARM_FORE_AFT_HOLD &&
-            esp_timer_get_time() - last_fore_aft_us >= COMMAND_TIMEOUT_MS * 1000LL) {
-            current_fore_aft = ARM_FORE_AFT_HOLD;
-            (void)send_to_stm32("CMD,0,Q\n");
-            if (!send_all(socket_fd, "EVENT,ARM_FORE_AFT,STOP,TIMEOUT\n")) {
-                break;
-            }
-        }
+
     }
 
 disconnected:
-    set_motion(MOTION_STOP);
+    /* 断线或转发失败时请求三轴停止，STM32 另有任务总时限和电机故障保护。
+     * 此处不复位舵机角度，也不将请求停车视为已经收到停止确认。 */
     current_lift = LIFT_HOLD;
-    current_fore_aft = ARM_FORE_AFT_HOLD;
+    (void)send_to_stm32("CMD,0,Z\n");
     (void)send_to_stm32("CMD,0,S\n");
     (void)send_to_stm32("CMD,0,H\n");
     (void)send_to_stm32("CMD,0,Q\n");
-    ESP_LOGI(TAG, "client disconnected; motion stopped");
 }
 
+/* 初始化网络接口和事件循环，以 WPA2 热点模式提供本地遥控网络。 */
 static void start_wifi_ap(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
@@ -439,11 +333,11 @@ static void start_wifi_ap(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "Wi-Fi AP ready: SSID=%s, TCP port=%d", WIFI_SSID, TCP_PORT);
 }
 
 void app_main(void)
 {
+    /* Wi-Fi 使用 NVS；分区无空闲页或版本不兼容时擦除并重新初始化。 */
     esp_err_t nvs_result = nvs_flash_init();
     if (nvs_result == ESP_ERR_NVS_NO_FREE_PAGES ||
         nvs_result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -454,6 +348,7 @@ void app_main(void)
     start_stm32_uart();
     start_wifi_ap();
 
+    /* 建立 IPv4 TCP 服务，监听本机所有网络接口的 3333 端口。 */
     int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (listen_fd < 0) {
         ESP_LOGE(TAG, "socket failed: errno=%d", errno);
@@ -475,13 +370,13 @@ void app_main(void)
         return;
     }
 
+    /* 串行服务客户端：上一连接结束并关闭后，才 accept 下一连接。 */
     while (true) {
         int client_fd = accept(listen_fd, NULL, NULL);
         if (client_fd < 0) {
             ESP_LOGW(TAG, "accept failed: errno=%d", errno);
             continue;
         }
-        ESP_LOGI(TAG, "client connected");
         handle_client(client_fd);
         close(client_fd);
     }
