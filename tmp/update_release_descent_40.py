@@ -1,0 +1,5 @@
+from pathlib import Path
+p=Path('yundong_part/stm32h743/zhukong/Core/Src/robot_control.c');s=p.read_text(encoding='utf-8');assert '{ 0U, 263U, 1300, -100, true}' in s;s=s.replace('{ 0U, 263U, 1300, -100, true}','{ 0U, 263U, 1300, -105, true}').replace('#define ROBOT_SEQUENCE_DOWN_RPM   30U','#define ROBOT_SEQUENCE_DOWN_RPM   40U');p.write_text(s,encoding='utf-8')
+p=Path('yundong_part/tests/distance_control_test.c');s=p.read_text(encoding='utf-8').replace('last_lift_angle.rpm == 30','last_lift_angle.rpm == 40').replace('absolute_target[0] == 9000 && last_lift_angle.rpm == 40); /* z=-100 mm. */','absolute_target[0] == 9450 && last_lift_angle.rpm == 40); /* z=-105 mm. */');p.write_text(s,encoding='utf-8')
+for path in ['output/目前已有状态与扩展说明.md','yundong_part/esp32s3/PROTOCOL.md']:
+ p=Path(path);s=p.read_text(encoding='utf-8').replace('z=-100 mm','z=-105 mm').replace('130/-100','130/-105').replace('下降速度为 30 RPM','下降速度为 40 RPM').replace('下降动作使用 30 RPM','下降动作使用 40 RPM').replace('流程下降 30 RPM','流程下降 40 RPM');p.write_text(s,encoding='utf-8')

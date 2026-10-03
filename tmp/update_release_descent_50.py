@@ -1,0 +1,5 @@
+from pathlib import Path
+p=Path('yundong_part/stm32h743/zhukong/Core/Src/robot_control.c');s=p.read_text(encoding='utf-8');assert '{ 0U, 263U, 1300, -105, true}' in s;assert '#define ROBOT_SEQUENCE_DOWN_RPM   40U' in s;s=s.replace('{ 0U, 263U, 1300, -105, true}','{ 0U, 263U, 1300, -109, true}').replace('#define ROBOT_SEQUENCE_DOWN_RPM   40U','#define ROBOT_SEQUENCE_DOWN_RPM   50U');p.write_text(s,encoding='utf-8')
+p=Path('yundong_part/tests/distance_control_test.c');s=p.read_text(encoding='utf-8').replace('last_lift_angle.rpm == 40','last_lift_angle.rpm == 50');old='absolute_target[0] == 9450 && last_lift_angle.rpm == 50); /* z=-105 mm. */';assert old in s;s=s.replace(old,'absolute_target[0] == 9810 && last_lift_angle.rpm == 50); /* z=-109 mm. */');p.write_text(s,encoding='utf-8')
+for path in ['output/目前已有状态与扩展说明.md','yundong_part/esp32s3/PROTOCOL.md']:
+ p=Path(path);s=p.read_text(encoding='utf-8').replace('z=-105 mm','z=-109 mm').replace('130/-105','130/-109').replace('下降速度为 40 RPM','下降速度为 50 RPM').replace('下降动作使用 40 RPM','下降动作使用 50 RPM').replace('流程下降 40 RPM','流程下降 50 RPM');p.write_text(s,encoding='utf-8')

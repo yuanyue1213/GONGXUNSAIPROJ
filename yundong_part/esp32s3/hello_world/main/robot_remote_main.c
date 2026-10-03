@@ -37,7 +37,7 @@
  * 命令上限为 63 字节（不含换行），超长命令丢弃到下一换行。 */
 #define COMMAND_TIMEOUT_MS      250
 #define SOCKET_TIMEOUT_MS       100
-#define MAX_FRAME_LENGTH        63
+#define MAX_FRAME_LENGTH        127
 #define STM32_UART_PORT         UART_NUM_1
 /* 交叉接线：GPIO17 TX -> STM32 PB11 RX，GPIO18 RX <- STM32 PB10 TX。
  * 两板必须共地；ESP32 的 UART1 对接 STM32 的 USART3，串口编号无需相同。 */
@@ -132,6 +132,7 @@ static bool parse_command(const char *frame, uint32_t *sequence, motion_t *motio
     switch (cursor[1]) {
     case 'I': /* App 启动原点初始化 */
     case 'O': /* 返回启动原点 */
+    case 'P': /* 放下固定状态 */
     case 'A': /* 抓取固定状态 */
     case 'Z': /* 取消自动舵机步骤 */
     case 'S':
@@ -184,7 +185,16 @@ static bool handle_frame(const char *frame, int64_t *last_lift_us)
 {
     uint32_t sequence;
     motion_t motion;
-    if (strncmp(frame, "ARM_POSE,", 9U) == 0) {
+    if (strncmp(frame, "BASE,", 5U) == 0) {
+        RobotBaseCommand command;
+        if (!RobotProtocol_ParseBase(frame, &command)) return true;
+    } else if (strncmp(frame, "ORIGIN,", 7U) == 0) {
+        RobotOriginCommand command;
+        if (!RobotProtocol_ParseOrigin(frame, &command)) return true;
+    } else if (strncmp(frame, "PLAN_BEGIN,", 11U) == 0 || strncmp(frame, "PLAN_RUN,", 9U) == 0) {
+        RobotPlanCommand command;
+        if (!RobotProtocol_ParsePlan(frame, &command)) return true;
+    } else if (strncmp(frame, "ARM_POSE,", 9U) == 0) {
         RobotArmPoseCommand command;
         if (!RobotProtocol_ParseArmPose(frame, &command)) return true;
     } else if (strncmp(frame, "LIFT_MOVE,", 10U) == 0) {
@@ -193,12 +203,21 @@ static bool handle_frame(const char *frame, int64_t *last_lift_us)
     } else if (strncmp(frame, "LIFT_ANGLE,", 11U) == 0) {
         RobotLiftAngleCommand command;
         if (!RobotProtocol_ParseLiftAngle(frame, &command)) return true;
-    } else if (strncmp(frame, "ALIGN,", 6U) == 0) {
+    } else if ((strncmp(frame, "ALIGN,", 6U) == 0 || strncmp(frame, "ALIGN_RING,", 11U) == 0 || strncmp(frame, "ALIGN_CFG,", 10U) == 0)) {
         CameraAlignCommand command;
         if (!CameraProtocol_ParseAlign(frame, &command)) return true;
     } else if (strncmp(frame, "ARM_MOVE,", 9U) == 0) {
         RobotArmDistanceCommand command;
         if (!RobotProtocol_ParseArmDistance(frame, &command)) return true;
+    } else if (strncmp(frame, "PARALLEL,", 9U) == 0) {
+        CameraParallelCommand command;
+        if (!CameraProtocol_ParseParallel(frame, &command)) return true;
+    } else if (strncmp(frame, "GRIP,", 5U) == 0 || strncmp(frame, "GRIP_STOP,", 10U) == 0) {
+        RobotGripperCommand command;
+        if (!RobotProtocol_ParseGripper(frame, &command)) return true;
+    } else if (strncmp(frame, "STATE,", 6U) == 0 || strncmp(frame, "PLAN_ITEM,", 10U) == 0) {
+        RobotSequenceCommand command;
+        if (!RobotProtocol_ParseSequence(frame, &command)) return true;
     } else if (strncmp(frame, "MOVE,", 5U) == 0) {
         RobotDistanceCommand command;
         if (!RobotProtocol_ParseMove(frame, &command) ||

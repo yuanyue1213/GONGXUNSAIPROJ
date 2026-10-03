@@ -6,10 +6,11 @@ static uint8_t s_byte;
 static volatile uint8_t s_buffer[CAMERA_RX_SIZE];
 static volatile uint16_t s_head, s_tail;
 static volatile bool s_fault, s_restart;
-static char s_frame[24];
+static char s_frame[64];
+static uint32_t s_ring_index;
 static unsigned s_length;
 static bool s_drop, s_valid;
-static CameraCenter s_center;
+static CameraCenter s_center, s_rings[3];
 static void arm_receive(void)
 {
     if (s_uart == NULL) return;
@@ -19,7 +20,7 @@ static void arm_receive(void)
 void CameraLink_Init(UART_HandleTypeDef *uart)
 {
     s_uart = uart; s_head = s_tail = 0U; s_fault = false;
-    s_length = 0U; s_drop = s_valid = false; s_restart = false;
+    s_length = 0U; s_drop = s_valid = false; s_restart = false; s_ring_index = 0U;
     if (uart != NULL) {
         HAL_NVIC_SetPriority(UART4_IRQn, 5U, 0U);
         HAL_NVIC_EnableIRQ(UART4_IRQn);
@@ -27,6 +28,11 @@ void CameraLink_Init(UART_HandleTypeDef *uart)
     }
 }
 bool CameraLink_Ready(void) { return s_uart != NULL; }
+void CameraLink_SelectTarget(uint32_t ring_index)
+{
+    s_ring_index = ring_index;
+    CameraLink_Discard();
+}
 void CameraLink_Discard(void)
 {
     uint32_t interrupts = __get_PRIMASK(); __disable_irq();
@@ -61,7 +67,15 @@ void CameraLink_Process(void)
                 if (s_length > 0U && s_frame[s_length - 1U] == '\r') --s_length;
                 s_frame[s_length] = '\0';
                 CameraCenter center;
-                if (CameraProtocol_ParseCenter(s_frame, &center)) { s_center = center; s_valid = true; }
+                CameraCenter rings[3];
+                if (s_ring_index == 0U && CameraProtocol_ParseCenter(s_frame, &center)) {
+                    s_center = center; s_valid = true;
+                } else if (s_ring_index >= 1U && s_ring_index <= 4U &&
+                           CameraProtocol_ParseRings(s_frame, rings)) {
+                    memcpy(s_rings, rings, sizeof(s_rings));
+                    if (s_ring_index <= 3U) s_center = rings[s_ring_index - 1U];
+                    s_valid = true;
+                }
             }
             s_length = 0U; s_drop = false;
         } else if (!s_drop) {
@@ -72,6 +86,12 @@ void CameraLink_Process(void)
 }
 bool CameraLink_TakeCenter(CameraCenter *center)
 {
-    if (!s_valid) return false;
+    if (!s_valid || s_ring_index == 4U) return false;
     *center = s_center; s_valid = false; return true;
+}
+
+bool CameraLink_TakeRings(CameraCenter rings[3])
+{
+    if (!s_valid || s_ring_index != 4U) return false;
+    memcpy(rings, s_rings, sizeof(s_rings)); s_valid = false; return true;
 }

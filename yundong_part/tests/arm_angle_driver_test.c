@@ -103,6 +103,13 @@ int main(void)
     assert(LiftMotor_Stop() == HAL_OK);
     reset(0x21);
     assert(LiftMotor_MoveAngle('E', 900, 5, 3200) != HAL_OK && position_count == 0);
+    reset(0x21);
+    assert(LiftMotor_MoveAngle('D', 900, 120, 3200) == HAL_OK);
+    assert(position[3] == 0 && position[4] == 120);
+    assert(LiftMotor_MoveAngle('D', 900, 121, 3200) != HAL_OK);
+    reset(0x25);
+    assert(ArmMotor_MoveAngle('E', 900, 120, 3200) == HAL_OK);
+    assert(position[7] == 4 && position[8] == 0xB0); /* X speed is RPM * 10. */
     puts("PASS: ID1/ID2 Emm/X FD frames, angle conversion, directions and ACK failures");
     return 0;
 }

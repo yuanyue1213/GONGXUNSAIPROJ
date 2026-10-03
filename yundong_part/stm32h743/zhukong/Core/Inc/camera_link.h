@@ -6,6 +6,8 @@ void CameraLink_Init(UART_HandleTypeDef *uart);
 bool CameraLink_Ready(void);
 void CameraLink_Process(void);
 bool CameraLink_TakeCenter(CameraCenter *center);
+bool CameraLink_TakeRings(CameraCenter rings[3]);
+void CameraLink_SelectTarget(uint32_t ring_index);
 void CameraLink_Discard(void);
 bool CameraLink_RxCallback(UART_HandleTypeDef *uart);
 bool CameraLink_ErrorCallback(UART_HandleTypeDef *uart);

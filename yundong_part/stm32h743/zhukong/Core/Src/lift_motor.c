@@ -225,7 +225,7 @@ static HAL_StatusTypeDef ArmMotor_MoveAngleById(uint8_t id, ZDT_Direction direct
                                                bool absolute)
 {
     if ((id != LIFT_MOTOR_ID && id != FORE_AFT_MOTOR_ID) || (!absolute && angle_tenths == 0U) ||
-        (!absolute && angle_tenths > 36000U) || speed_rpm < 5U || speed_rpm > 60U ||
+        (!absolute && angle_tenths > 36000U) || speed_rpm < 5U || speed_rpm > 120U ||
         pulses_per_rev < 200U || pulses_per_rev > 51200U) return HAL_ERROR;
     uint8_t firmware = ArmMotor_DetectFirmware(id);
     if (firmware == ARM_FIRMWARE_UNKNOWN) return HAL_ERROR;

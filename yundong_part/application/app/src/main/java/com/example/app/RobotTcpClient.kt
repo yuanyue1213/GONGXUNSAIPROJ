@@ -68,27 +68,71 @@ internal class RobotTcpClient(
         sendFrame("ALIGN,${nextSequence()},$forwardPpm,$lateralPpm\n")
     }
 
+    fun sendConfiguredAlignment(ring: Int, forwardPpm: Int, lateralPpm: Int, settings: AlignmentSettings) {
+        if (ring !in 0..3 || forwardPpm !in 1..1000000 || lateralPpm !in 1..1000000 || !settings.valid()) return
+        sendFrame(settings.frame(nextSequence(), ring, forwardPpm, lateralPpm))
+    }
+
+    fun sendRingAlignment(ring: Int, forwardPpm: Int, lateralPpm: Int) {
+        if (ring !in 1..3 || forwardPpm !in 1..1000000 || lateralPpm !in 1..1000000) return
+        sendFrame("ALIGN_RING,${nextSequence()},$ring,$forwardPpm,$lateralPpm\n")
+    }
+
     fun sendArmDistance(direction: Char, distanceMm: Int, rpm: Int, pulsesPerRev: Int) {
-        if (direction !in "EC" || distanceMm !in 1..1000 || rpm !in 5..60 ||
+        if (direction !in "EC" || distanceMm !in 1..1000 || rpm !in 5..120 ||
             pulsesPerRev !in 200..51200) return
         sendFrame("ARM_MOVE,${nextSequence()},$direction,$distanceMm,$rpm,$pulsesPerRev\n")
     }
 
     fun sendLiftDistance(direction: Char, distanceMm: Int, rpm: Int, pulsesPerRev: Int) {
-        if (direction !in "UD" || distanceMm !in 1..400 || rpm !in 5..60 ||
+        if (direction !in "UD" || distanceMm !in 1..400 || rpm !in 5..120 ||
             pulsesPerRev !in 200..51200) return
         sendFrame("LIFT_MOVE,${nextSequence()},$direction,$distanceMm,$rpm,$pulsesPerRev\n")
     }
 
+    fun sendSequence(mode: Char, settings: SequenceSettings) {
+        if (mode !in "AP" || !settings.valid()) return
+        sendFrame(settings.frame(nextSequence(), mode))
+    }
+
+    fun initializeOrigin(baseAngle: Int) {
+        if (baseAngle !in 0..360) return
+        sendFrame("ORIGIN,${nextSequence()},$baseAngle\n")
+    }
+
+    fun sendPlan(cards: List<SequenceCard>) {
+        val frames = SequencePlan.frames(nextSequence(), cards.toList())
+        if (frames.isEmpty()) return
+        val generation = connectionGeneration.get()
+        // One executor task keeps the upload contiguous, even if other controls are tapped.
+        sendExecutor.execute { frames.forEach { writeFrame(it, generation) } }
+    }
+
     fun sendMotion(direction: Char) {
-        if (direction !in "SUDHQAZOI") return
+        if (direction !in "SUDHQAZOIP") return
         sendFrame("CMD,${nextSequence()},$direction\n")
     }
 
     fun sendArmPose(theta: Int, rMm: Int, zMm: Int, rpm: Int, pulsesPerRev: Int) {
         if (theta !in 0..270 || rMm !in -1000..1000 || zMm !in -400..400 ||
-            rpm !in 5..60 || pulsesPerRev !in 200..51200) return
+            rpm !in 5..120 || pulsesPerRev !in 200..51200) return
         sendFrame("ARM_POSE,${nextSequence()},$theta,$rMm,$zMm,$rpm,$pulsesPerRev\n")
+    }
+
+    fun sendParallel(ppm: Int, rpm: Int, stepMm: Int, reverse: Boolean) {
+        if (ppm !in 1..1000000 || rpm !in 5..60 || stepMm !in 1..10) return
+        sendFrame("PARALLEL,${nextSequence()},$ppm,$rpm,$stepMm,${if (reverse) 1 else 0}\n")
+    }
+
+    fun sendGripper(start: Int, end: Int, dps: Int) {
+        if (start !in 0..270 || end !in 0..270 || dps !in 6..300) return
+        sendFrame("GRIP,${nextSequence()},$start,$end,$dps\n")
+    }
+    fun stopGripper() { sendFrame("GRIP_STOP,${nextSequence()}\n") }
+
+    fun sendBase(target: Int, dps: Int) {
+        if (target !in 0..360 || dps !in 1..360) return
+        sendFrame("BASE,${nextSequence()},$target,$dps\n")
     }
 
     fun sendServo(channel: Char, angle: Int) {

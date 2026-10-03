@@ -23,7 +23,7 @@ internal data class DistanceMove(
             val diameterMm = diameter.toDoubleOrNull() ?: return null
             val pulses = wheelPulses.toIntOrNull() ?: return null
             val factor = correction.toDoubleOrNull() ?: return null
-            if (direction !in "FBLR" || mm !in 1..10000 || rpm !in 5..300 ||
+            if (direction !in "FBLRCW" || mm !in 1..10000 || rpm !in 5..300 ||
                 !diameterMm.isFinite() || diameterMm !in 20.0..500.0 ||
                 pulses !in 1..1000000 || !factor.isFinite() || factor !in 0.1..10.0) return null
             val perMetre = (1000.0 * pulses * factor / (PI * diameterMm)).roundToInt()
