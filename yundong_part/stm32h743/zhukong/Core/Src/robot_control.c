@@ -11,6 +11,7 @@
 #include "servo_control.h"
 #include "camera_link.h"
 #include "../../../../shared/robot_distance_protocol.h"
+#include "../../../../shared/camera_pose_math.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -514,13 +515,14 @@ static void RobotControl_TickGrab(void)
     } else if (!RobotControl_ApplyGrabStep()) RobotControl_CancelGrab();
 }
 
-/* 摄像头持续输出坐标。每次移动等待四轮到位、静置 300 ms 后重新定位。 */
+/* 中心修正只读取一次坐标；平行/联合姿态修正仍按到位、静置、重采样循环。 */
 #define ROBOT_ALIGN_SAMPLE_MS       3000U
 #define ROBOT_ALIGN_TOTAL_MS      120000U
 #define ROBOT_ALIGN_SETTLE_MS        300U
 #define ROBOT_ALIGN_MAX_MOVES         60U
 typedef enum { ALIGN_WAIT, ALIGN_MOVING, ALIGN_SETTLE, ALIGN_COMPENSATING } AlignPhase;
-static bool s_align_active, s_align_parallel;
+static bool s_align_active, s_align_parallel, s_align_joint;
+static CameraPoseAlignCommand s_joint;
 static CameraParallelCommand s_parallel;
 static CameraAlignSettings s_align_settings;
 static AlignPhase s_align_phase;
@@ -529,6 +531,7 @@ static uint32_t s_align_forward_ppm, s_align_lateral_ppm;
 static unsigned s_align_moves, s_align_centered;
 static HAL_StatusTypeDef RobotControl_ApplyDistance(const RobotDistanceCommand *command);
 static HAL_StatusTypeDef RobotControl_ApplyWheelPulses(char direction, int32_t pulses, uint16_t rpm);
+static HAL_StatusTypeDef RobotControl_EnableMotors(void);
 static HAL_StatusTypeDef RobotControl_StopMotors(void);
 
 static void RobotControl_CancelAlignment(void)
@@ -541,6 +544,70 @@ static void RobotControl_CancelAlignment(void)
     s_align_active = false;
     CameraLink_Discard();
 }
+static void RobotControl_JointAlignment(uint32_t now)
+{
+    CameraCenter rings[3]; int32_t pulses[4]; uint16_t speeds[4]; bool aligned;
+    if (!CameraLink_TakeRings(rings)) return;
+    if (!CameraProtocol_PoseProfile(&s_joint, rings, pulses, speeds, &aligned)) {
+        s_align_centered = 0U; return;
+    }
+    s_align_phase_tick = now;
+    if (aligned) {
+        if (++s_align_centered >= 3U) RobotControl_CancelAlignment();
+        return;
+    }
+    s_align_centered = 0U;
+    if (s_align_moves >= ROBOT_ALIGN_MAX_MOVES) { RobotControl_CancelAlignment(); return; }
+    s_wheel_move_reached = false;
+    if (RobotControl_EnableMotors() != HAL_OK ||
+        ZDT_Motor_MoveWheelProfile(pulses, speeds, ROBOT_ACCELERATION) != HAL_OK) {
+        s_stop_pending = RobotControl_StopMotors() != HAL_OK;
+        if (!s_stop_pending) s_motion = 'S';
+        s_align_active = false; return;
+    }
+    /* One AA packet moves translation and yaw together. Re-measure only after
+     * all four wheels arrive and the existing settle phase has completed. */
+    s_motion = 'J'; s_move_started_tick = HAL_GetTick(); s_status_tick = s_move_started_tick;
+    s_status_wheel = s_reached_mask = 0U; ++s_align_moves;
+    s_align_phase = ALIGN_MOVING; s_align_phase_tick = s_move_started_tick;
+}
+static void RobotControl_StartCenterCompensation(void)
+{
+    if (s_align_settings.offset_mm == 0) { RobotControl_CancelAlignment(); return; }
+    int32_t offset = s_align_settings.offset_mm;
+    RobotDistanceCommand move = {0U, offset > 0 ? CAMERA_IMAGE_RIGHT_DIRECTION :
+        CameraProtocol_Opposite(CAMERA_IMAGE_RIGHT_DIRECTION),
+        (uint32_t)(offset > 0 ? offset : -offset), s_align_settings.fine_rpm, s_align_forward_ppm};
+    s_wheel_move_reached = false;
+    if (RobotControl_ApplyDistance(&move) != HAL_OK) {
+        s_stop_pending = RobotControl_StopMotors() != HAL_OK;
+        if (!s_stop_pending) s_motion = 'S';
+        s_align_active = false; return;
+    }
+    s_motion = move.direction; s_move_started_tick = HAL_GetTick();
+    s_status_tick = s_move_started_tick; s_status_wheel = s_reached_mask = 0U;
+    s_align_phase = ALIGN_COMPENSATING; s_align_phase_tick = s_move_started_tick;
+}
+static void RobotControl_CenterAlignment(void)
+{
+    CameraCenter center; int32_t pulses[4]; uint16_t speeds[4]; bool aligned;
+    if (!CameraLink_TakeCenter(&center)) return;
+    if (!CameraProtocol_CenterProfile(&center, s_align_forward_ppm, s_align_lateral_ppm,
+        &s_align_settings, pulses, speeds, &aligned)) { RobotControl_CancelAlignment(); return; }
+    if (aligned) { RobotControl_StartCenterCompensation(); return; }
+    s_wheel_move_reached = false;
+    if (RobotControl_EnableMotors() != HAL_OK ||
+        ZDT_Motor_MoveWheelProfile(pulses, speeds, ROBOT_ACCELERATION) != HAL_OK) {
+        s_stop_pending = RobotControl_StopMotors() != HAL_OK;
+        if (!s_stop_pending) s_motion = 'S';
+        s_align_active = false; return;
+    }
+    /* One AA packet contains both complete translation axes. Further samples
+     * are ignored; after arrival only the configured final offset may run. */
+    s_motion = 'J'; s_move_started_tick = HAL_GetTick(); s_status_tick = s_move_started_tick;
+    s_status_wheel = s_reached_mask = 0U; ++s_align_moves;
+    s_align_phase = ALIGN_MOVING; s_align_phase_tick = s_move_started_tick;
+}
 static void RobotControl_TickAlignment(void)
 {
     if (!s_align_active) return;
@@ -552,21 +619,26 @@ static void RobotControl_TickAlignment(void)
         if (s_motion == 'S') {
             if (!s_wheel_move_reached) { RobotControl_CancelAlignment(); return; }
             if (s_align_phase == ALIGN_COMPENSATING) { RobotControl_CancelAlignment(); return; }
+            if (!s_align_parallel && !s_align_joint && s_align_settings.offset_mm == 0) {
+                RobotControl_CancelAlignment(); return;
+            }
             s_align_phase = ALIGN_SETTLE; s_align_phase_tick = now;
         }
         return;
     }
     if (s_align_phase == ALIGN_SETTLE) {
         if ((uint32_t)(now - s_align_phase_tick) >= ROBOT_ALIGN_SETTLE_MS) {
-            CameraLink_Discard(); s_align_phase = ALIGN_WAIT; s_align_phase_tick = now;
+            CameraLink_Discard();
+            if (!s_align_parallel && !s_align_joint) { RobotControl_StartCenterCompensation(); return; }
+            s_align_phase = ALIGN_WAIT; s_align_phase_tick = now;
         }
         return;
     }
     if ((uint32_t)(now - s_align_phase_tick) >= ROBOT_ALIGN_SAMPLE_MS)
     { RobotControl_CancelAlignment(); return; }
-    CameraCenter center = {256U,160U};
+    if (s_align_joint) { RobotControl_JointAlignment(now); return; }
+    if (!s_align_parallel) { RobotControl_CenterAlignment(); return; }
     char direction; uint32_t mm; uint16_t rpm;
-    bool compensating = false;
     uint32_t fine_turn_pulses = 0U;
     if (s_align_parallel) {
         CameraCenter rings[3]; int32_t slope;
@@ -591,24 +663,9 @@ static void RobotControl_TickAlignment(void)
             if (fine_turn_pulses == 0U) fine_turn_pulses = 1U;
             if (rpm > 5U) rpm = 5U;
         }
-    } else {
-        if (!CameraLink_TakeCenter(&center)) return;
-        s_align_phase_tick = now;
-        rpm = CameraProtocol_ConfiguredRpm(&center, &s_align_settings);
-        if (!CameraProtocol_Correction(&center, &direction, &mm)) {
-        if (++s_align_centered < 2U) return;
-        /* Both camera modes apply the configured final X offset once.
-         * Do not re-center afterward, which would undo this offset. */
-        if (s_align_settings.offset_mm == 0) { RobotControl_CancelAlignment(); return; }
-        direction = s_align_settings.offset_mm > 0 ? CAMERA_IMAGE_RIGHT_DIRECTION :
-            CameraProtocol_Opposite(CAMERA_IMAGE_RIGHT_DIRECTION);
-        mm = (uint32_t)(s_align_settings.offset_mm > 0 ? s_align_settings.offset_mm : -s_align_settings.offset_mm);
-        compensating = true;
-        rpm = (uint16_t)s_align_settings.fine_rpm;
-        }
     }
     s_align_centered = 0U;
-    if (!compensating && s_align_moves >= ROBOT_ALIGN_MAX_MOVES)
+    if (s_align_moves >= ROBOT_ALIGN_MAX_MOVES)
     { RobotControl_CancelAlignment(); return; }
     RobotDistanceCommand move = {0U, direction, mm,
         rpm,
@@ -623,8 +680,8 @@ static void RobotControl_TickAlignment(void)
     }
     s_motion = direction; s_move_started_tick = HAL_GetTick();
     s_status_tick = s_move_started_tick; s_status_wheel = 0U; s_reached_mask = 0U;
-    if (!compensating) ++s_align_moves;
-    s_align_phase = compensating ? ALIGN_COMPENSATING : ALIGN_MOVING;
+    ++s_align_moves;
+    s_align_phase = ALIGN_MOVING;
     s_align_phase_tick = s_move_started_tick;
 }
 
@@ -1201,12 +1258,22 @@ static void RobotControl_HandleFrame(const char *frame)
             s_lift_angle_last_status_tick = HAL_GetTick();
         return;
     }
+    if (strncmp(frame, "ALIGN_POSE,", 11U) == 0) {
+        CameraPoseAlignCommand cmd;
+        if (!CameraProtocol_ParsePoseAlign(frame, &cmd) || !CameraLink_Ready() || s_pose_active ||
+            s_grab_active || s_align_active || s_arm_move_active || s_lift_angle_active || s_motion != 'S' ||
+            s_stop_pending || !s_wheel_uart_ready || cmd.sequence == s_last_align_sequence) return;
+        s_joint = cmd; s_align_joint = true; s_align_parallel = false; s_align_active = true;
+        s_last_align_sequence = cmd.sequence; s_align_phase = ALIGN_WAIT;
+        s_align_start_tick = s_align_phase_tick = HAL_GetTick(); s_align_moves = s_align_centered = 0U;
+        CameraLink_SelectTarget(4U); return;
+    }
     if (strncmp(frame, "PARALLEL,", 9U) == 0) {
         CameraParallelCommand cmd;
         if (!CameraProtocol_ParseParallel(frame, &cmd) || !CameraLink_Ready() || s_pose_active ||
             s_grab_active || s_align_active || s_arm_move_active || s_lift_angle_active || s_motion != 'S' ||
             s_stop_pending || !s_wheel_uart_ready || cmd.sequence == s_last_align_sequence) return;
-        s_parallel = cmd; s_align_parallel = true; s_align_active = true; s_align_phase = ALIGN_WAIT;
+        s_parallel = cmd; s_align_joint = false; s_align_parallel = true; s_align_active = true; s_align_phase = ALIGN_WAIT;
         s_last_align_sequence = cmd.sequence; s_align_forward_ppm = s_align_lateral_ppm = cmd.ppm;
         s_align_start_tick = s_align_phase_tick = HAL_GetTick(); s_align_moves = s_align_centered = 0U;
         CameraLink_SelectTarget(4U); return;
@@ -1217,7 +1284,7 @@ static void RobotControl_HandleFrame(const char *frame)
         if (!CameraProtocol_ParseAlign(frame, &cmd) || !CameraLink_Ready() ||
             s_align_active || s_grab_active || s_arm_move_active || s_motion != 'S' ||
             s_stop_pending || !s_wheel_uart_ready || cmd.sequence == s_last_align_sequence) return;
-        s_last_align_sequence = cmd.sequence; s_align_parallel = false; s_align_active = true; s_align_phase = ALIGN_WAIT;
+        s_last_align_sequence = cmd.sequence; s_align_joint = false; s_align_parallel = false; s_align_active = true; s_align_phase = ALIGN_WAIT;
         s_align_forward_ppm = cmd.forward_ppm; s_align_lateral_ppm = cmd.lateral_ppm;
         s_align_settings = cmd.settings;
         s_align_start_tick = s_align_phase_tick = HAL_GetTick();

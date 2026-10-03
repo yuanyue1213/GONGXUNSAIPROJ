@@ -1,3 +1,4 @@
+#include "../../../shared/camera_pose_math.h"
 /*
  * ESP32-S3 小车遥控桥接程序。
  * 数据路径：手机 App --Wi-Fi/TCP--> ESP32 --UART1--> STM32。
@@ -185,7 +186,10 @@ static bool handle_frame(const char *frame, int64_t *last_lift_us)
 {
     uint32_t sequence;
     motion_t motion;
-    if (strncmp(frame, "BASE,", 5U) == 0) {
+    if (strncmp(frame, "ALIGN_POSE,", 11U) == 0) {
+        CameraPoseAlignCommand command;
+        if (!CameraProtocol_ParsePoseAlign(frame, &command)) return true;
+    } else if (strncmp(frame, "BASE,", 5U) == 0) {
         RobotBaseCommand command;
         if (!RobotProtocol_ParseBase(frame, &command)) return true;
     } else if (strncmp(frame, "ORIGIN,", 7U) == 0) {

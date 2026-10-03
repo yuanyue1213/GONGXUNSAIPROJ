@@ -78,15 +78,12 @@ static inline bool CameraProtocol_ParseAlign(const char *frame, CameraAlignComma
     return cmd->sequence != 0U && cmd->forward_ppm >= 1U && cmd->forward_ppm <= 1000000U &&
            cmd->lateral_ppm >= 1U && cmd->lateral_ppm <= 1000000U;
 }
-/* 2 px tolerance, choose the larger error axis first. Exact scale 1.090819 mm/px.
+/* 2 px tolerance on each axis; combine full X/Y errors in one move. Exact scale 1.090819 mm/px.
  * Motor command mapping after on-car feedback: image right -> B; image down -> L.
  * Command letters describe the existing driver mapping, not a verified physical heading. */
 #define CAMERA_CORRECTION_COARSE_PX    20U
-#define CAMERA_CORRECTION_FINE_GAIN    30U
-#define CAMERA_CORRECTION_COARSE_GAIN  50U
 #define CAMERA_CORRECTION_FINE_RPM     10U
 #define CAMERA_CORRECTION_COARSE_RPM   20U
-#define CAMERA_CORRECTION_MAX_MM       15U
 #ifndef CAMERA_IMAGE_RIGHT_DIRECTION
 #define CAMERA_IMAGE_RIGHT_DIRECTION 'B'
 #endif
@@ -97,7 +94,7 @@ static inline char CameraProtocol_Opposite(char dir)
 {
     return dir == 'F' ? 'B' : dir == 'B' ? 'F' : dir == 'L' ? 'R' : 'L';
 }
-/* Match speed to the same larger-axis error used for the distance calculation. */
+/* Select maximum wheel speed from the larger image error. */
 static inline uint16_t CameraProtocol_ConfiguredRpm(const CameraCenter *center, const CameraAlignSettings *settings)
 {
     int dx = (int)center->x - 256, dy = (int)center->y - 160;
@@ -105,37 +102,41 @@ static inline uint16_t CameraProtocol_ConfiguredRpm(const CameraCenter *center, 
     return (ax > CAMERA_CORRECTION_COARSE_PX || ay > CAMERA_CORRECTION_COARSE_PX) ?
         settings->coarse_rpm : settings->fine_rpm;
 }
-static inline bool CameraProtocol_Correction(const CameraCenter *center, char *direction, uint32_t *mm)
+typedef struct { uint32_t sequence, ppm, rpm, step_mm, reverse; } CameraParallelCommand;
+/* One camera sample -> full X/Y translation, with no gain or step-distance cap.
+ * Wheel travel remains signed pulses; per-wheel RPM follows travel magnitude. */
+static inline bool CameraProtocol_CenterProfile(const CameraCenter *center, uint32_t forward_ppm,
+    uint32_t lateral_ppm, const CameraAlignSettings *settings, int32_t pulses[4], uint16_t speeds[4], bool *aligned)
 {
-    int dx = (int)center->x - 256, dy = (int)center->y - 160;
-    unsigned ax = (unsigned)(dx < 0 ? -dx : dx), ay = (unsigned)(dy < 0 ? -dy : dy);
-    if (ax <= 2U && ay <= 2U) { *direction = 'S'; *mm = 0U; return false; }
-    unsigned pixels;
-    if (ax >= ay) {
-        pixels = ax;
-        *direction = dx > 0 ? CAMERA_IMAGE_RIGHT_DIRECTION :
-            CameraProtocol_Opposite(CAMERA_IMAGE_RIGHT_DIRECTION);
-    } else {
-        pixels = ay;
-        *direction = dy > 0 ? CAMERA_IMAGE_DOWN_DIRECTION :
-            CameraProtocol_Opposite(CAMERA_IMAGE_DOWN_DIRECTION);
+    if (center->x >= 512U || center->y >= 320U || forward_ppm == 0U || forward_ppm > 1000000U ||
+        lateral_ppm == 0U || lateral_ppm > 1000000U) return false;
+    int32_t dx = (int32_t)center->x - 256, dy = (int32_t)center->y - 160;
+    if (dx >= -2 && dx <= 2) dx = 0;
+    if (dy >= -2 && dy <= 2) dy = 0;
+    *aligned = dx == 0 && dy == 0;
+    int64_t x_raw = (int64_t)dx * 1090819 * forward_ppm;
+    int64_t y_raw = (int64_t)dy * 1090819 * lateral_ppm;
+    int32_t x = (int32_t)((x_raw + (x_raw < 0 ? -500000000 : 500000000)) / 1000000000);
+    int32_t y = (int32_t)((y_raw + (y_raw < 0 ? -500000000 : 500000000)) / 1000000000);
+    if (x == 0 && dx != 0) x = dx > 0 ? 1 : -1;
+    if (y == 0 && dy != 0) y = dy > 0 ? 1 : -1;
+    if (CAMERA_IMAGE_RIGHT_DIRECTION == 'F') x = -x;
+    if (CAMERA_IMAGE_DOWN_DIRECTION == 'R') y = -y;
+    pulses[0] = pulses[2] = x + y;
+    pulses[1] = pulses[3] = x - y;
+    uint32_t largest = 0U;
+    for (unsigned i = 0; i < 4U; ++i) {
+        uint32_t magnitude = (uint32_t)(pulses[i] < 0 ? -pulses[i] : pulses[i]);
+        if (magnitude > largest) largest = magnitude;
     }
-    /* Coarse correction beyond 20 px, fine correction near the center.
-     * Keep both stages capped; 64-bit arithmetic prevents scale * pixels * gain overflow. */
-    unsigned gain = pixels > CAMERA_CORRECTION_COARSE_PX ?
-        CAMERA_CORRECTION_COARSE_GAIN : CAMERA_CORRECTION_FINE_GAIN;
-    *mm = (uint32_t)(((uint64_t)pixels * 1090819U * gain +
-                     50000000U) / 100000000U);
-    if (*mm == 0U) *mm = 1U;
-    if (*mm > CAMERA_CORRECTION_MAX_MM) *mm = CAMERA_CORRECTION_MAX_MM;
+    uint32_t rpm = CameraProtocol_ConfiguredRpm(center, settings);
+    for (unsigned i = 0; i < 4U; ++i) {
+        uint32_t magnitude = (uint32_t)(pulses[i] < 0 ? -pulses[i] : pulses[i]);
+        speeds[i] = largest == 0U ? (uint16_t)rpm : (uint16_t)(((uint64_t)rpm*magnitude + largest/2U)/largest);
+        if (speeds[i] == 0U) speeds[i] = 1U;
+    }
     return true;
 }
-static inline uint16_t CameraProtocol_CorrectionRpm(const CameraCenter *center)
-{
-    CameraAlignSettings settings = CameraProtocol_DefaultSettings();
-    return CameraProtocol_ConfiguredRpm(center, &settings);
-}
-typedef struct { uint32_t sequence, ppm, rpm, step_mm, reverse; } CameraParallelCommand;
 static inline bool CameraProtocol_ParseParallel(const char *frame, CameraParallelCommand *cmd)
 {
     if (strncmp(frame, "PARALLEL,", 9U) != 0) return false;

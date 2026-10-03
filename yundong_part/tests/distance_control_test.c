@@ -585,20 +585,19 @@ static void test_ring_alignment(void)
         feed(command);
         camera_sample("x=400,y=160\n"); assert(position_frames == 0); /* Ignore block frames. */
         camera_sample("RINGS,100,160,266,160,400,160\n");
-        assert(position_frames == 1 && wheel_pulses() == (ring == 2 ? 30U : 150U));
+        assert(position_frames == 1 && wheel_pulses() == (ring == 1 ? 1702U : ring == 2 ? 109U : 1571U));
+        camera_sample("RINGS,100,160,300,180,400,160\n");
+        assert(position_frames == 1); /* Ignore newer coordinates while moving. */
         finish_alignment_move();
-        camera_sample("RINGS,256,160,256,160,256,160\n");
-        feed("MOVE,2,F,100,45,9889\n"); assert(position_frames == 1);
-        camera_sample("RINGS,256,160,256,160,256,160\n");
         assert(position_frames == 2 && wheel_pulses() == 100U && frame[6] == 1);
-        feed("MOVE,2,F,100,45,9889\n"); assert(position_frames == 2); /* Compensation owns wheels. */
+        feed("MOVE,2,F,100,45,9889\n"); assert(position_frames == 2);
         finish_alignment_move();
-        camera_sample("RINGS,256,160,256,160,256,160\n"); assert(position_frames == 2);
+        camera_sample("RINGS,100,160,300,180,400,160\n"); assert(position_frames == 2);
         feed("MOVE,2,F,100,45,9889\n"); assert(position_frames == 3);
     }
     reset(); camera_ready(); feed("ALIGN_RING,1,2,10000,20000\n");
     camera_sample("RINGS,100,160,256,170,400,160\n");
-    assert(position_frames == 1 && wheel_pulses() == 60U); /* Y uses lateral calibration. */
+    assert(position_frames == 1 && wheel_pulses() == 218U); /* Y uses lateral calibration. */
     feed("CMD,2,S\n"); camera_sample("RINGS,100,160,400,170,450,160\n");
     assert(position_frames == 1);
     reset(); camera_ready(); feed("ALIGN,1,10000,20000\n");
@@ -613,7 +612,6 @@ static void test_alignment_compensation_stop(void)
         const char *command = mode ? "ALIGN_RING,1,2,10000,20000\n" : "ALIGN,1,10000,20000\n";
         const char *sample = mode ? "RINGS,100,160,256,160,400,160\n" : "x=256,y=160\n";
         reset(); camera_ready(); feed(command);
-        camera_sample(sample); assert(position_frames == 0);
         camera_sample(sample); assert(position_frames == 1 && wheel_pulses() == 100U);
         camera_sample(sample); assert(position_frames == 1);
         feed("CMD,2,S\n"); assert(stop_frames == 4);
@@ -626,66 +624,58 @@ static void test_alignment_compensation_stop(void)
 }
 static void test_camera_alignment(void)
 {
-    CameraCenter center; CameraAlignCommand cmd; char dir; uint32_t mm;
+    CameraCenter center; CameraAlignCommand cmd;
+    int32_t pulses[4]; uint16_t speeds[4]; bool aligned;
+    CameraAlignSettings settings = CameraProtocol_DefaultSettings();
     assert(CameraProtocol_ParseCenter("x=256,y=160", &center));
-    assert(!CameraProtocol_Correction(&center, &dir, &mm));
+    assert(CameraProtocol_CenterProfile(&center, 10000, 10000, &settings, pulses, speeds, &aligned) && aligned);
     assert(CameraProtocol_ParseAlign("ALIGN,1,9889,9889", &cmd));
     const char *bad[] = {"x=512,y=160", "x=256,y=320", "x=25,y=160", "x=256,y=160x", "x=-01,y=160"};
     for (unsigned i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i) assert(!CameraProtocol_ParseCenter(bad[i], &center));
-    const CameraCenter points[] = {{276,160}, {236,160}, {256,180}, {256,140}, {511,319}};
-    const char directions[] = "BFLRB";
-    for (unsigned i = 0; i < 5; ++i) {
-        assert(CameraProtocol_Correction(&points[i], &dir, &mm));
-        assert(dir == directions[i] && mm == (i == 4 ? 15U : 7U));
-        assert(CameraProtocol_CorrectionRpm(&points[i]) == (i == 4 ? 20U : 10U));
+    const CameraCenter points[] = {{356,160}, {156,160}, {256,260}, {256,60}};
+    const int32_t expected[4][4] = {{1091,1091,1091,1091}, {-1091,-1091,-1091,-1091},
+        {2182,-2182,2182,-2182}, {-2182,2182,-2182,2182}};
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(CameraProtocol_CenterProfile(&points[i], 10000, 20000, &settings, pulses, speeds, &aligned));
+        assert(!aligned);
+        for (unsigned j = 0; j < 4; ++j) assert(pulses[j] == expected[i][j] && speeds[j] == 20);
     }
-    /* Close to the center, 3 px causes a 1 mm step; at the center no motion. */
-    const CameraCenter near_points[] = {{259,160}, {253,160}, {256,163}, {256,157}};
-    for (unsigned i = 0; i < 4U; ++i) {
-        assert(CameraProtocol_Correction(&near_points[i], &dir, &mm));
-        assert(dir == directions[i] && mm == 1U);
-    }
-    const CameraCenter far_left = {0,160};
-    assert(CameraProtocol_Correction(&far_left, &dir, &mm) && dir == 'F' && mm == 15U);
-    const CameraCenter coarse_points[] = {{277,160}, {235,160}, {256,181}, {256,139}};
-    for (unsigned i = 0; i < 4U; ++i) {
-        assert(CameraProtocol_Correction(&coarse_points[i], &dir, &mm));
-        assert(dir == directions[i] && mm == 11U);
-        assert(CameraProtocol_CorrectionRpm(&coarse_points[i]) == 20U);
-    }
-    /* A coarse move must wait for arrival and settle, discard old frames, then slow down. */
-    reset(); camera_ready(); feed("ALIGN,10,10000,20000\n");
-    camera_sample("x=296,y=160\n");
-    assert(position_frames == 1 && wheel_pulses() == 150 && frame[8] == 20);
-    memset(motor_status, 3, sizeof(motor_status));
-    for (unsigned i = 0; i < 4U; ++i) poll_without_keep(60);
-    memset(motor_status, 1, sizeof(motor_status));
-    poll_without_keep(299); camera_sample("x=266,y=160\n");
-    assert(position_frames == 1);
-    poll_without_keep(1); RobotControl_Tick(); assert(position_frames == 1);
-    camera_sample("x=266,y=160\n");
-    assert(position_frames == 2 && wheel_pulses() == 30 && frame[8] == 10);
+    center = (CameraCenter){356,210};
+    assert(CameraProtocol_CenterProfile(&center, 10000, 10000, &settings, pulses, speeds, &aligned));
+    assert(pulses[0] == 1636 && pulses[1] == 546 && pulses[2] == 1636 && pulses[3] == 546);
+    assert(speeds[0] == 20 && speeds[1] == 7 && speeds[2] == 20 && speeds[3] == 7);
+    center = (CameraCenter){266,170};
+    assert(CameraProtocol_CenterProfile(&center, 10000, 10000, &settings, pulses, speeds, &aligned));
+    assert(pulses[0] == 218 && pulses[1] == 0 && speeds[0] == 10); /* Diagonal: two wheels stay still. */
+    center = (CameraCenter){259,160};
+    assert(CameraProtocol_CenterProfile(&center, 1, 1, &settings, pulses, speeds, &aligned) && pulses[0] == 1);
+    center = (CameraCenter){258,158};
+    assert(CameraProtocol_CenterProfile(&center, 10000, 20000, &settings, pulses, speeds, &aligned) && aligned);
+    center = (CameraCenter){512,160};
+    assert(!CameraProtocol_CenterProfile(&center, 10000, 20000, &settings, pulses, speeds, &aligned));
+
     reset(); camera_ready();
-    camera_feed("x=400,y=160\n"); /* Old center must not execute when starting alignment. */
+    camera_feed("x=400,y=160\n"); /* Discard stale coordinates at start. */
     feed("ALIGN,1,10000,20000\n"); RobotControl_Tick(); assert(position_frames == 0);
     camera_sample("x=266,y=160\n");
-    assert(position_frames == 1 && wheel_pulses() == 30 && frame[6] == 1); /* B, 3 mm. */
-    assert(frame[7] == 0 && frame[8] == 10); /* Alignment uses 10 RPM. */
-    camera_sample("x=256,y=180\n"); assert(position_frames == 1); /* Moving ignores samples. */
+    assert(position_frames == 1 && wheel_pulses() == 109 && frame[6] == 1 && frame[8] == 10);
+    camera_sample("x=256,y=180\n"); assert(position_frames == 1);
     feed("MOVE,2,F,100,45,9889\nCMD,3,A\n");
     assert(position_frames == 1 && servo_commands == 0);
     finish_alignment_move();
-    camera_sample("x=256,y=170\r\n");
-    assert(position_frames == 2 && wheel_pulses() == 60 && frame[6] == 1); /* L uses lateral ppm. */
+    assert(position_frames == 2 && wheel_pulses() == 100 && frame[8] == 10);
+    camera_sample("x=400,y=180\n"); assert(position_frames == 2);
     finish_alignment_move();
-    camera_sample("x=257,y=159\n");
-    feed("MOVE,4,F,100,45,9889\n"); assert(position_frames == 2); /* Need two centered groups. */
-    camera_sample("x=256,y=160\n");
-    assert(position_frames == 3 && wheel_pulses() == 100U && frame[6] == 1 && frame[8] == 10);
-    feed("MOVE,4,F,100,45,9889\n"); assert(position_frames == 3);
-    finish_alignment_move();
-    camera_sample("x=256,y=160\n"); assert(position_frames == 3); /* Exactly once; no re-centering. */
-    feed("MOVE,4,F,100,45,9889\n"); assert(position_frames == 4);
+    camera_sample("x=400,y=180\n"); assert(position_frames == 2); /* No resampling after arrival. */
+    feed("ALIGN,1,10000,20000\n"); camera_sample("x=266,y=160\n"); assert(position_frames == 2);
+    feed("ALIGN,4,10000,20000\n"); camera_sample("x=266,y=160\n"); assert(position_frames == 3); /* New sequence can run again. */
+
+    reset(); camera_ready(); feed("ALIGN_CFG,1,0,10000,10000,10,20,0\n");
+    camera_sample("x=356,y=210\n");
+    assert(position_frames == 1 && wheel_pulses() == 1636 && frame[8] == 20);
+    assert(frame[21] == 7 && frame[23] == 0 && frame[24] == 0 && frame[25] == 2 && frame[26] == 34);
+    finish_alignment_move(); camera_sample("x=400,y=180\n"); assert(position_frames == 1);
+    feed("MOVE,2,F,100,45,9889\n"); assert(position_frames == 2); /* Zero offset completes immediately on arrival. */
     reset(); camera_ready(); feed("ALIGN,1,9889,9889\n");
     tick = 3000; RobotControl_Tick(); camera_sample("x=400,y=160\n"); assert(position_frames == 0);
     feed("MOVE,2,F,100,45,9889\n"); assert(position_frames == 1);
@@ -696,15 +686,7 @@ static void test_camera_alignment(void)
     camera_sample("x=400,y=160\n"); assert(position_frames == 1);
     reset(); camera_ready(); feed("ALIGN,1,9889,9889\n"); camera_sample("x=266,y=160\n");
     tick = 120000; RobotControl_Tick(); assert(stop_frames == 4);
-    camera_sample("x=400,y=160\n"); assert(position_frames == 1); /* Total deadline stops active move. */
-    reset(); camera_ready(); feed("ALIGN,1,9889,9889\n");
-    for (unsigned i = 0; i < 60; ++i) {
-        camera_sample("x=266,y=160\n"); assert(position_frames == (i+1U));
-        finish_alignment_move();
-    }
-    camera_sample("x=266,y=160\n"); assert(position_frames == 60); /* Refuse endless correction. */
-    feed("ALIGN,1,9889,9889\n"); camera_sample("x=266,y=160\n"); assert(position_frames == 60);
-    feed("ALIGN,2,9889,9889\n"); camera_sample("x=266,y=160\n"); assert(position_frames == 61);
+    camera_sample("x=400,y=160\n"); assert(position_frames == 1);
     reset(); camera_ready();
     camera_feed("x=2"); camera_feed("56,y=160\n"); assert(CameraLink_TakeCenter(&center) && center.x == 256);
     camera_feed("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"); assert(!CameraLink_TakeCenter(&center));
@@ -820,18 +802,14 @@ static void test_configured_alignment(void)
         feed(mode ? "ALIGN_CFG,700,2,10000,20000,12,30,-7\n" :
                     "ALIGN_CFG,700,0,10000,20000,12,30,-7\n");
         camera_sample(mode ? "RINGS,100,160,296,160,400,160\n" : "x=296,y=160\n");
-        assert(position_frames == 1 && wheel_pulses() == 150U && frame[8] == 30);
+        assert(position_frames == 1 && wheel_pulses() == 436U && frame[8] == 30);
         finish_alignment_move();
-        camera_sample(mode ? "RINGS,100,160,266,160,400,160\n" : "x=266,y=160\n");
-        assert(position_frames == 2 && wheel_pulses() == 30U && frame[8] == 12);
-        finish_alignment_move();
-        const char *center = mode ? "RINGS,100,160,256,160,400,160\n" : "x=256,y=160\n";
+        assert(position_frames == 2 && wheel_pulses() == 70U && frame[8] == 12 && frame[6] == 0);
+        const char *center = mode ? "RINGS,100,160,266,160,400,160\n" : "x=266,y=160\n";
         camera_sample(center); assert(position_frames == 2);
-        camera_sample(center);
-        assert(position_frames == 3 && wheel_pulses() == 70U && frame[8] == 12 && frame[6] == 0);
-        finish_alignment_move(); camera_sample(center); assert(position_frames == 3);
+        finish_alignment_move(); camera_sample(center); assert(position_frames == 2);
         feed("ALIGN,701,10000,20000\n"); camera_sample("x=296,y=160\n");
-        assert(position_frames == 4 && frame[8] == 20); /* Legacy resets speed defaults. */
+        assert(position_frames == 3 && wheel_pulses() == 436 && frame[8] == 20); /* Legacy resets speed defaults. */
     }
     reset(); camera_ready(); feed("ALIGN_CFG,702,0,10000,20000,12,30,0\n");
     camera_sample("x=256,y=160\n"); camera_sample("x=256,y=160\n"); assert(position_frames == 0);

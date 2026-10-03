@@ -85,13 +85,21 @@ HAL_StatusTypeDef ZDT_Motor_MoveWheelPulses(
     const int32_t wheel_pulses[ZDT_MOTOR_WHEEL_COUNT],
     uint16_t speed_rpm, uint8_t acceleration)
 {
+    const uint16_t speeds[ZDT_MOTOR_WHEEL_COUNT] = {speed_rpm,speed_rpm,speed_rpm,speed_rpm};
+    return ZDT_Motor_MoveWheelProfile(wheel_pulses, speeds, acceleration);
+}
+HAL_StatusTypeDef ZDT_Motor_MoveWheelProfile(
+    const int32_t wheel_pulses[ZDT_MOTOR_WHEEL_COUNT],
+    const uint16_t speed_rpm[ZDT_MOTOR_WHEEL_COUNT], uint8_t acceleration)
+{
     uint8_t frame[57U]; /* 4 字节 AA 帧头 + 四个 13 字节 FD 子帧 + 1 字节帧尾。 */
     uint16_t index = 4U;
     uint32_t wheel;
     HAL_StatusTypeDef result;
 
-    if ((wheel_pulses == NULL) || (speed_rpm == 0U) ||
-        (speed_rpm > ZDT_MOTOR_MAX_SPEED_RPM)) return HAL_ERROR;
+    if (wheel_pulses == NULL || speed_rpm == NULL) return HAL_ERROR;
+    for (wheel = 0U; wheel < ZDT_MOTOR_WHEEL_COUNT; ++wheel)
+        if (speed_rpm[wheel] == 0U || speed_rpm[wheel] > ZDT_MOTOR_MAX_SPEED_RPM) return HAL_ERROR;
     frame[0] = 0x00U;
     frame[1] = 0xAAU;
     frame[2] = 0x00U;
@@ -108,8 +116,8 @@ HAL_StatusTypeDef ZDT_Motor_MoveWheelPulses(
         frame[index++] = (value >= 0) ? (uint8_t)forward :
                         (uint8_t)(forward == ZDT_DIRECTION_CW ?
                                   ZDT_DIRECTION_CCW : ZDT_DIRECTION_CW);
-        frame[index++] = (uint8_t)(speed_rpm >> 8);
-        frame[index++] = (uint8_t)speed_rpm;
+        frame[index++] = (uint8_t)(speed_rpm[wheel] >> 8);
+        frame[index++] = (uint8_t)speed_rpm[wheel];
         frame[index++] = acceleration;
         /* 32 位脉冲数采用高字节在前；例如 9889 -> 00 00 26 A1。 */
         frame[index++] = (uint8_t)(magnitude >> 24);

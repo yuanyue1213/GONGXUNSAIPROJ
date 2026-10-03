@@ -70,6 +70,10 @@ HAL_StatusTypeDef ZDT_Motor_Enable(uint8_t id, bool enable);
 HAL_StatusTypeDef ZDT_Motor_MoveWheelPulses(
     const int32_t wheel_pulses[ZDT_MOTOR_WHEEL_COUNT],
     uint16_t speed_rpm, uint8_t acceleration);
+/** Combined translation/rotation: per-wheel speeds scale with displacement. */
+HAL_StatusTypeDef ZDT_Motor_MoveWheelProfile(
+    const int32_t wheel_pulses[ZDT_MOTOR_WHEEL_COUNT],
+    const uint16_t speed_rpm[ZDT_MOTOR_WHEEL_COUNT], uint8_t acceleration);
 
 /** 读取 3A 状态：bit0 使能，bit1 到位，bit2 堵转，bit3 堵转保护。 */
 HAL_StatusTypeDef ZDT_Motor_ReadStatus(uint8_t id, uint8_t *flags);
