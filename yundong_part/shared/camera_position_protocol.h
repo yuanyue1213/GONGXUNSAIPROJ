@@ -78,7 +78,7 @@ static inline bool CameraProtocol_ParseAlign(const char *frame, CameraAlignComma
     return cmd->sequence != 0U && cmd->forward_ppm >= 1U && cmd->forward_ppm <= 1000000U &&
            cmd->lateral_ppm >= 1U && cmd->lateral_ppm <= 1000000U;
 }
-/* 2 px tolerance on each axis; combine full X/Y errors in one move. Exact scale 1.090819 mm/px.
+/* 0 px tolerance on each center axis; calculate full X/Y errors. Exact scale 1.090819 mm/px.
  * Motor command mapping after on-car feedback: image right -> B; image down -> L.
  * Command letters describe the existing driver mapping, not a verified physical heading. */
 #define CAMERA_CORRECTION_COARSE_PX    20U
@@ -103,6 +103,34 @@ static inline uint16_t CameraProtocol_ConfiguredRpm(const CameraCenter *center, 
         settings->coarse_rpm : settings->fine_rpm;
 }
 typedef struct { uint32_t sequence, ppm, rpm, step_mm, reverse; } CameraParallelCommand;
+/* Preserve sum/count exactly: 50 integer samples retain 0.02 px resolution.
+ * Compare pixel tolerances before dividing; round only the final motor pulses. */
+static inline bool CameraProtocol_CenterMeanAxes(uint32_t sum_x, uint32_t sum_y, uint32_t count,
+    uint32_t forward_ppm, uint32_t lateral_ppm, const CameraAlignSettings *settings,
+    int32_t pulses[2], uint16_t speeds[2], bool *aligned)
+{
+    if (count == 0U || count > 50U || sum_x > 511U * count || sum_y > 319U * count ||
+        forward_ppm == 0U || forward_ppm > 1000000U || lateral_ppm == 0U || lateral_ppm > 1000000U) return false;
+    int32_t errors[2] = {(int32_t)sum_x - (int32_t)(256U * count),
+                         (int32_t)sum_y - (int32_t)(160U * count)};
+    const uint32_t ppm[2] = {forward_ppm, lateral_ppm};
+    int64_t denominator = (int64_t)1000000000 * count;
+    *aligned = true;
+    for (unsigned i = 0; i < 2U; ++i) {
+        int32_t error = errors[i];
+        uint32_t magnitude = (uint32_t)(error < 0 ? -error : error);
+        speeds[i] = magnitude > CAMERA_CORRECTION_COARSE_PX * count ? settings->coarse_rpm : settings->fine_rpm;
+        pulses[i] = 0;
+        if (magnitude == 0U) continue; /* Skip only an exactly centered axis. */
+        *aligned = false;
+        int64_t raw = (int64_t)error * 1090819 * ppm[i];
+        pulses[i] = (int32_t)((raw + (raw < 0 ? -denominator/2 : denominator/2)) / denominator);
+        if (pulses[i] == 0) pulses[i] = error > 0 ? 1 : -1;
+        if ((i == 0U && CAMERA_IMAGE_RIGHT_DIRECTION == 'F') ||
+            (i == 1U && CAMERA_IMAGE_DOWN_DIRECTION == 'R')) pulses[i] = -pulses[i];
+    }
+    return true;
+}
 /* One camera sample -> full X/Y translation, with no gain or step-distance cap.
  * Wheel travel remains signed pulses; per-wheel RPM follows travel magnitude. */
 static inline bool CameraProtocol_CenterProfile(const CameraCenter *center, uint32_t forward_ppm,
@@ -111,8 +139,6 @@ static inline bool CameraProtocol_CenterProfile(const CameraCenter *center, uint
     if (center->x >= 512U || center->y >= 320U || forward_ppm == 0U || forward_ppm > 1000000U ||
         lateral_ppm == 0U || lateral_ppm > 1000000U) return false;
     int32_t dx = (int32_t)center->x - 256, dy = (int32_t)center->y - 160;
-    if (dx >= -2 && dx <= 2) dx = 0;
-    if (dy >= -2 && dy <= 2) dy = 0;
     *aligned = dx == 0 && dy == 0;
     int64_t x_raw = (int64_t)dx * 1090819 * forward_ppm;
     int64_t y_raw = (int64_t)dy * 1090819 * lateral_ppm;

@@ -30,4 +30,16 @@ class SequenceCardsTest {
         val longest = card.copy(settings = SequenceSettings(-10000, -400, -10000, -400, 120, 120, 120, 300, 270, 270, 270, 360, 360))
         assertTrue(SequencePlan.frames(0xFFFFFFFFL, List(16) { longest }).all { it.trimEnd().length <= 127 })
     }
+    @Test fun turnCardsPersistAndMixWithArmCards() {
+        val turn = SequenceCard("turn-1", "转盘120", 'T', turn = TurnSettings(0,120,60))
+        val cards = listOf(turn, card.copy(mode = 'P'), turn.copy(turn = TurnSettings(120,0,120)))
+        assertEquals(cards, SequenceCardCodec.decode(SequenceCardCodec.encode(cards)))
+        val frames = SequencePlan.frames(8, cards)
+        assertEquals("PLAN_ITEM,8,0,T,0,120,60\n", frames[1])
+        assertTrue(frames[2].startsWith("PLAN_ITEM,8,1,P,"))
+        assertEquals("PLAN_ITEM,8,2,T,120,0,120\n", frames[3])
+        assertFalse(turn.copy(turn = TurnSettings(0,271,60)).valid())
+        assertFalse(turn.copy(turn = TurnSettings(0,120,0)).valid())
+        assertTrue(SequenceCardCodec.decode("x|y|T,0,120,0").isEmpty())
+    }
 }

@@ -13,12 +13,17 @@ class SequenceSettingsTest {
         assertEquals(30, SequenceSettings.parse("110", "-50", "20", "-40", "20", "20", "50", "30")!!.gripperDps)
         assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "20", "20", "50", "0"))
     }
+    @Test fun maximumSequenceSpeed() {
+        assertNotNull(SequenceSettings.parse("110", "-50", "20", "-40", "160", "160", "160"))
+        assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "161", "160", "160"))
+        assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "160", "161", "160"))
+    }
     @Test fun invalidInputIsRejected() {
         for (r in listOf("1000.1", "-1000.1", "1.23", "NaN", ""))
             assertNull(SequenceSettings.parse(r, "-50", "20", "-40", "20", "20", "50"))
         assertNull(SequenceSettings.parse("110", "-401", "20", "-40", "20", "20", "50"))
         assertNull(SequenceSettings.parse("110", "-50.5", "20", "-40", "20", "20", "50"))
         assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "4", "20", "50"))
-        assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "20", "20", "121"))
+        assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "20", "20", "161"))
     }
 }

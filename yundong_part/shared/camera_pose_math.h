@@ -4,10 +4,34 @@
 #include <math.h>
 
 typedef struct {
-    uint32_t sequence, ring_index, forward_ppm, lateral_ppm, wheelbase_mm, track_mm, reverse;
-    int32_t camera_forward_mm, camera_left_mm;
+    uint32_t sequence, ring_index, forward_ppm, lateral_ppm, reverse;
+    float wheelbase_mm, track_mm, camera_forward_mm, camera_left_mm;
     CameraAlignSettings settings;
 } CameraPoseAlignCommand;
+/* Geometry accepts decimal millimetres (up to two fractional digits).
+ * Bound integer accumulation before converting to float; reject extra precision. */
+static inline bool CameraProtocol_GeometryMm(const char **cursor, float *value)
+{
+    const char *p = *cursor;
+    bool negative = *p == '-'; if (negative) ++p;
+    if (*p < '0' || *p > '9') return false;
+    uint32_t whole = 0U, fraction = 0U, divisor = 1U;
+    while (*p >= '0' && *p <= '9') {
+        whole = whole * 10U + (uint32_t)(*p++ - '0');
+        if (whole > 2000U) return false;
+    }
+    if (*p == '.') {
+        ++p; unsigned digits = 0U;
+        while (*p >= '0' && *p <= '9') {
+            if (++digits > 2U) return false;
+            fraction = fraction * 10U + (uint32_t)(*p++ - '0'); divisor *= 10U;
+        }
+        if (digits == 0U) return false;
+    }
+    if (*p != ',' || (whole == 2000U && fraction != 0U)) return false;
+    *value = (whole + (float)fraction / divisor) * (negative ? -1.0f : 1.0f);
+    *cursor = p + 1; return true;
+}
 static inline bool CameraProtocol_ParsePoseAlign(const char *frame, CameraPoseAlignCommand *c)
 {
     if (strncmp(frame, "ALIGN_POSE,", 11U) != 0) return false;
@@ -16,9 +40,9 @@ static inline bool CameraProtocol_ParsePoseAlign(const char *frame, CameraPoseAl
         RobotProtocol_U32(&p, &c->forward_ppm, ',') && RobotProtocol_U32(&p, &c->lateral_ppm, ',') &&
         RobotProtocol_U32(&p, &c->settings.fine_rpm, ',') && RobotProtocol_U32(&p, &c->settings.coarse_rpm, ',') &&
         RobotProtocol_SequenceCoordinate(&p, &c->settings.offset_mm, 100U) &&
-        RobotProtocol_U32(&p, &c->wheelbase_mm, ',') && RobotProtocol_U32(&p, &c->track_mm, ',') &&
-        RobotProtocol_SequenceCoordinate(&p, &c->camera_forward_mm, 2000U) &&
-        RobotProtocol_SequenceCoordinate(&p, &c->camera_left_mm, 2000U) && RobotProtocol_U32(&p, &c->reverse, '\0') &&
+        CameraProtocol_GeometryMm(&p, &c->wheelbase_mm) && CameraProtocol_GeometryMm(&p, &c->track_mm) &&
+        CameraProtocol_GeometryMm(&p, &c->camera_forward_mm) &&
+        CameraProtocol_GeometryMm(&p, &c->camera_left_mm) && RobotProtocol_U32(&p, &c->reverse, '\0') &&
         c->sequence != 0U && c->ring_index >= 1U && c->ring_index <= 3U &&
         c->forward_ppm >= 1U && c->forward_ppm <= 1000000U && c->lateral_ppm >= 1U && c->lateral_ppm <= 1000000U &&
         c->settings.fine_rpm >= 5U && c->settings.fine_rpm <= 60U && c->settings.coarse_rpm >= 5U && c->settings.coarse_rpm <= 60U &&
@@ -27,7 +51,7 @@ static inline bool CameraProtocol_ParsePoseAlign(const char *frame, CameraPoseAl
 /* Camera +X maps to backward chassis travel; +Y to leftward travel.
  * Camera offsets locate the view-center ground point relative to chassis center.
  * Return one constant body-twist wheel profile for the complete measured pose
- * error. The SE(2) inverse accounts for changing heading during translation. */
+ * error. Final X compensation is handled after alignment. The SE(2) inverse accounts for changing heading during translation. */
 static inline bool CameraProtocol_PoseProfile(const CameraPoseAlignCommand *c, const CameraCenter rings[3],
     int32_t pulses[4], uint16_t speeds[4], bool *aligned)
 {
@@ -36,16 +60,16 @@ static inline bool CameraProtocol_PoseProfile(const CameraPoseAlignCommand *c, c
     if (!CameraProtocol_RingSlope(rings, &slope)) return false;
     CameraCenter center = rings[c->ring_index - 1U];
     const float scale = 1.090819f;
-    float ex = ((int)center.x - 256) * scale + c->settings.offset_mm;
+    float ex = ((int)center.x - 256) * scale;
     float ey = ((int)center.y - 160) * scale;
-    *aligned = fabsf(ex) <= 2.0f*scale && fabsf(ey) <= 2.0f*scale && CameraProtocol_RingYSpread(rings) <= 1U;
+    *aligned = center.x == 256U && center.y == 160U && CameraProtocol_RingYSpread(rings) <= 1U;
     if (*aligned) return true;
     if (slope == 0 && CameraProtocol_RingYSpread(rings) > 1U) return false;
     float theta = -atanf(slope / 1000.0f);
     if (c->reverse != 0U) theta = -theta;
     float cs = cosf(theta), sn = sinf(theta);
     float a = (float)c->camera_forward_mm, b = (float)c->camera_left_mm;
-    float desired_a = a + c->settings.offset_mm;
+    float desired_a = a;
     float tx = a - ((int)center.x-256)*scale - (cs*desired_a - sn*b);
     float ty = b + ey - (sn*desired_a + cs*b);
     float u = tx, v = ty;

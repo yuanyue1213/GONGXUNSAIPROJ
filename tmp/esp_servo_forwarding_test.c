@@ -7,6 +7,7 @@
 #include <errno.h>
 #include "../yundong_part/shared/robot_distance_protocol.h"
 #include "../yundong_part/shared/camera_position_protocol.h"
+#include "../yundong_part/shared/camera_pose_math.h"
 #define MAX_FRAME_LENGTH 127
 static char forwarded[128];
 static bool send_to_stm32(const char *frame) { strcpy(forwarded, frame); return true; }
@@ -107,7 +108,10 @@ static bool handle_frame(const char *frame, int64_t *last_lift_us)
 {
     uint32_t sequence;
     motion_t motion;
-    if (strncmp(frame, "BASE,", 5U) == 0) {
+    if (strncmp(frame, "ALIGN_POSE,", 11U) == 0) {
+        CameraPoseAlignCommand command;
+        if (!CameraProtocol_ParsePoseAlign(frame, &command)) return true;
+    } else if (strncmp(frame, "BASE,", 5U) == 0) {
         RobotBaseCommand command;
         if (!RobotProtocol_ParseBase(frame, &command)) return true;
     } else if (strncmp(frame, "ORIGIN,", 7U) == 0) {
@@ -171,7 +175,7 @@ static bool handle_frame(const char *frame, int64_t *last_lift_us)
 
 int main(void) {
     int64_t lift = 0;
-    const char *commands[] = {"BASE,1002,360,30", "BASE,1003,0,1", "ORIGIN,1000,251", "PLAN_BEGIN,1001,2", "PLAN_ITEM,1001,0,A,1100,-50,200,-40,20,20,50,60,0,60,0,248,140", "PLAN_ITEM,1001,1,P,200,-40,1300,-110,20,20,50,60,0,60,0,248,140", "PLAN_RUN,1001", "SERVO,1577625090,G,90", "SERVO,1577625091,T,270", "SERVO,1577625092,B,360", "CMD,1577625093,A", "CMD,1577625094,Z", "ARM_MOVE,1577625095,E,127,10,3200", "ALIGN,1577625096,9889,12000", "ALIGN_RING,1577625120,2,9889,12000", "STATE,1577625121,P,200,-40,1300,-110,20,20,50", "STATE,1577625122,P,200,-40,1300,-110,20,20,50,30", "ALIGN_CFG,1577625123,2,9889,12000,12,30,-7", "GRIP,1577625124,0,60,30", "GRIP_STOP,1577625125", "PARALLEL,1577625127,9889,10,3,0", "MOVE,1577625128,C,5,10,9889", "MOVE,1577625129,W,5,10,9889", "STATE,1577625126,P,200,-40,1300,-110,120,120,120,40,30,100,20,250,130", "LIFT_ANGLE,1577625097,U,90,5,3200", "LIFT_ANGLE,1577625098,D,360,10,6400", "LIFT_MOVE,1577625099,U,10,5,3200", "LIFT_MOVE,1577625100,D,40,10,6400"};
+    const char *commands[] = {"STATE,2000,A,1100,-50,200,-40,160,160,160", "PLAN_ITEM,2000,0,P,200,-40,1300,-110,160,160,160", "ALIGN_POSE,1005,2,9889,9889,10,20,10,190,251.4,-7,-291.27,0", "ALIGN_POSE,1004,2,9889,9889,10,20,10,300,250,0,0,0", "BASE,1002,360,30", "BASE,1003,0,1", "ORIGIN,1000,251", "PLAN_BEGIN,1001,2", "PLAN_ITEM,1001,0,A,1100,-50,200,-40,20,20,50,60,0,60,0,248,140", "PLAN_ITEM,1001,1,P,200,-40,1300,-110,20,20,50,60,0,60,0,248,140", "PLAN_RUN,1001", "SERVO,1577625090,G,90", "SERVO,1577625091,T,270", "SERVO,1577625092,B,360", "CMD,1577625093,A", "CMD,1577625094,Z", "ARM_MOVE,1577625095,E,127,10,3200", "ALIGN,1577625096,9889,12000", "ALIGN_RING,1577625120,2,9889,12000", "STATE,1577625121,P,200,-40,1300,-110,20,20,50", "STATE,1577625122,P,200,-40,1300,-110,20,20,50,30", "ALIGN_CFG,1577625123,2,9889,12000,12,30,-7", "GRIP,1577625124,0,60,30", "GRIP_STOP,1577625125", "PARALLEL,1577625127,9889,10,3,0", "MOVE,1577625128,C,5,10,9889", "MOVE,1577625129,W,5,10,9889", "STATE,1577625126,P,200,-40,1300,-110,120,120,120,40,30,100,20,250,130", "LIFT_ANGLE,1577625097,U,90,5,3200", "LIFT_ANGLE,1577625098,D,360,10,6400", "LIFT_MOVE,1577625099,U,10,5,3200", "LIFT_MOVE,1577625100,D,40,10,6400"};
     for (unsigned i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
         char expected[128];
         snprintf(expected, sizeof(expected), "%s\n", commands[i]);
@@ -218,5 +222,9 @@ int main(void) {
     assert(handle_frame("BASE,1,-1,60", &lift)); assert(forwarded[0] == 0);
     assert(handle_frame("BASE,1,361,60", &lift)); assert(forwarded[0] == 0);
     assert(handle_frame("BASE,1,90,0", &lift)); assert(forwarded[0] == 0);
+    assert(handle_frame("PLAN_ITEM,4,0,T,0,120,60", &lift));
+    assert(strcmp(forwarded, "PLAN_ITEM,4,0,T,0,120,60\n") == 0);
+    forwarded[0] = 0;
+    assert(handle_frame("PLAN_ITEM,4,0,T,0,271,60", &lift)); assert(forwarded[0] == 0);
     puts("PASS: ESP32 forwards SERVO/state/ARM/ALIGN/LIFT_ANGLE commands without replies");
 }

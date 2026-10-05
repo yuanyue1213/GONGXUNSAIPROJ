@@ -10,7 +10,7 @@ internal data class SequenceSettings(
 ) {
     fun valid() = r1 in -10000..10000 && r2 in -10000..10000 &&
         z1 in -400..400 && z2 in -400..400 &&
-        radialRpm in 5..120 && upRpm in 5..120 && downRpm in 5..120 && gripperDps in 6..300 && theta in 0..270 && openAngle in 0..270 && closeAngle in 0..270 && baseHome in 0..360 && baseTilt in 0..360
+        radialRpm in 5..160 && upRpm in 5..160 && downRpm in 5..160 && gripperDps in 6..300 && theta in 0..270 && openAngle in 0..270 && closeAngle in 0..270 && baseHome in 0..360 && baseTilt in 0..360
     fun frame(sequence: Long, mode: Char) =
         "STATE,$sequence,$mode,$r1,$z1,$r2,$z2,$radialRpm,$upRpm,$downRpm,$gripperDps,$theta,$openAngle,$closeAngle,$baseHome,$baseTilt\n"
     companion object {

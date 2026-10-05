@@ -73,6 +73,11 @@ internal class RobotTcpClient(
         sendFrame(settings.frame(nextSequence(), ring, forwardPpm, lateralPpm))
     }
 
+    fun sendJointAlignment(ring: Int, forward: Int, lateral: Int, settings: AlignmentSettings, geometry: JointAlignmentSettings) {
+        if (ring !in 1..3 || forward !in 1..1000000 || lateral !in 1..1000000 || !settings.valid() || !geometry.valid()) return
+        sendFrame(geometry.frame(nextSequence(), ring, forward, lateral, settings))
+    }
+
     fun sendRingAlignment(ring: Int, forwardPpm: Int, lateralPpm: Int) {
         if (ring !in 1..3 || forwardPpm !in 1..1000000 || lateralPpm !in 1..1000000) return
         sendFrame("ALIGN_RING,${nextSequence()},$ring,$forwardPpm,$lateralPpm\n")

@@ -122,6 +122,7 @@ class MainActivity : ComponentActivity() {
                         robotClient.sendConfiguredAlignment(ring, forward, lateral, settings)
                         moveStatus = "已提交色环位置修正；停止底盘可取消，无到位回包"
                     },
+                    onJointAlign = { ring, forward, lateral, settings, geometry -> robotClient.sendJointAlignment(ring, forward, lateral, settings, geometry) },
                     onParallel = { ppm, rpm, step, reverse -> robotClient.sendParallel(ppm, rpm, step, reverse) },
                     onStopMotion = ::stopMotion,
                     onStartLift = ::startLift,
@@ -253,6 +254,7 @@ private fun RemoteControlScreen(
     onMove: (DistanceMove) -> Unit,
     onAlign: (Int, Int, AlignmentSettings) -> Unit,
     onRingAlign: (Int, Int, Int, AlignmentSettings) -> Unit,
+    onJointAlign: (Int, Int, Int, AlignmentSettings, JointAlignmentSettings) -> Unit,
     onParallel: (Int, Int, Int, Boolean) -> Unit,
     onStopMotion: () -> Unit,
     onStartLift: (Char) -> Unit,
@@ -371,7 +373,7 @@ private fun RemoteControlScreen(
                         ) { Text(if (connected) "断开连接" else "连接 ESP32-S3") }
 
                     }
-                    1 -> DistanceMovePanel(connected, moveRunning, moveStatus, onMove, onAlign, onRingAlign, onParallel, onStopMotion,
+                    1 -> DistanceMovePanel(connected, moveRunning, moveStatus, onMove, onAlign, onRingAlign, onJointAlign, onParallel, onStopMotion,
                         onSectionSelected = { scope.launch { scroll.scrollTo(0) } })
                     2 -> ArmPosePanel(connected, onArmPose, onInitializeOrigin, onHome, onStopArm)
                     3 -> {
@@ -384,7 +386,7 @@ private fun RemoteControlScreen(
                         var flow by rememberSaveable { mutableStateOf(0) }
                         val flowState = rememberSaveableStateHolder()
                         TabRow(selectedTabIndex = flow) {
-                            listOf("抓取", "放下", "卡片编排").forEachIndexed { index, title ->
+                            listOf("抓取", "放下", "转盘", "卡片编排").forEachIndexed { index, title ->
                                 Tab(selected = flow == index, onClick = {
                                     focusManager.clearFocus(); keyboard?.hide(); flow = index
                                     scope.launch { scroll.scrollTo(0) }
@@ -398,6 +400,10 @@ private fun RemoteControlScreen(
                                     onSave = { name, settings -> saveCard(name, 'A', settings) })
                                 1 -> SequenceSettingsPanel("放下", true, connected, onRelease,
                                     onSave = { name, settings -> saveCard(name, 'P', settings) })
+                                2 -> TurnCardPanel(connected, onSave = { name, turn ->
+                                    cards = cards + SequenceCard(UUID.randomUUID().toString(), name, 'T', turn = turn)
+                                    cardStore.saveCards(cards)
+                                }, onExecute = { turn -> onPlan(listOf(SequenceCard("manual-turn", "转盘", 'T', turn = turn))) })
                                 else -> SequenceCardsPanel(cards, plan, connected,
                                     onPlanChange = { plan = it; cardStore.savePlan(it) },
                                     onDeleteCard = { id -> cards = cards.filterNot { it.id == id }; cardStore.saveCards(cards) },
@@ -423,6 +429,7 @@ private fun DistanceMovePanel(
     onMove: (DistanceMove) -> Unit,
     onAlign: (Int, Int, AlignmentSettings) -> Unit,
     onRingAlign: (Int, Int, Int, AlignmentSettings) -> Unit,
+    onJointAlign: (Int, Int, Int, AlignmentSettings, JointAlignmentSettings) -> Unit,
     onParallel: (Int, Int, Int, Boolean) -> Unit,
     onStop: () -> Unit,
     onSectionSelected: () -> Unit = {},
@@ -444,6 +451,10 @@ private fun DistanceMovePanel(
     var coarseRpm by rememberSaveable { mutableStateOf("20") }
     var xOffset by rememberSaveable { mutableStateOf("10") }
     fun alignmentSettings() = AlignmentSettings.parse(fineRpm, coarseRpm, xOffset)
+    var wheelbase by rememberSaveable { mutableStateOf("190") }
+    var track by rememberSaveable { mutableStateOf("251.4") }
+    var cameraForward by rememberSaveable { mutableStateOf("-7") }
+    var cameraLeft by rememberSaveable { mutableStateOf("-291.27") }
     var section by rememberSaveable { mutableStateOf(0) }
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -521,6 +532,27 @@ private fun DistanceMovePanel(
         }, enabled = connected && !running, modifier = Modifier.fillMaxWidth()) {
             Text("执行色环位置修正")
         }
+        HorizontalDivider(Modifier.padding(vertical = 12.dp))
+        Text("中心＋平行联合校准", style = MaterialTheme.typography.titleMedium)
+        DistanceInput("前后轮中心间距（mm，50–2000）", wheelbase, !running, true) { wheelbase = it }
+        DistanceInput("左右轮中心间距（mm，50–2000）", track, !running, true) { track = it }
+        VisibleTextField(value = cameraForward, onValueChange = { cameraForward = it },
+            label = { Text("画面中心相对底盘中心：前方偏移（mm）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        VisibleTextField(value = cameraLeft, onValueChange = { cameraLeft = it },
+            label = { Text("画面中心相对底盘中心：左方偏移（mm）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Button(onClick = { reverseTurn = !reverseTurn }) {
+            Text(if (reverseTurn) "联合转向：反向" else "联合转向：默认")
+        }
+        Button(onClick = {
+            val forward = DistanceMove.fromInputs('F', "1000", "20", diameter, wheelPulses, forwardCorrection)
+            val lateral = DistanceMove.fromInputs('L', "1000", "20", diameter, wheelPulses, lateralCorrection)
+            val settings = alignmentSettings()
+            val values = listOf(wheelbase, track, cameraForward, cameraLeft).map { it.trim().toDoubleOrNull() }
+            val geometry = if (values.all { it != null }) JointAlignmentSettings(values[0]!!, values[1]!!, values[2]!!, values[3]!!, reverseTurn) else null
+            if (forward == null || lateral == null || settings == null || geometry == null || !geometry.valid())
+                error = "请填写实际轮距、摄像头偏移及底盘标定参数"
+            else { error = null; onJointAlign(ring, forward.pulsesPerMetre, lateral.pulsesPerMetre, settings, geometry) }
+        }, enabled = connected && !running, modifier = Modifier.fillMaxWidth()) { Text("执行中心＋平行校准") }
     }
     if (section == 2) {
         Text("左右转 / 圆心连线校准", style = MaterialTheme.typography.titleMedium)
@@ -671,7 +703,6 @@ private fun SequenceSettingsPanel(
     var up by rememberSaveable { mutableStateOf("20") }
     var down by rememberSaveable { mutableStateOf("50") }
     var gripper by rememberSaveable { mutableStateOf("60") }
-    var theta by rememberSaveable { mutableStateOf("0") }
     var openAngle by rememberSaveable { mutableStateOf("60") }
     var closeAngle by rememberSaveable { mutableStateOf("0") }
     var baseHome by rememberSaveable { mutableStateOf("248") }
@@ -690,19 +721,18 @@ private fun SequenceSettingsPanel(
         singleLine = true, modifier = Modifier.fillMaxWidth())
     VisibleTextField(value = z2, onValueChange = { z2 = it }, label = { Text("$second z（mm）") },
         singleLine = true, modifier = Modifier.fillMaxWidth())
-    DistanceInput("伸缩速度（RPM）", radial, true) { radial = it }
-    DistanceInput("上升速度（RPM）", up, true) { up = it }
-    DistanceInput("下降速度（RPM）", down, true) { down = it }
+    DistanceInput("伸缩速度（RPM，5–160）", radial, true) { radial = it }
+    DistanceInput("上升速度（RPM，5–160）", up, true) { up = it }
+    DistanceInput("下降速度（RPM，5–160）", down, true) { down = it }
     DistanceInput("夹子张开速度（度/秒，6–300）", gripper, true) { gripper = it }
-    DistanceInput("转盘角度（0–270 度）", theta, true) { theta = it }
     DistanceInput("夹子张开角度（0–270 度）", openAngle, true) { openAngle = it }
     DistanceInput("夹子夹紧角度（0–270 度）", closeAngle, true) { closeAngle = it }
-    DistanceInput("基座初始位（0–360 度）", baseHome, true) { baseHome = it }
-    DistanceInput("基座翻转位（0–360 度）", baseTilt, true) { baseTilt = it }
+    DistanceInput(if (release) "放置角度（基座，0–360 度）" else "抓取角度（基座，0–360 度）", baseHome, true) { baseHome = it }
+    DistanceInput(if (release) "转盘取物角度（基座，0–360 度）" else "转盘存放角度（基座，0–360 度）", baseTilt, true) { baseTilt = it }
     VisibleTextField(value = cardName, onValueChange = { cardName = it; saved = false },
         label = { Text("卡片名称（最多40字）") }, modifier = Modifier.fillMaxWidth())
     Button(onClick = {
-        val settings = SequenceSettings.parse(r1, z1, r2, z2, radial, up, down, gripper, theta, openAngle, closeAngle, baseHome, baseTilt)
+        val settings = SequenceSettings.parse(r1, z1, r2, z2, radial, up, down, gripper, "0", openAngle, closeAngle, baseHome, baseTilt)
         if (settings == null) error = "请检查位置、速度和角度参数"
         else if (cardName.isBlank() || cardName.trim().length > 40) error = "请填写1–40字的卡片名称"
         else { error = null; onSave(cardName.trim(), settings); saved = true }
@@ -710,8 +740,8 @@ private fun SequenceSettingsPanel(
     if (saved) Text("已保存，可在卡片编排中选择")
     error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     Button(onClick = {
-        val settings = SequenceSettings.parse(r1, z1, r2, z2, radial, up, down, gripper, theta, openAngle, closeAngle, baseHome, baseTilt)
-        if (settings == null) error = "r：±1000 mm（最多1位小数）；z：±400 mm（整数）；速度：5–120 RPM；夹子：6–300 度/秒"
+        val settings = SequenceSettings.parse(r1, z1, r2, z2, radial, up, down, gripper, "0", openAngle, closeAngle, baseHome, baseTilt)
+        if (settings == null) error = "r：±1000 mm（最多1位小数）；z：±400 mm（整数）；速度：5–160 RPM；夹子：6–300 度/秒"
         else { error = null; onExecute(settings) }
     }, enabled = connected, modifier = Modifier.fillMaxWidth()) { Text("执行$title") }
     Spacer(Modifier.height(12.dp))
@@ -724,7 +754,7 @@ private fun SequenceCardsPanel(
     onPlanChange: (List<SequenceCard>) -> Unit, onDeleteCard: (String) -> Unit, onExecute: () -> Unit,
 ) {
     Text("当前编排 ${plan.size}/${SequencePlan.MAX_ITEMS}", style = MaterialTheme.typography.titleMedium)
-    if (plan.isEmpty()) Text("从下方卡片库加入抓取或放下卡片")
+    if (plan.isEmpty()) Text("从下方卡片库加入抓取、放下或转盘卡片")
     plan.forEachIndexed { index, card ->
         SequenceCardView(card, "${index + 1}. ") {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -748,7 +778,7 @@ private fun SequenceCardsPanel(
     }
     HorizontalDivider(Modifier.padding(vertical = 12.dp))
     Text("卡片库", style = MaterialTheme.typography.titleMedium)
-    if (cards.isEmpty()) Text("在抓取或放下页填写参数，点击保存为卡片")
+    if (cards.isEmpty()) Text("在抓取、放下或转盘页填写参数，点击保存为卡片")
     cards.forEach { card ->
         SequenceCardView(card) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -764,10 +794,17 @@ private fun SequenceCardView(card: SequenceCard, prefix: String = "", actions: @
     val p = card.settings
     Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("$prefix${card.name} · ${if (card.mode == 'A') "抓取" else "放下"}", fontWeight = FontWeight.Bold)
+            Text("$prefix${card.name} · ${when (card.mode) { 'A' -> "抓取"; 'T' -> "转盘"; else -> "放下" }}", fontWeight = FontWeight.Bold)
+            if (card.mode == 'T') {
+                val t = card.turn!!
+                Text("转盘 ${t.start}° → ${t.end}°；速度 ${t.dps}°/秒")
+            } else {
             Text("目标1 r=${p.r1 / 10.0} mm  z=${p.z1} mm；目标2 r=${p.r2 / 10.0} mm  z=${p.z2} mm")
             Text("伸缩/上升/下降 ${p.radialRpm}/${p.upRpm}/${p.downRpm} RPM；夹子 ${p.gripperDps}°/s")
-            Text("转盘 ${p.theta}°；夹子开/合 ${p.openAngle}/${p.closeAngle}°；基座 ${p.baseHome}/${p.baseTilt}°")
+            Text("夹子开/合 ${p.openAngle}/${p.closeAngle}°")
+            Text(if (card.mode == 'P') "基座：转盘取物 ${p.baseTilt}° → 放置 ${p.baseHome}°"
+                else "基座：抓取 ${p.baseHome}° → 转盘存放 ${p.baseTilt}°")
+            }
             actions()
         }
     }
@@ -789,13 +826,13 @@ private fun ArmPosePanel(
     var note by rememberSaveable { mutableStateOf("等待绝对位置指令") }
     Text("机械臂：柱坐标绝对位置", style = MaterialTheme.typography.titleMedium)
     var originBase by rememberSaveable { mutableStateOf("248") }
-    DistanceInput("初始基座角度（0–360 度）", originBase, true) { originBase = it }
-    Text("首次记录r/z零点；之后可随时更新初始基座角度，零点不变。")
+    DistanceInput("启动基座角度（0–360 度）", originBase, true) { originBase = it }
+    Text("首次记录r/z零点；之后可随时更新启动基座角度，零点不变。")
     Button(onClick = {
         val base = originBase.toIntOrNull()
         if (base == null || base !in 0..360) note = "请输入0–360度的初始化基座角度"
-        else { onInitialize(base); note = "已提交初始基座角度$base°；首次初始化记录零点，之后保留零点" }
-    }, enabled = connected, modifier = Modifier.fillMaxWidth()) { Text("初始化 / 更新初始基座角度") }
+        else { onInitialize(base); note = "已提交启动基座角度$base°；首次初始化记录零点，之后保留零点" }
+    }, enabled = connected, modifier = Modifier.fillMaxWidth()) { Text("初始化 / 更新启动基座角度") }
     DistanceInput("转盘 θ（度，0–270）", theta, connected) { theta = it }
     VisibleTextField(value = r, onValueChange = { r = it }, label = { Text("前伸 r（mm，-1000–1000）") },
         enabled = connected, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -942,6 +979,7 @@ private fun RemoteControlPreview() {
             onMove = {},
             onAlign = { _, _, _ -> },
             onRingAlign = { _, _, _, _ -> },
+            onJointAlign = { _, _, _, _, _ -> },
             onParallel = { _, _, _, _ -> },
             onStopMotion = {},
             onStartLift = {},
@@ -962,4 +1000,25 @@ private fun RemoteControlPreview() {
             onServoFinished = { _, _ -> },
         )
     }
+}
+
+@Composable
+private fun TurnCardPanel(connected: Boolean, onSave: (String, TurnSettings) -> Unit, onExecute: (TurnSettings) -> Unit) {
+    var start by rememberSaveable { mutableStateOf("0") }
+    var end by rememberSaveable { mutableStateOf("120") }
+    var speed by rememberSaveable { mutableStateOf("60") }
+    var name by rememberSaveable { mutableStateOf("转盘") }
+    var message by remember { mutableStateOf<String?>(null) }
+    fun values(): TurnSettings? = try { TurnSettings(start.trim().toInt(), end.trim().toInt(), speed.trim().toInt()).takeIf { it.valid() } } catch (_: IllegalArgumentException) { null }
+    DistanceInput("起始角度（0–270度）", start, true) { start = it }
+    DistanceInput("结束角度（0–270度）", end, true) { end = it }
+    DistanceInput("速度（1–360度/秒）", speed, true) { speed = it }
+    VisibleTextField(value = name, onValueChange = { name = it }, label = { Text("卡片名称") }, modifier = Modifier.fillMaxWidth())
+    Button(onClick = {
+        val v = values()
+        if (v == null || name.trim().length !in 1..40) message = "请检查角度、速度和名称"
+        else { onSave(name.trim(), v); message = "已保存" }
+    }, modifier = Modifier.fillMaxWidth()) { Text("保存转盘卡片") }
+    Button(onClick = { val v = values(); if (v == null) message = "请检查角度和速度" else onExecute(v) }, enabled = connected, modifier = Modifier.fillMaxWidth()) { Text("执行转盘") }
+    message?.let { Text(it) }
 }

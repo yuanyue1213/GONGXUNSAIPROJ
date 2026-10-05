@@ -203,11 +203,19 @@ static inline bool RobotProtocol_ParseSequence(const char *frame, RobotSequenceC
     bool item = strncmp(frame, "PLAN_ITEM,", 10U) == 0;
     if (!item && strncmp(frame, "STATE,", 6U) != 0) return false;
     const char *p = frame + (item ? 10U : 6U);
-    cmd->plan_index = 0U;
+    *cmd = (RobotSequenceCommand){0};
     if (!RobotProtocol_U32(&p, &cmd->sequence, ',')) return false;
     if (item && (!RobotProtocol_U32(&p, &cmd->plan_index, ',') || cmd->plan_index >= 16U)) return false;
-    if ((*p != 'A' && *p != 'P') || p[1] != ',') return false;
+    if ((*p != 'A' && *p != 'P' && *p != 'T') || p[1] != ',') return false;
     cmd->mode = *p; p += 2;
+    /* T card: start/end angles and angular speed, independent of arm coordinates. */
+    if (cmd->mode == 'T') {
+        return RobotProtocol_U32(&p, &cmd->theta, ',') &&
+            RobotProtocol_U32(&p, &cmd->open_angle, ',') &&
+            RobotProtocol_U32(&p, &cmd->gripper_dps, '\0') && cmd->sequence != 0U &&
+            cmd->theta <= 270U && cmd->open_angle <= 270U &&
+            cmd->gripper_dps >= 1U && cmd->gripper_dps <= 360U;
+    }
     if (!RobotProtocol_SequenceCoordinate(&p, &cmd->r1, 10000U) ||
         !RobotProtocol_SequenceCoordinate(&p, &cmd->z1, 400U) ||
         !RobotProtocol_SequenceCoordinate(&p, &cmd->r2, 10000U) ||
@@ -226,8 +234,8 @@ static inline bool RobotProtocol_ParseSequence(const char *frame, RobotSequenceC
             !RobotProtocol_U32(&p, &cmd->open_angle, ',') || !RobotProtocol_U32(&p, &cmd->close_angle, ',') ||
             !RobotProtocol_U32(&p, &cmd->base_home, ',') || !RobotProtocol_U32(&p, &cmd->base_tilt, '\0'))) return false;
     }
-    return cmd->sequence != 0U && cmd->r_rpm >= 5U && cmd->r_rpm <= 120U &&
-        cmd->up_rpm >= 5U && cmd->up_rpm <= 120U && cmd->down_rpm >= 5U && cmd->down_rpm <= 120U &&
+    return cmd->sequence != 0U && cmd->r_rpm >= 5U && cmd->r_rpm <= 160U &&
+        cmd->up_rpm >= 5U && cmd->up_rpm <= 160U && cmd->down_rpm >= 5U && cmd->down_rpm <= 160U &&
         cmd->gripper_dps >= 6U && cmd->gripper_dps <= 300U && cmd->theta <= 270U &&
         cmd->open_angle <= 270U && cmd->close_angle <= 270U && cmd->base_home <= 360U && cmd->base_tilt <= 360U;
 }
