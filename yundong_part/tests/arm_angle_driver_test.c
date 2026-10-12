@@ -106,10 +106,31 @@ int main(void)
     reset(0x21);
     assert(LiftMotor_MoveAngle('D', 900, 120, 3200) == HAL_OK);
     assert(position[3] == 0 && position[4] == 120);
-    assert(LiftMotor_MoveAngle('D', 900, 121, 3200) != HAL_OK);
+    assert(LiftMotor_MoveAngle('D', 900, 301, 3200) != HAL_OK);
     reset(0x25);
     assert(ArmMotor_MoveAngle('E', 900, 120, 3200) == HAL_OK);
     assert(position[7] == 4 && position[8] == 0xB0); /* X speed is RPM * 10. */
+    reset(0x21);
+    assert(ArmMotor_MoveAbsolute(2, 312, 160, 3200) == HAL_OK); /* r=11 mm: 31.2 degrees. */
+    assert(position[2] == 0 && position[4] == 160 && position[10] == 1);
+    assert(position[8] == 1 && position[9] == 0x15); /* 277 microsteps, not zero. */
+    assert(ArmMotor_MoveAbsolute(1, 0, 160, 3200) == HAL_OK);
+    assert(ArmMotor_MoveAbsolute(2, 312, 301, 3200) == HAL_ERROR);
+    reset(0x25);
+    assert(ArmMotor_MoveAbsolute(2, 312, 160, 3200) == HAL_OK);
+    assert(position[7] == 6 && position[8] == 0x40 && position[11] == 1 && position[12] == 0x38 && position[13] == 1);
+    reset(0x21);
+    assert(LiftMotor_MoveAngle('U', 900, 300, 3200) == HAL_OK);
+    assert(position[3] == 1 && position[4] == 0x2C);
+    assert(ArmMotor_MoveAbsolute(2, 312, 300, 3200) == HAL_OK);
+    assert(position[3] == 1 && position[4] == 0x2C);
+    reset(0x25);
+    assert(ArmMotor_MoveAngle('E', 900, 300, 3200) == HAL_OK);
+    assert(position[7] == 0x0B && position[8] == 0xB8);
+    assert(ArmMotor_MoveAbsolute(1, 0, 300, 3200) == HAL_OK);
+    assert(position[7] == 0x0B && position[8] == 0xB8);
+    assert(ArmMotor_MoveAngle('E', 900, 301, 3200) == HAL_ERROR);
+    assert(ArmMotor_MoveAbsolute(1, 0, 301, 3200) == HAL_ERROR);
     puts("PASS: ID1/ID2 Emm/X FD frames, angle conversion, directions and ACK failures");
     return 0;
 }

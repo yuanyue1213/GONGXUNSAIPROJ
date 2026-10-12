@@ -36,13 +36,15 @@ static inline bool CameraProtocol_ParsePoseAlign(const char *frame, CameraPoseAl
 {
     if (strncmp(frame, "ALIGN_POSE,", 11U) != 0) return false;
     const char *p = frame + 11U;
+    c->settings = CameraProtocol_DefaultSettings();
     return RobotProtocol_U32(&p, &c->sequence, ',') && RobotProtocol_U32(&p, &c->ring_index, ',') &&
         RobotProtocol_U32(&p, &c->forward_ppm, ',') && RobotProtocol_U32(&p, &c->lateral_ppm, ',') &&
         RobotProtocol_U32(&p, &c->settings.fine_rpm, ',') && RobotProtocol_U32(&p, &c->settings.coarse_rpm, ',') &&
         RobotProtocol_SequenceCoordinate(&p, &c->settings.offset_mm, 100U) &&
         CameraProtocol_GeometryMm(&p, &c->wheelbase_mm) && CameraProtocol_GeometryMm(&p, &c->track_mm) &&
         CameraProtocol_GeometryMm(&p, &c->camera_forward_mm) &&
-        CameraProtocol_GeometryMm(&p, &c->camera_left_mm) && RobotProtocol_U32(&p, &c->reverse, '\0') &&
+        CameraProtocol_GeometryMm(&p, &c->camera_left_mm) &&
+        CameraProtocol_FinalU32Target(&p, &c->reverse, &c->settings) &&
         c->sequence != 0U && c->ring_index >= 1U && c->ring_index <= 3U &&
         c->forward_ppm >= 1U && c->forward_ppm <= 1000000U && c->lateral_ppm >= 1U && c->lateral_ppm <= 1000000U &&
         c->settings.fine_rpm >= 5U && c->settings.fine_rpm <= 60U && c->settings.coarse_rpm >= 5U && c->settings.coarse_rpm <= 60U &&
@@ -56,22 +58,23 @@ static inline bool CameraProtocol_PoseProfile(const CameraPoseAlignCommand *c, c
     int32_t pulses[4], uint16_t speeds[4], bool *aligned)
 {
     if (c->ring_index < 1U || c->ring_index > 3U) return false;
-    int32_t slope;
+    float slope;
     if (!CameraProtocol_RingSlope(rings, &slope)) return false;
     CameraCenter center = rings[c->ring_index - 1U];
     const float scale = 1.090819f;
-    float ex = ((int)center.x - 256) * scale;
-    float ey = ((int)center.y - 160) * scale;
-    *aligned = center.x == 256U && center.y == 160U && CameraProtocol_RingYSpread(rings) <= 1U;
+    float ex = (center.x - CameraProtocol_TargetX(&c->settings)) * scale;
+    float ey = (center.y - CameraProtocol_TargetY(&c->settings)) * scale;
+    *aligned = center.x == CameraProtocol_TargetX(&c->settings) && center.y == CameraProtocol_TargetY(&c->settings) && CameraProtocol_RingYSpread(rings) <= 1U;
     if (*aligned) return true;
     if (slope == 0 && CameraProtocol_RingYSpread(rings) > 1U) return false;
     float theta = -atanf(slope / 1000.0f);
     if (c->reverse != 0U) theta = -theta;
     float cs = cosf(theta), sn = sinf(theta);
     float a = (float)c->camera_forward_mm, b = (float)c->camera_left_mm;
-    float desired_a = a;
-    float tx = a - ((int)center.x-256)*scale - (cs*desired_a - sn*b);
-    float ty = b + ey - (sn*desired_a + cs*b);
+    float desired_a = a - (CameraProtocol_TargetX(&c->settings)-256.0f)*scale;
+    float desired_b = b + (CameraProtocol_TargetY(&c->settings)-160.0f)*scale;
+    float tx = a - (center.x-256.0f)*scale - (cs*desired_a - sn*desired_b);
+    float ty = b + (center.y-160.0f)*scale - (sn*desired_a + cs*desired_b);
     float u = tx, v = ty;
     if (fabsf(theta) > 0.00001f) {
         float j = sn/theta, k = (1.0f-cs)/theta;

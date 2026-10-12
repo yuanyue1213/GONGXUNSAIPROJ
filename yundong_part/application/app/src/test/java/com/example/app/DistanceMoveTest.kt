@@ -4,6 +4,34 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class DistanceMoveTest {
+    private fun rotation(direction: Char = 'C', angle: String = "90", rpm: String = "10",
+        base: String = "190", track: String = "251.4", factor: String = "1") =
+        DistanceMove.rotationFromInputs(direction, angle, rpm, "103", "3200", factor, base, track)
+
+    @Test fun fixedAngleRotationEncodesRoundedWheelPulses() {
+        val left = rotation()!!
+        val expected = (kotlin.math.PI * 441.4 * 90 / 360 * 9889 / 1000).let {
+            kotlin.math.round(it).toInt()
+        }
+        assertEquals("MOVE,7,C,1000,10,$expected\n", left.frame(7))
+        assertEquals(90.0, left.rotationDegrees!!, 0.0)
+        assertEquals(left.pulsesPerMetre, rotation('W')!!.pulsesPerMetre)
+        assertTrue(kotlin.math.abs(expected * 4 - rotation(angle = "360")!!.pulsesPerMetre) <= 2)
+        assertTrue(rotation(angle = "0.1")!!.pulsesPerMetre > 0)
+        assertTrue(kotlin.math.abs(expected * 2 - rotation(factor = "2")!!.pulsesPerMetre) <= 1)
+    }
+
+    @Test fun invalidRotationInputsAreRejected() {
+        for (angle in listOf("0", "-90", "0.01", "360.1", "NaN", "Infinity", "abc"))
+            assertNull(rotation(angle = angle))
+        for (base in listOf("49", "2001", "NaN", "Infinity")) assertNull(rotation(base = base))
+        for (track in listOf("49", "2001", "NaN", "Infinity")) assertNull(rotation(track = track))
+        assertNull(rotation('F'))
+        assertNull(rotation(rpm = "61"))
+        assertNull(rotation(factor = "0"))
+        assertNull(DistanceMove.rotationFromInputs('C', "360", "10", "20", "62831", "0.1", "2000", "2000"))
+    }
+
     @Test fun wheel103DirectDriveConversion() {
         val move = DistanceMove.fromInputs('F', "1000", "45", "103", "3200", "1")!!
         assertEquals(9889, move.pulsesPerMetre)

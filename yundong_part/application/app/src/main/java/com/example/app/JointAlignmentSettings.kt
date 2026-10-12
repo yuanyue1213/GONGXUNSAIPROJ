@@ -8,7 +8,7 @@ internal data class JointAlignmentSettings(
         cameraForwardMm in -2000.0..2000.0 && cameraLeftMm in -2000.0..2000.0
     private fun mm(value: Double) = java.math.BigDecimal.valueOf(value).setScale(2, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()
     internal fun frame(sequence: Long, ring: Int, forward: Int, lateral: Int, settings: AlignmentSettings) =
-        "ALIGN_POSE,$sequence,$ring,$forward,$lateral,${settings.fineRpm},${settings.coarseRpm},${settings.offsetMm},${mm(wheelbaseMm)},${mm(trackMm)},${mm(cameraForwardMm)},${mm(cameraLeftMm)},${if (reverse) 1 else 0}\n"
+        "ALIGN_POSE,$sequence,$ring,$forward,$lateral,${settings.fineRpm},${settings.coarseRpm},${settings.offsetMm},${mm(wheelbaseMm)},${mm(trackMm)},${mm(cameraForwardMm)},${mm(cameraLeftMm)},${if (reverse) 1 else 0}${settings.centerSuffix()}\n"
 }
 
 

@@ -286,14 +286,14 @@ typedef struct {
     bool position;
 } GrabStep;
 static const GrabStep s_grab_steps[] = {
-    {60U, 248U,   0,   0, true},
+    {60U, 248U, 110,   0, true},
     {60U, 248U, 1100, -50, true},
-    { 0U, 248U,   0,   0, false},
-    { 0U, 248U,   0,   0, true},
-    { 0U, 140U,   0,   0, false},
+    { 0U, 248U, 110,   0, false},
+    { 0U, 248U, 110,   0, true},
+    { 0U, 140U, 110,   0, false},
     { 0U, 140U, 200, -40, true},
-    {60U, 140U,   0,   0, true},
-    {60U, 248U,   0,   0, false},
+    {60U, 140U, 110,   0, true},
+    {60U, 248U, 110,   0, false},
 };
 static const GrabStep s_release_steps[] = {
     {60U, 248U, 110,   0, true},
@@ -345,8 +345,8 @@ static const GrabStep *RobotControl_SequenceSteps(void)
 }
 static bool RobotControl_SequenceZFirst(void)
 {
-    /* After releasing the object, lift clear before retracting (release step 8). */
-    return s_release_mode ? (s_grab_step == 2U || s_grab_step == 3U || s_grab_step == 7U) : s_grab_step == 1U;
+    /* Grab steps 2/4 and release steps 3/4/8 finish Z before starting R. */
+    return s_release_mode ? (s_grab_step == 2U || s_grab_step == 3U || s_grab_step == 7U) : (s_grab_step == 1U || s_grab_step == 3U);
 }
 static uint16_t RobotControl_SequenceLiftRpm(void)
 {
@@ -422,14 +422,11 @@ static bool RobotControl_ApplyGrabStep(void)
 {
     const GrabStep *steps = RobotControl_SequenceSteps();
     const GrabStep *step = &steps[s_grab_step];
-    /* Two-second base ramps on steps 5 and 8. */
+    /* Start every ramp from the last commanded angle, including a new grab card. */
     s_grab_base_rotating = s_release_mode ? (s_grab_step == 1U || s_grab_step == 4U) :
-        (s_grab_step == 4U || s_grab_step == 7U);
-    uint16_t base = s_grab_base_rotating ? steps[s_grab_step-1U].base : step->base;
-    /* Release has only two base motions: current angle -> tilt -> home.
-     * Capture each ramp's actual last commanded angle instead of jumping to
-     * the preceding table angle before starting the ramp. */
-    s_sequence_base_start = s_release_mode ? (int32_t)s_base_angle : (int32_t)base;
+        (s_grab_step == 4U || s_grab_step == 7U || (s_grab_step == 0U && s_base_angle != step->base));
+    s_sequence_base_start = (int32_t)s_base_angle;
+    uint16_t base = s_grab_base_rotating ? s_base_angle : step->base;
     uint16_t gripper = s_release_mode && s_grab_step == 2U ? steps[1].gripper : step->gripper;
     s_grab_gripper_opening = s_grab_step == 6U && steps[5].gripper != gripper;
     if (s_grab_gripper_opening) {
@@ -443,7 +440,7 @@ static bool RobotControl_ApplyGrabStep(void)
     if (!RobotControl_SetServoAngle('G', gripper) ||
         (!s_release_mode && !RobotControl_SetServoAngle('B', base))) return false;
     /* Finish releasing before moving away from the object. */
-    return s_grab_gripper_opening || RobotControl_StartSequencePosition();
+    return s_grab_gripper_opening || s_grab_base_rotating || RobotControl_StartSequencePosition();
 }
 
 static void RobotControl_CompleteSequence(void)
@@ -531,7 +528,10 @@ static void RobotControl_TickGrab(void)
         if (!RobotControl_SetServoAngle('B', (uint16_t)(start + numerator/(int32_t)ROBOT_BASE_ROTATE_MS)))
         { RobotControl_CancelGrab(); return; }
         s_base_update_tick = now;
-        if (elapsed >= ROBOT_BASE_ROTATE_MS) { s_grab_base_rotating = false; s_grab_tick = now; }
+        if (elapsed >= ROBOT_BASE_ROTATE_MS) {
+            s_grab_base_rotating = false; s_grab_tick = now;
+            if (!RobotControl_StartSequencePosition()) RobotControl_CancelGrab();
+        }
         return;
     }
     if (elapsed < ROBOT_GRAB_HOLD_MS) return;
@@ -556,7 +556,7 @@ static AlignPhase s_align_phase;
 static uint32_t s_align_start_tick, s_align_phase_tick, s_last_align_sequence;
 static uint32_t s_align_forward_ppm, s_align_lateral_ppm;
 static unsigned s_align_moves, s_align_centered;
-static uint32_t s_center_sum_x, s_center_sum_y;
+static double s_center_sum_x, s_center_sum_y;
 static unsigned s_center_sample_count;
 static int32_t s_center_pending_y;
 static uint16_t s_center_y_rpm;
@@ -694,13 +694,13 @@ static void RobotControl_TickAlignment(void)
     { RobotControl_CancelAlignment(); return; }
     if (s_align_joint) { RobotControl_JointAlignment(now); return; }
     if (!s_align_parallel) { RobotControl_CenterAlignment(); return; }
-    char direction; uint32_t mm; uint16_t rpm;
+    char direction; float mm; uint16_t rpm;
     uint32_t fine_turn_pulses = 0U;
     if (s_align_parallel) {
-        CameraCenter rings[3]; int32_t slope;
+        CameraCenter rings[3]; float slope;
         if (!CameraLink_TakeRings(rings) || !CameraProtocol_RingSlope(rings, &slope)) return;
         s_align_phase_tick = now;
-        uint32_t error = (uint32_t)(slope < 0 ? -slope : slope);
+        float error = fabsf(slope);
         if (CameraProtocol_RingYSpread(rings) <= 1U) {
             if (++s_align_centered >= 3U) RobotControl_CancelAlignment();
             return;
@@ -709,7 +709,7 @@ static void RobotControl_TickAlignment(void)
          * a bent/non-horizontal detection. Do not guess a turning direction. */
         if (slope == 0) { s_align_centered = 0U; return; }
         direction = (slope > 0) != (s_parallel.reverse != 0U) ? 'W' : 'C';
-        mm = error / 25U + 1U;
+        mm = error / 25.0f + 1.0f;
         if (mm > s_parallel.step_mm) mm = s_parallel.step_mm;
         rpm = (uint16_t)s_parallel.rpm;
         if (error <= 50U) {
@@ -723,12 +723,12 @@ static void RobotControl_TickAlignment(void)
     s_align_centered = 0U;
     if (s_align_moves >= ROBOT_ALIGN_MAX_MOVES)
     { RobotControl_CancelAlignment(); return; }
-    RobotDistanceCommand move = {0U, direction, mm,
-        rpm,
-        (direction == 'F' || direction == 'B') ? s_align_forward_ppm : s_align_lateral_ppm};
+    uint32_t turn_ppm = (direction == 'F' || direction == 'B') ? s_align_forward_ppm : s_align_lateral_ppm;
+    uint32_t turn_pulses = fine_turn_pulses != 0U ? fine_turn_pulses :
+        (uint32_t)lroundf(mm * turn_ppm / 1000.0f);
+    if (turn_pulses == 0U) turn_pulses = 1U;
     s_wheel_move_reached = false;
-    HAL_StatusTypeDef result = fine_turn_pulses != 0U ?
-        RobotControl_ApplyWheelPulses(direction, (int32_t)fine_turn_pulses, rpm) : RobotControl_ApplyDistance(&move);
+    HAL_StatusTypeDef result = RobotControl_ApplyWheelPulses(direction, (int32_t)turn_pulses, rpm);
     if (result != HAL_OK) {
         s_stop_pending = RobotControl_StopMotors() != HAL_OK;
         if (!s_stop_pending) s_motion = 'S';

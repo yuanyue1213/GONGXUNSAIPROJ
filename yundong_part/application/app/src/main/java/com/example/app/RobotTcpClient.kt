@@ -84,13 +84,13 @@ internal class RobotTcpClient(
     }
 
     fun sendArmDistance(direction: Char, distanceMm: Int, rpm: Int, pulsesPerRev: Int) {
-        if (direction !in "EC" || distanceMm !in 1..1000 || rpm !in 5..120 ||
+        if (direction !in "EC" || distanceMm !in 1..1000 || rpm !in 5..300 ||
             pulsesPerRev !in 200..51200) return
         sendFrame("ARM_MOVE,${nextSequence()},$direction,$distanceMm,$rpm,$pulsesPerRev\n")
     }
 
     fun sendLiftDistance(direction: Char, distanceMm: Int, rpm: Int, pulsesPerRev: Int) {
-        if (direction !in "UD" || distanceMm !in 1..400 || rpm !in 5..120 ||
+        if (direction !in "UD" || distanceMm !in 1..400 || rpm !in 5..300 ||
             pulsesPerRev !in 200..51200) return
         sendFrame("LIFT_MOVE,${nextSequence()},$direction,$distanceMm,$rpm,$pulsesPerRev\n")
     }
@@ -120,7 +120,7 @@ internal class RobotTcpClient(
 
     fun sendArmPose(theta: Int, rMm: Int, zMm: Int, rpm: Int, pulsesPerRev: Int) {
         if (theta !in 0..270 || rMm !in -1000..1000 || zMm !in -400..400 ||
-            rpm !in 5..120 || pulsesPerRev !in 200..51200) return
+            rpm !in 5..300 || pulsesPerRev !in 200..51200) return
         sendFrame("ARM_POSE,${nextSequence()},$theta,$rMm,$zMm,$rpm,$pulsesPerRev\n")
     }
 

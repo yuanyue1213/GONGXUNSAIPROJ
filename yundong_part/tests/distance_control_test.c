@@ -329,6 +329,7 @@ static void finish_grab_axes(void)
 {
     arm_flags = 3; tick += 50; RobotControl_Tick();
     lift_flags = 3; tick += 50; RobotControl_Tick();
+    tick += 50; RobotControl_Tick(); /* Complete the second axis for either ordering. */
     arm_flags = lift_flags = 1;
 }
 static void advance_grab_hold(void) { tick += 1000; RobotControl_Tick(); }
@@ -347,24 +348,27 @@ static void finish_grab_cycle(unsigned seq)
     feed("CMD,999,Z\n");
     unsigned turn_start = servo_commands;
     char frame_text[32]; snprintf(frame_text, sizeof(frame_text), "CMD,%u,A\n", seq); feed(frame_text);
-    assert(absolute_target[1] == 0 && servo_angle == 248); /* State 1: home. */
+    assert(absolute_target[1] == 312 && servo_angle == 248); /* State 1: home. */
     finish_grab_axes(); assert(absolute_target[0] == 0 && last_lift_angle.rpm == 20);
-    advance_grab_hold(); assert(absolute_target[0] == 4500 && absolute_target[1] == 0 && last_lift_angle.rpm == 50); /* State 2: z first. */
-    tick += 50; RobotControl_Tick(); assert(absolute_target[1] == 0); /* No extension until lift reaches. */
+    advance_grab_hold(); assert(absolute_target[0] == 4500 && absolute_target[1] == 312 && last_lift_angle.rpm == 50); /* State 2: z first. */
+    tick += 50; RobotControl_Tick(); assert(absolute_target[1] == 312); /* No extension until lift reaches. */
     lift_flags = 3; tick += 50; RobotControl_Tick(); assert(absolute_target[1] == 3118);
     arm_flags = 3; tick += 50; RobotControl_Tick(); arm_flags = lift_flags = 1;
     unsigned r_count = absolute_commands[1], z_count = absolute_commands[0];
     advance_grab_hold(); assert(servo_history[servo_commands-2] == 0 && servo_angle == 248); /* State 3. */
     assert(absolute_commands[1] == r_count && absolute_commands[0] == z_count);
-    advance_grab_hold(); assert(absolute_target[1] == 0); /* State 4. */
-    finish_grab_axes(); assert(absolute_target[0] == 0 && last_lift_angle.rpm == 20);
+    advance_grab_hold(); assert(absolute_target[0] == 0 && last_lift_angle.rpm == 20); /* State 4: lift first. */
+    assert(absolute_target[1] == 3118 && absolute_commands[1] == r_count);
+    tick += 50; RobotControl_Tick(); assert(absolute_commands[1] == r_count);
+    lift_flags = 3; tick += 50; RobotControl_Tick(); assert(absolute_target[1] == 312);
+    arm_flags = 3; tick += 50; RobotControl_Tick(); arm_flags = lift_flags = 1;
     advance_grab_hold(); assert(servo_angle == 248); /* State 5 starts the base ramp. */
     tick += 1000; RobotControl_Tick(); assert(servo_angle == 194);
     tick += 1000; RobotControl_Tick(); assert(servo_angle == 140);
     advance_grab_hold(); assert(absolute_target[1] == 567); /* State 6: r20,z-40. */
     finish_grab_axes(); assert(absolute_target[0] == 3600 && last_lift_angle.rpm == 50);
     advance_grab_hold(); assert(servo_history[servo_commands-2] == 0 && absolute_target[1] == 567); /* State 7 starts slow opening. */
-    finish_gripper_open(); assert(absolute_target[1] == 0);
+    finish_gripper_open(); assert(absolute_target[1] == 312);
     finish_grab_axes(); assert(absolute_target[0] == 0 && last_lift_angle.rpm == 20);
     advance_grab_hold(); assert(servo_angle == 140); /* State 8. */
     tick += 1000; RobotControl_Tick(); assert(servo_angle == 194);
@@ -417,7 +421,7 @@ static void test_arm_distance_control(void)
     assert(RobotProtocol_ParseArmDistance("ARM_MOVE,1,E,127,10,3200", &cmd));
     assert(RobotProtocol_ArmDistanceAngle(&cmd) == 3600);
     const char *invalid[] = {"ARM_MOVE,0,E,127,10,3200", "ARM_MOVE,1,F,127,10,3200",
-        "ARM_MOVE,1,E,1001,10,3200", "ARM_MOVE,1,E,127,121,3200", "ARM_MOVE,1,E,127,10,0",
+        "ARM_MOVE,1,E,1001,10,3200", "ARM_MOVE,1,E,127,301,3200", "ARM_MOVE,1,E,127,10,0",
         "ARM_MOVE,1,E,127,10,3200,", "ARM_MOVE,1,E,127,10,3200x"};
     for (unsigned i = 0; i < sizeof(invalid)/sizeof(invalid[0]); ++i)
         assert(!RobotProtocol_ParseArmDistance(invalid[i], &cmd));
@@ -457,7 +461,7 @@ static void test_grab_status_reply_recovery(void)
     assert(lift_stops == 0 && servo_commands == 2);
     fail_lift_status = 0; lift_flags = 3; tick = 500; RobotControl_Tick();
     tick = 1499; RobotControl_Tick(); assert(servo_commands == 2);
-    tick = 1500; RobotControl_Tick(); assert(absolute_target[0] == 4500 && absolute_target[1] == 0 && servo_commands == 4);
+    tick = 1500; RobotControl_Tick(); assert(absolute_target[0] == 4500 && absolute_target[1] == 312 && servo_commands == 4);
     reset(); feed("CMD,61,A\n"); fail_arm_status = 1; tick = 500; RobotControl_Tick();
     assert(arm_stops == 1); fail_arm_status = 0; arm_flags = 3; tick = 5000; RobotControl_Tick();
     assert(lift_angle_commands == 0 && servo_commands == 2);
@@ -471,7 +475,7 @@ static void test_lift_calibration(void)
     assert(RobotProtocol_ParseLiftAngle("LIFT_ANGLE,1,U,90,5,3200", &command));
     const char *invalid[] = {"LIFT_ANGLE,0,U,90,5,3200", "LIFT_ANGLE,1,E,90,5,3200",
         "LIFT_ANGLE,1,U,0,5,3200", "LIFT_ANGLE,1,U,3601,5,3200",
-        "LIFT_ANGLE,1,U,90,4,3200", "LIFT_ANGLE,1,U,90,121,3200",
+        "LIFT_ANGLE,1,U,90,4,3200", "LIFT_ANGLE,1,U,90,301,3200",
         "LIFT_ANGLE,1,U,90,5,199", "LIFT_ANGLE,1,U,90,5,51201",
         "LIFT_ANGLE,1,U,90,5,3200,x", "LIFT_ANGLE,1,U,-90,5,3200"};
     for (unsigned i = 0; i < sizeof(invalid)/sizeof(invalid[0]); ++i)
@@ -520,7 +524,7 @@ static void test_lift_distance_control(void)
     command.distance_mm = 400; assert(RobotProtocol_LiftDistanceAngle(&command) == 36000);
     const char *invalid[] = {"LIFT_MOVE,0,U,10,5,3200", "LIFT_MOVE,1,E,10,5,3200",
         "LIFT_MOVE,1,U,0,5,3200", "LIFT_MOVE,1,U,401,5,3200",
-        "LIFT_MOVE,1,U,10,4,3200", "LIFT_MOVE,1,U,10,121,3200",
+        "LIFT_MOVE,1,U,10,4,3200", "LIFT_MOVE,1,U,10,301,3200",
         "LIFT_MOVE,1,U,10,5,199", "LIFT_MOVE,1,U,10,5,51201",
         "LIFT_MOVE,1,U,10,5,3200x", "LIFT_MOVE,1,U,-10,5,3200"};
     for (unsigned i = 0; i < sizeof(invalid)/sizeof(invalid[0]); ++i)
@@ -649,7 +653,7 @@ static void test_camera_alignment(void)
     }
     center = (CameraCenter){356,210};
     assert(CameraProtocol_CenterProfile(&center, 10000, 10000, &settings, pulses, speeds, &aligned));
-    assert(pulses[0] == 1636 && pulses[1] == 546 && pulses[2] == 1636 && pulses[3] == 546);
+    assert(pulses[0] == 1636 && pulses[1] == 545 && pulses[2] == 1636 && pulses[3] == 545);
     assert(speeds[0] == 20 && speeds[1] == 7 && speeds[2] == 20 && speeds[3] == 7);
     center = (CameraCenter){266,170};
     assert(CameraProtocol_CenterProfile(&center, 10000, 10000, &settings, pulses, speeds, &aligned));
@@ -660,7 +664,7 @@ static void test_camera_alignment(void)
     assert(CameraProtocol_CenterProfile(&center, 10000, 20000, &settings, pulses, speeds, &aligned) && !aligned);
     center = (CameraCenter){258,158};
     assert(CameraProtocol_CenterProfile(&center, 10000, 20000, &settings, pulses, speeds, &aligned) && !aligned);
-    assert(pulses[0] == -22 && pulses[1] == 66); /* +/-2 px must now produce correction. */
+    assert(pulses[0] == -22 && pulses[1] == 65); /* +/-2 px must now produce correction. */
     center = (CameraCenter){512,160};
     assert(!CameraProtocol_CenterProfile(&center, 10000, 20000, &settings, pulses, speeds, &aligned));
 
@@ -771,7 +775,7 @@ static void test_configured_sequences(void)
         "STATE,1,X,1100,-50,200,-40,20,20,50",
         "STATE,1,A,10001,-50,200,-40,20,20,50",
         "STATE,1,A,1100,-401,200,-40,20,20,50",
-        "STATE,1,A,1100,-50,200,-40,20,20,161",
+        "STATE,1,A,1100,-50,200,-40,20,20,301",
         "STATE,1,A,1100,-50,200,-40,20,20,50,junk"
     };
     for (unsigned i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i)
@@ -803,7 +807,7 @@ static void test_configured_sequences(void)
     servos = servo_commands; feed("STATE,400,P,250,-45,1350,-115,26,16,56,30\n");
     assert(servo_commands == servos); /* Duplicate cannot replay. */
     feed("CMD,401,P\n"); assert(last_arm_angle.speed_rpm == 20); /* Legacy command uses defaults. */
-    reset(); feed("STATE,500,A,1100,-50,200,-40,20,20,161\n"); assert(absolute_commands[1] == 0);
+    reset(); feed("STATE,500,A,1100,-50,200,-40,20,20,301\n"); assert(absolute_commands[1] == 0);
 }
 static void test_configured_alignment(void)
 {
@@ -880,7 +884,7 @@ static void test_sequence_angles(void)
 }
 static void test_parallel_alignment(void)
 {
-    CameraParallelCommand cmd; int32_t slope;
+    CameraParallelCommand cmd; float slope;
     const CameraCenter up[] = {{100,100},{200,150},{300,200}};
     const CameraCenter down[] = {{100,200},{200,150},{300,100}};
     const CameraCenter horizontal[] = {{100,150},{200,150},{300,150}};
@@ -979,6 +983,7 @@ static void upload_test_plan(uint32_t seq)
     snprintf(text, sizeof(text), "PLAN_ITEM,%lu,0,A,0,0,0,0,21,22,23,60,10,71,11,250,140\n", (unsigned long)seq); feed(text);
     snprintf(text, sizeof(text), "PLAN_ITEM,%lu,1,P,50,-5,100,-10,27,28,29,60,20,81,12,260,150\n", (unsigned long)seq); feed(text);
     snprintf(text, sizeof(text), "PLAN_RUN,%lu\n", (unsigned long)seq); feed(text);
+    tick += 2000; RobotControl_Tick(); /* Initial grab base ramp before positioning. */
 }
 static void test_saved_plan_and_custom_origin(void)
 {
@@ -1012,7 +1017,7 @@ static void test_saved_plan_and_custom_origin(void)
     for (unsigned i = 0; i < 1000; ++i) { tick += 50; RobotControl_Tick(); }
     unsigned moves = absolute_commands[1], servos = servo_commands;
     feed("PLAN_RUN,20\n"); assert(absolute_commands[1] == moves && servo_commands == servos);
-    feed("STATE,30,A,0,0,0,0,31,32,33\n"); assert(absolute_commands[1] == moves+1 && last_arm_angle.speed_rpm == 31);
+    feed("STATE,30,A,0,0,0,0,31,32,33\n"); tick += 2000; RobotControl_Tick(); assert(absolute_commands[1] == moves+1 && last_arm_angle.speed_rpm == 31);
 
     reset(); upload_test_plan(40); feed("CMD,41,Z\n");
     arm_flags = lift_flags = 3;
@@ -1056,7 +1061,7 @@ static void test_manual_base_speed(void)
 static void test_parallel_pixel_tolerance(void)
 {
     const CameraCenter near[] = {{100,150},{200,151},{300,153}};
-    int32_t slope;
+    float slope;
     assert(CameraProtocol_RingSlope(near, &slope) && slope == 15);
     assert(CameraProtocol_RingYSpread(near) == 3U);
     for (unsigned reverse = 0; reverse < 2U; ++reverse) {
@@ -1098,7 +1103,7 @@ static void test_initial_base_angle_updates(void)
     feed("ORIGIN,1203,100\n"); assert(servo_commands == servos+1); // Duplicate cannot change angle.
     feed("CMD,1204,O\n"); assert(absolute_target[1] == 7200);
     finish_grab_axes(); assert(absolute_target[0] == -3600 && servo_angle == 200);
-    feed("CMD,1205,A\nORIGIN,1206,180\n"); assert(arm_stops == 1 && servo_angle == 180);
+    feed("CMD,1205,A\nORIGIN,1206,180\n"); assert(arm_stops == 0 && servo_angle == 180);
     assert(origin_reads == 2); // Updating during a sequence cancels it without recapturing zero.
     tick += 10000; RobotControl_Tick();
     feed("CMD,1207,O\n"); finish_grab_axes(); assert(servo_angle == 180 && absolute_target[1] == 7200);
@@ -1193,22 +1198,94 @@ static void test_fractional_center_mean(void)
     assert(CameraProtocol_CenterMeanAxes(13801, 8000, 50, 10000, 20000, &settings, pulses, speeds, &aligned));
     assert(pulses[0] == 218 && speeds[0] == 20); /* x=276.02: actual error >20 px. */
     assert(!CameraProtocol_CenterMeanAxes(0, 0, 0, 10000, 20000, &settings, pulses, speeds, &aligned));
-    assert(!CameraProtocol_CenterMeanAxes(25551, 8000, 50, 10000, 20000, &settings, pulses, speeds, &aligned));
+    assert(!CameraProtocol_CenterMeanAxes(25600, 8000, 50, 10000, 20000, &settings, pulses, speeds, &aligned));
 
 }
-static void test_sequence_160_rpm(void)
+static void test_grab_initial_base_ramp(void)
+{
+    reset(); feed("SERVO,2100,B,140\n");
+    unsigned r = absolute_commands[1], z = absolute_commands[0];
+    feed("STATE,2101,A,1100,-50,200,-40,20,20,50,60,0,60,0,248,140\n");
+    assert(servo_angle == 140 && absolute_commands[1] == r);
+    tick += 1000; RobotControl_Tick(); assert(servo_angle == 194);
+    assert(absolute_commands[1] == r && absolute_commands[0] == z);
+    tick += 1000; RobotControl_Tick(); assert(servo_angle == 248);
+    assert(absolute_commands[1] == r + 1);
+    feed("CMD,2102,Z\nSERVO,2103,B,300\nSTATE,2104,A,1100,-50,200,-40,20,20,50,60,0,60,0,200,140\n");
+    tick += 1000; RobotControl_Tick(); assert(servo_angle == 250);
+    feed("CMD,2105,Z\n"); unsigned servos = servo_commands;
+    tick += 3000; RobotControl_Tick(); assert(servo_commands == servos);
+}
+static void test_decimal_camera_chain(void)
+{
+    CameraCenter rings[3]; int32_t pulses[4]; uint16_t speeds[4]; bool aligned;
+    CameraAlignSettings settings = {10U,20U,0}; float slope;
+    assert(CameraProtocol_ParseRings("RINGS,100.1,159.9,256.4,160.3,400.8,160.2", rings));
+    assert(fabsf(rings[1].x-256.4f)<0.0001f && fabsf(rings[1].y-160.3f)<0.0001f);
+    assert(CameraProtocol_ParseRings("RINGS,0.0,0.0,256,160,511.9,319.9", rings));
+    const char *invalid[] = {
+        "RINGS,100.12,160,256,160,400,160", "RINGS,100.,160,256,160,400,160",
+        "RINGS,.1,160,256,160,400,160", "RINGS,-0.1,160,256,160,400,160",
+        "RINGS,nan,160,256,160,400,160", "RINGS,1e2,160,256,160,400,160",
+        "RINGS,100,160,256,160,512.0,160", "RINGS,100,160,256,160,400,320.0",
+        "RINGS,100.2,160,100.1,160,400,160", "RINGS,100,160,256,160,400,160.1junk",
+        "RINGS,99999999999999999999,160,256,160,400,160"
+    };
+    for (unsigned i=0;i<sizeof(invalid)/sizeof(invalid[0]);++i)
+        assert(!CameraProtocol_ParseRings(invalid[i],rings));
+    assert(CameraProtocol_CenterMeanAxes(256.4,160.3,1,10000,20000,&settings,pulses,speeds,&aligned));
+    assert(!aligned && pulses[0]==4 && pulses[1]==7);
+    assert(CameraProtocol_CenterMeanAxes(12800.1,8000.0,50,1000000,10000,&settings,pulses,speeds,&aligned));
+    assert(!aligned && pulses[0]==2 && pulses[1]==0); /* Mean x=256.002, never truncated. */
+    assert(CameraProtocol_CenterMeanAxes(255.9,159.9,1,10000,20000,&settings,pulses,speeds,&aligned));
+    assert(pulses[0]==-1 && pulses[1]==-2);
+    assert(!CameraProtocol_CenterMeanAxes(NAN,160,1,10000,20000,&settings,pulses,speeds,&aligned));
+    CameraCenter center={256.1f,160.1f};
+    assert(CameraProtocol_CenterProfile(&center,10000,10000,&settings,pulses,speeds,&aligned));
+    assert(pulses[0]==2 && pulses[1]==0); /* Mix fractional axes before rounding wheel pulses. */
+    CameraCenter line[3]={{100.0f,160.0f},{256.0f,160.1f},{400.0f,160.2f}};
+    assert(CameraProtocol_RingSlope(line,&slope) && slope>0.6f && slope<0.7f);
+    assert(CameraProtocol_RingYSpread(line)>0.19f && CameraProtocol_RingYSpread(line)<0.21f);
+    CameraPoseAlignCommand joint={.ring_index=2,.forward_ppm=10000,.lateral_ppm=20000,
+        .wheelbase_mm=190,.track_mm=251,.settings={10,20,0}};
+    CameraCenter pose[3]={{100.4f,160.3f},{256.4f,160.3f},{400.4f,160.3f}};
+    assert(CameraProtocol_PoseProfile(&joint,pose,pulses,speeds,&aligned) && !aligned);
+    assert(pulses[0]==11 && pulses[1]==-2); /* Fractional translation reaches wheel profile. */
+    reset(); camera_ready(); feed("ALIGN_RING,9900,2,10000,20000\n");
+    camera_sample("RINGS,100.1,159.9,256.4,160.3,400.8,160.2\n");
+    assert(position_frames==1 && wheel_pulses()==4);
+    finish_alignment_move(); assert(position_frames==2 && wheel_pulses()==7);
+}
+static void test_arm_speed_300_rpm(void)
+{
+    RobotArmDistanceCommand arm; RobotLiftDistanceCommand lift;
+    RobotLiftAngleCommand angle; RobotArmPoseCommand pose;
+    assert(RobotProtocol_ParseArmDistance("ARM_MOVE,9000,E,127,300,3200", &arm));
+    assert(RobotProtocol_ParseLiftDistance("LIFT_MOVE,9000,U,40,300,3200", &lift));
+    assert(RobotProtocol_ParseLiftAngle("LIFT_ANGLE,9000,U,90,300,3200", &angle));
+    assert(RobotProtocol_ParseArmPose("ARM_POSE,9000,0,10,-10,300,3200", &pose));
+    assert(!RobotProtocol_ParseArmPose("ARM_POSE,9000,0,10,-10,301,3200", &pose));
+    reset(); feed("ARM_MOVE,9000,E,127,300,3200\n");
+    assert(last_arm_angle.speed_rpm == 300);
+    reset(); feed("LIFT_MOVE,9000,U,40,300,3200\n");
+    assert(last_lift_angle.rpm == 300);
+    reset(); feed("ARM_POSE,9000,0,10,-10,300,3200\n");
+    assert(last_arm_angle.speed_rpm == 300);
+    finish_grab_axes(); assert(last_lift_angle.rpm == 300);
+}
+static void test_sequence_300_rpm(void)
 {
     RobotSequenceCommand cmd;
-    assert(RobotProtocol_ParseSequence("STATE,2000,A,1100,-50,200,-40,160,160,160", &cmd));
-    assert(RobotProtocol_ParseSequence("PLAN_ITEM,2000,0,P,200,-40,1300,-110,160,160,160", &cmd));
-    assert(!RobotProtocol_ParseSequence("STATE,2000,A,1100,-50,200,-40,161,160,160", &cmd));
-    assert(!RobotProtocol_ParseSequence("STATE,2000,A,1100,-50,200,-40,160,161,160", &cmd));
-    reset(); feed("STATE,2000,A,1100,-50,200,-40,160,160,160\n");
-    assert(last_arm_angle.speed_rpm == 160);
-    finish_grab_axes(); assert(last_lift_angle.rpm == 160);
-    advance_grab_hold(); assert(last_lift_angle.rpm == 160);
-    reset(); feed("STATE,2001,P,200,-40,1300,-110,160,160,160\n");
-    assert(last_arm_angle.speed_rpm == 160);
+    assert(RobotProtocol_ParseSequence("STATE,2000,A,1100,-50,200,-40,300,300,300", &cmd));
+    assert(RobotProtocol_ParseSequence("PLAN_ITEM,2000,0,P,200,-40,1300,-110,300,300,300", &cmd));
+    assert(!RobotProtocol_ParseSequence("STATE,2000,A,1100,-50,200,-40,301,300,300", &cmd));
+    assert(!RobotProtocol_ParseSequence("STATE,2000,A,1100,-50,200,-40,300,301,300", &cmd));
+    reset(); feed("STATE,2000,A,1100,-50,200,-40,300,300,300\n");
+    assert(last_arm_angle.speed_rpm == 300);
+    finish_grab_axes(); assert(last_lift_angle.rpm == 300);
+    advance_grab_hold(); assert(last_lift_angle.rpm == 300);
+    reset(); feed("STATE,2001,P,200,-40,1300,-110,300,300,300\n");
+    assert(last_arm_angle.speed_rpm == 300);
 }
 static void test_joint_alignment(void)
 {
@@ -1238,6 +1315,41 @@ static void test_joint_alignment(void)
     assert(position_frames == 2 && wheel_pulses() == 100); /* One final X compensation. */
     finish_alignment_move();
     feed("MOVE,1902,F,100,45,9889\n"); assert(position_frames == 3);
+}
+static void test_custom_center(void)
+{
+    CameraAlignCommand cmd;
+    assert(CameraProtocol_ParseAlign("ALIGN_CFG,2000,2,10000,20000,10,20,0,300.5,180.5", &cmd));
+    int32_t axes[2]; uint16_t speeds[2]; bool aligned;
+    assert(CameraProtocol_CenterMeanAxes(300.5,180.5,1,10000,20000,&cmd.settings,axes,speeds,&aligned) && aligned);
+    assert(CameraProtocol_CenterMeanAxes(301.5,181.5,1,10000,20000,&cmd.settings,axes,speeds,&aligned) && !aligned);
+    assert(axes[0] == 11 && axes[1] == 22);
+    const char *invalid[] = {"512,160", "256,320", "-1,160", "256.01,160", "256", "", "256,160,0", "NaN,160"};
+    char command[160];
+    for (unsigned i = 0; i < sizeof(invalid)/sizeof(invalid[0]); ++i) {
+        snprintf(command,sizeof(command),"ALIGN_CFG,2000,2,10000,20000,10,20,0,%s",invalid[i]);
+        assert(!CameraProtocol_ParseAlign(command,&cmd));
+    }
+    assert(CameraProtocol_ParseAlign("ALIGN_CFG,2000,0,10000,20000,10,20,0,511.9,319.9", &cmd));
+    assert(CameraProtocol_ParseAlign("ALIGN,2000,10000,20000", &cmd));
+    assert(CameraProtocol_TargetX(&cmd.settings) == 256 && CameraProtocol_TargetY(&cmd.settings) == 160);
+    for (unsigned ring = 0; ring < 2; ++ring) {
+        reset(); camera_ready();
+        snprintf(command,sizeof(command),"ALIGN_CFG,2001,%u,10000,20000,10,20,0,296,160\n",ring ? 2 : 0);
+        feed(command);
+        center_average_sample(ring ? "RINGS,100,160,296,160,400,160\n" : "x=296,y=160\n");
+        assert(position_frames == 0);
+        feed("MOVE,2002,F,100,45,9889\n"); assert(position_frames == 1);
+    }
+    CameraPoseAlignCommand pose;
+    assert(CameraProtocol_ParsePoseAlign("ALIGN_POSE,2003,2,10000,20000,10,20,0,190,251.4,-7,-291.27,0,300,180",&pose));
+    CameraCenter rings[3] = {{100,180},{300,180},{400,180}};
+    int32_t pulses[4]; uint16_t wheel_speeds[4];
+    assert(CameraProtocol_PoseProfile(&pose,rings,pulses,wheel_speeds,&aligned) && aligned);
+    rings[1].x = 301;
+    assert(CameraProtocol_PoseProfile(&pose,rings,pulses,wheel_speeds,&aligned) && !aligned);
+    for (unsigned i = 0; i < 4; ++i) assert(pulses[i] == 11);
+    assert(!CameraProtocol_ParsePoseAlign("ALIGN_POSE,2003,2,10000,20000,10,20,0,190,251.4,-7,-291.27,0,",&pose));
 }
 int main(void)
 {
@@ -1271,7 +1383,11 @@ int main(void)
     test_center_axis_stages();
     test_fractional_center_mean();
     test_joint_alignment();
-    test_sequence_160_rpm();
+    test_custom_center();
+    test_sequence_300_rpm();
+    test_arm_speed_300_rpm();
+    test_decimal_camera_chain();
+    test_grab_initial_base_ramp();
     puts("PASS: parsing, four-wheel FD frames, completion, autonomous move, grab/arm, camera alignment limits, duplicate/busy, fault and stop retry");
     return 0;
 }

@@ -14,9 +14,10 @@ class SequenceSettingsTest {
         assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "20", "20", "50", "0"))
     }
     @Test fun maximumSequenceSpeed() {
-        assertNotNull(SequenceSettings.parse("110", "-50", "20", "-40", "160", "160", "160"))
-        assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "161", "160", "160"))
-        assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "160", "161", "160"))
+        assertNotNull(SequenceSettings.parse("110", "-50", "20", "-40", "300", "300", "300"))
+        assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "301", "300", "300"))
+        assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "300", "301", "300"))
+        assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "300", "300", "301"))
     }
     @Test fun invalidInputIsRejected() {
         for (r in listOf("1000.1", "-1000.1", "1.23", "NaN", ""))
@@ -24,6 +25,6 @@ class SequenceSettingsTest {
         assertNull(SequenceSettings.parse("110", "-401", "20", "-40", "20", "20", "50"))
         assertNull(SequenceSettings.parse("110", "-50.5", "20", "-40", "20", "20", "50"))
         assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "4", "20", "50"))
-        assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "20", "20", "161"))
+        assertNull(SequenceSettings.parse("110", "-50", "20", "-40", "20", "20", "301"))
     }
 }

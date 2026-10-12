@@ -84,7 +84,7 @@ static inline bool RobotProtocol_ParseArmDistance(const char *frame, RobotArmDis
         !RobotProtocol_U32(&p, &command->pulses_per_revolution, '\0')) return false;
     return command->sequence != 0U && command->distance_mm >= 1U &&
            command->distance_mm <= 1000U && command->speed_rpm >= 5U &&
-           command->speed_rpm <= 120U && command->pulses_per_revolution >= 200U &&
+           command->speed_rpm <= 300U && command->pulses_per_revolution >= 200U &&
            command->pulses_per_revolution <= 51200U;
 }
 static inline uint32_t RobotProtocol_ArmDistanceAngle(const RobotArmDistanceCommand *command)
@@ -115,7 +115,7 @@ static inline bool RobotProtocol_ParseLiftAngle(const char *frame, RobotLiftAngl
         !RobotProtocol_U32(&p, &command->pulses_per_revolution, '\0')) return false;
     return command->sequence != 0U && command->angle_degrees >= 1U &&
            command->angle_degrees <= 3600U && command->speed_rpm >= 5U &&
-           command->speed_rpm <= 120U && command->pulses_per_revolution >= 200U &&
+           command->speed_rpm <= 300U && command->pulses_per_revolution >= 200U &&
            command->pulses_per_revolution <= 51200U;
 }
 
@@ -143,7 +143,7 @@ static inline bool RobotProtocol_ParseLiftDistance(const char *frame, RobotLiftD
     /* Same ten-turn limit as the motor angle test; not a mechanical travel limit. */
     return command->sequence != 0U && command->distance_mm >= 1U &&
            command->distance_mm <= 400U && command->speed_rpm >= 5U &&
-           command->speed_rpm <= 120U && command->pulses_per_revolution >= 200U &&
+           command->speed_rpm <= 300U && command->pulses_per_revolution >= 200U &&
            command->pulses_per_revolution <= 51200U;
 }
 static inline uint32_t RobotProtocol_LiftDistanceAngle(const RobotLiftDistanceCommand *command)
@@ -178,7 +178,7 @@ static inline bool RobotProtocol_ParseArmPose(const char *frame, RobotArmPoseCom
         !RobotProtocol_U32(&p, &command->pulses_per_revolution, '\0')) return false;
     return command->sequence != 0U && command->theta <= 270U &&
         command->z_mm >= -400 && command->z_mm <= 400 &&
-        command->speed_rpm >= 5U && command->speed_rpm <= 120U &&
+        command->speed_rpm >= 5U && command->speed_rpm <= 300U &&
         command->pulses_per_revolution >= 200U && command->pulses_per_revolution <= 51200U;
 }
 
@@ -234,8 +234,8 @@ static inline bool RobotProtocol_ParseSequence(const char *frame, RobotSequenceC
             !RobotProtocol_U32(&p, &cmd->open_angle, ',') || !RobotProtocol_U32(&p, &cmd->close_angle, ',') ||
             !RobotProtocol_U32(&p, &cmd->base_home, ',') || !RobotProtocol_U32(&p, &cmd->base_tilt, '\0'))) return false;
     }
-    return cmd->sequence != 0U && cmd->r_rpm >= 5U && cmd->r_rpm <= 160U &&
-        cmd->up_rpm >= 5U && cmd->up_rpm <= 160U && cmd->down_rpm >= 5U && cmd->down_rpm <= 160U &&
+    return cmd->sequence != 0U && cmd->r_rpm >= 5U && cmd->r_rpm <= 300U &&
+        cmd->up_rpm >= 5U && cmd->up_rpm <= 300U && cmd->down_rpm >= 5U && cmd->down_rpm <= 300U &&
         cmd->gripper_dps >= 6U && cmd->gripper_dps <= 300U && cmd->theta <= 270U &&
         cmd->open_angle <= 270U && cmd->close_angle <= 270U && cmd->base_home <= 360U && cmd->base_tilt <= 360U;
 }

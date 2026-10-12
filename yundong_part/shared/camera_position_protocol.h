@@ -1,28 +1,49 @@
 #ifndef CAMERA_POSITION_PROTOCOL_H
 #define CAMERA_POSITION_PROTOCOL_H
 #include "robot_distance_protocol.h"
+#include <math.h>
 
-typedef struct { uint16_t x, y; } CameraCenter;
+typedef struct { float x, y; } CameraCenter;
 /* ring_index: 0 = green block, 1/2/3 = rings sorted from left to right. */
-typedef struct { uint32_t fine_rpm, coarse_rpm; int32_t offset_mm; } CameraAlignSettings;
+typedef struct { uint32_t fine_rpm, coarse_rpm; int32_t offset_mm; float center_x, center_y; bool custom_center; } CameraAlignSettings;
 static inline CameraAlignSettings CameraProtocol_DefaultSettings(void)
 {
-    return (CameraAlignSettings){10U,20U,10};
+    return (CameraAlignSettings){10U,20U,10,256.0f,160.0f,false};
 }
 typedef struct {
     uint32_t sequence, forward_ppm, lateral_ppm, ring_index;
     CameraAlignSettings settings;
 } CameraAlignCommand;
+/* Camera coordinate: unsigned integer or exactly one fractional digit.
+ * Keep strict syntax (no sign, exponent, NaN, whitespace or extra precision). */
+static inline bool CameraProtocol_Pixel(const char **cursor, float *value, char delimiter, uint32_t limit)
+{
+    const char *p = *cursor;
+    if (*p < '0' || *p > '9') return false;
+    uint32_t whole = 0U, tenth = 0U;
+    while (*p >= '0' && *p <= '9') {
+        whole = whole * 10U + (uint32_t)(*p++ - '0');
+        if (whole >= limit) return false;
+    }
+    if (*p == '.') {
+        ++p;
+        if (*p < '0' || *p > '9') return false;
+        tenth = (uint32_t)(*p++ - '0');
+    }
+    if (*p != delimiter) return false;
+    *value = (float)whole + (float)tenth * 0.1f;
+    *cursor = p + (delimiter == '\0' ? 0 : 1);
+    return true;
+}
 static inline bool CameraProtocol_ParseRings(const char *frame, CameraCenter centers[3])
 {
     if (strncmp(frame, "RINGS,", 6U) != 0) return false;
     const char *p = frame + 6U;
     for (unsigned i = 0; i < 3U; ++i) {
-        uint32_t x, y;
-        if (!RobotProtocol_U32(&p, &x, ',') ||
-            !RobotProtocol_U32(&p, &y, i == 2U ? '\0' : ',') ||
-            x >= 512U || y >= 320U) return false;
-        centers[i].x = (uint16_t)x; centers[i].y = (uint16_t)y;
+        float x, y;
+        if (!CameraProtocol_Pixel(&p, &x, ',', 512U) ||
+            !CameraProtocol_Pixel(&p, &y, i == 2U ? '\0' : ',', 320U)) return false;
+        centers[i].x = x; centers[i].y = y;
         if (i > 0U && centers[i].x < centers[i - 1U].x) return false;
     }
     return true;
@@ -42,6 +63,26 @@ static inline bool CameraProtocol_ParseCenter(const char *frame, CameraCenter *c
     center->x = (uint16_t)x; center->y = (uint16_t)y;
     return true;
 }
+/* Optional target coordinates preserve legacy frames and settings initializers. */
+static inline float CameraProtocol_TargetX(const CameraAlignSettings *s) { return s->custom_center ? s->center_x : 256.0f; }
+static inline float CameraProtocol_TargetY(const CameraAlignSettings *s) { return s->custom_center ? s->center_y : 160.0f; }
+static inline bool CameraProtocol_TargetSuffix(const char **cursor, CameraAlignSettings *s)
+{
+    const char *p = *cursor;
+    if (*p == '\0') return true;
+    if (*p++ != ',' || !CameraProtocol_Pixel(&p, &s->center_x, ',', 512U) ||
+        !CameraProtocol_Pixel(&p, &s->center_y, '\0', 320U)) return false;
+    s->custom_center = true;
+    *cursor = p;
+    return true;
+}
+static inline bool CameraProtocol_FinalU32Target(const char **cursor, uint32_t *value, CameraAlignSettings *s)
+{
+    bool has_target = strchr(*cursor, ',') != NULL;
+    if (!RobotProtocol_U32(cursor, value, has_target ? ',' : '\0')) return false;
+    if (has_target) --*cursor;
+    return CameraProtocol_TargetSuffix(cursor, s);
+}
 static inline bool CameraProtocol_ParseAlign(const char *frame, CameraAlignCommand *cmd)
 {
     const char *p;
@@ -57,7 +98,7 @@ static inline bool CameraProtocol_ParseAlign(const char *frame, CameraAlignComma
             !RobotProtocol_U32(&p, &v->fine_rpm, ',') || !RobotProtocol_U32(&p, &v->coarse_rpm, ',')) return false;
         bool negative = *p == '-'; if (negative) ++p;
         uint32_t offset;
-        if (!RobotProtocol_U32(&p, &offset, '\0') || offset > 100U) return false;
+        if (!CameraProtocol_FinalU32Target(&p, &offset, v) || offset > 100U) return false;
         v->offset_mm = negative ? -(int32_t)offset : (int32_t)offset;
         return cmd->sequence != 0U && cmd->ring_index <= 3U &&
             cmd->forward_ppm >= 1U && cmd->forward_ppm <= 1000000U &&
@@ -97,61 +138,54 @@ static inline char CameraProtocol_Opposite(char dir)
 /* Select maximum wheel speed from the larger image error. */
 static inline uint16_t CameraProtocol_ConfiguredRpm(const CameraCenter *center, const CameraAlignSettings *settings)
 {
-    int dx = (int)center->x - 256, dy = (int)center->y - 160;
-    unsigned ax = (unsigned)(dx < 0 ? -dx : dx), ay = (unsigned)(dy < 0 ? -dy : dy);
+    float ax = fabsf(center->x - CameraProtocol_TargetX(settings)), ay = fabsf(center->y - CameraProtocol_TargetY(settings));
     return (ax > CAMERA_CORRECTION_COARSE_PX || ay > CAMERA_CORRECTION_COARSE_PX) ?
         settings->coarse_rpm : settings->fine_rpm;
 }
 typedef struct { uint32_t sequence, ppm, rpm, step_mm, reverse; } CameraParallelCommand;
-/* Preserve sum/count exactly: 50 integer samples retain 0.02 px resolution.
- * Compare pixel tolerances before dividing; round only the final motor pulses. */
-static inline bool CameraProtocol_CenterMeanAxes(uint32_t sum_x, uint32_t sum_y, uint32_t count,
+/* Decimal samples remain fractional through averaging and distance conversion.
+ * Convert to integral pulses only at the final output. */
+static inline bool CameraProtocol_CenterMeanAxes(double sum_x, double sum_y, uint32_t count,
     uint32_t forward_ppm, uint32_t lateral_ppm, const CameraAlignSettings *settings,
     int32_t pulses[2], uint16_t speeds[2], bool *aligned)
 {
-    if (count == 0U || count > 50U || sum_x > 511U * count || sum_y > 319U * count ||
+    if (count == 0U || count > 50U || !isfinite(sum_x) || !isfinite(sum_y) ||
+        sum_x < 0.0 || sum_y < 0.0 || sum_x >= 512.0 * count || sum_y >= 320.0 * count ||
         forward_ppm == 0U || forward_ppm > 1000000U || lateral_ppm == 0U || lateral_ppm > 1000000U) return false;
-    int32_t errors[2] = {(int32_t)sum_x - (int32_t)(256U * count),
-                         (int32_t)sum_y - (int32_t)(160U * count)};
+    double errors[2] = {sum_x / count - CameraProtocol_TargetX(settings), sum_y / count - CameraProtocol_TargetY(settings)};
     const uint32_t ppm[2] = {forward_ppm, lateral_ppm};
-    int64_t denominator = (int64_t)1000000000 * count;
     *aligned = true;
     for (unsigned i = 0; i < 2U; ++i) {
-        int32_t error = errors[i];
-        uint32_t magnitude = (uint32_t)(error < 0 ? -error : error);
-        speeds[i] = magnitude > CAMERA_CORRECTION_COARSE_PX * count ? settings->coarse_rpm : settings->fine_rpm;
+        double error = errors[i];
+        speeds[i] = fabs(error) > CAMERA_CORRECTION_COARSE_PX ? settings->coarse_rpm : settings->fine_rpm;
         pulses[i] = 0;
-        if (magnitude == 0U) continue; /* Skip only an exactly centered axis. */
+        if (error == 0.0) continue;
         *aligned = false;
-        int64_t raw = (int64_t)error * 1090819 * ppm[i];
-        pulses[i] = (int32_t)((raw + (raw < 0 ? -denominator/2 : denominator/2)) / denominator);
+        pulses[i] = (int32_t)lround(error * 1.090819 * ppm[i] / 1000.0);
         if (pulses[i] == 0) pulses[i] = error > 0 ? 1 : -1;
         if ((i == 0U && CAMERA_IMAGE_RIGHT_DIRECTION == 'F') ||
             (i == 1U && CAMERA_IMAGE_DOWN_DIRECTION == 'R')) pulses[i] = -pulses[i];
     }
     return true;
 }
-/* One camera sample -> full X/Y translation, with no gain or step-distance cap.
- * Wheel travel remains signed pulses; per-wheel RPM follows travel magnitude. */
+/* Mix unrounded X/Y travel first; round only each final wheel pulse target. */
 static inline bool CameraProtocol_CenterProfile(const CameraCenter *center, uint32_t forward_ppm,
     uint32_t lateral_ppm, const CameraAlignSettings *settings, int32_t pulses[4], uint16_t speeds[4], bool *aligned)
 {
-    if (center->x >= 512U || center->y >= 320U || forward_ppm == 0U || forward_ppm > 1000000U ||
+    if (!isfinite(center->x) || !isfinite(center->y) || center->x < 0 || center->y < 0 ||
+        center->x >= 512U || center->y >= 320U || forward_ppm == 0U || forward_ppm > 1000000U ||
         lateral_ppm == 0U || lateral_ppm > 1000000U) return false;
-    int32_t dx = (int32_t)center->x - 256, dy = (int32_t)center->y - 160;
-    *aligned = dx == 0 && dy == 0;
-    int64_t x_raw = (int64_t)dx * 1090819 * forward_ppm;
-    int64_t y_raw = (int64_t)dy * 1090819 * lateral_ppm;
-    int32_t x = (int32_t)((x_raw + (x_raw < 0 ? -500000000 : 500000000)) / 1000000000);
-    int32_t y = (int32_t)((y_raw + (y_raw < 0 ? -500000000 : 500000000)) / 1000000000);
-    if (x == 0 && dx != 0) x = dx > 0 ? 1 : -1;
-    if (y == 0 && dy != 0) y = dy > 0 ? 1 : -1;
+    double dx = (double)center->x - CameraProtocol_TargetX(settings), dy = (double)center->y - CameraProtocol_TargetY(settings);
+    *aligned = dx == 0.0 && dy == 0.0;
+    double x = dx * 1.090819 * forward_ppm / 1000.0;
+    double y = dy * 1.090819 * lateral_ppm / 1000.0;
     if (CAMERA_IMAGE_RIGHT_DIRECTION == 'F') x = -x;
     if (CAMERA_IMAGE_DOWN_DIRECTION == 'R') y = -y;
-    pulses[0] = pulses[2] = x + y;
-    pulses[1] = pulses[3] = x - y;
+    const double targets[4] = {x+y, x-y, x+y, x-y};
     uint32_t largest = 0U;
     for (unsigned i = 0; i < 4U; ++i) {
+        pulses[i] = (int32_t)lround(targets[i]);
+        if (pulses[i] == 0 && targets[i] != 0.0) pulses[i] = targets[i] > 0 ? 1 : -1;
         uint32_t magnitude = (uint32_t)(pulses[i] < 0 ? -pulses[i] : pulses[i]);
         if (magnitude > largest) largest = magnitude;
     }
@@ -175,27 +209,27 @@ static inline bool CameraProtocol_ParseParallel(const char *frame, CameraParalle
 }
 /* Least-squares slope using all three centers, in thousandths (image Y points down).
  * Reject narrow/degenerate baselines and non-collinear detections (>5 px residual). */
-static inline bool CameraProtocol_RingSlope(const CameraCenter c[3], int32_t *slope)
+static inline bool CameraProtocol_RingSlope(const CameraCenter c[3], float *slope)
 {
-    if (c[2].x < c[0].x + 80U || c[1].x <= c[0].x || c[2].x <= c[1].x) return false;
-    int64_t sx = 0, sy = 0, sxx = 0, sxy = 0;
+    if (c[2].x < c[0].x + 80.0f || c[1].x <= c[0].x || c[2].x <= c[1].x) return false;
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
     for (unsigned i = 0; i < 3U; ++i) {
-        sx += c[i].x; sy += c[i].y; sxx += (int64_t)c[i].x*c[i].x; sxy += (int64_t)c[i].x*c[i].y;
+        if (!isfinite(c[i].x) || !isfinite(c[i].y) || c[i].x < 0 || c[i].x >= 512 || c[i].y < 0 || c[i].y >= 320) return false;
+        sx += c[i].x; sy += c[i].y; sxx += (double)c[i].x*c[i].x; sxy += (double)c[i].x*c[i].y;
     }
-    int64_t den = 3*sxx - sx*sx, num = 3*sxy - sx*sy;
+    double den = 3*sxx - sx*sx, num = 3*sxy - sx*sy;
     if (den <= 0) return false;
     for (unsigned i = 0; i < 3U; ++i) {
-        int64_t residual = (3*(int64_t)c[i].y - sy)*den - num*(3*(int64_t)c[i].x - sx);
-        if (residual < 0) residual = -residual;
-        if (residual > 15*den) return false;
+        double residual = (3*(double)c[i].y - sy)*den - num*(3*(double)c[i].x - sx);
+        if (fabs(residual) > 15*den) return false;
     }
-    *slope = (int32_t)(num*1000/den); return true;
+    *slope = (float)(num*1000.0/den); return true;
 }
 /* Pixel tolerance is independent of ring spacing: a wide baseline must not
  * make a visible height difference pass the horizontal completion check. */
-static inline uint16_t CameraProtocol_RingYSpread(const CameraCenter c[3])
+static inline float CameraProtocol_RingYSpread(const CameraCenter c[3])
 {
-    uint16_t lo = c[0].y, hi = c[0].y;
+    float lo = c[0].y, hi = c[0].y;
     for (unsigned i = 1; i < 3U; ++i) {
         if (c[i].y < lo) lo = c[i].y;
         if (c[i].y > hi) hi = c[i].y;
