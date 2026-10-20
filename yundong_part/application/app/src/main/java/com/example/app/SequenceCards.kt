@@ -12,7 +12,7 @@ internal data class SequenceCard(
     val id: String,
     val name: String,
     val mode: Char,
-    val settings: SequenceSettings = SequenceSettings(0,0,0,0,20,20,50),
+    val settings: SequenceSettings = SequenceSettings(0,0,0,0,20),
     val turn: TurnSettings? = null,
 ) {
     fun valid() = id.isNotBlank() && name.isNotBlank() && name.length <= 40 &&
@@ -23,7 +23,7 @@ internal data class SequenceCard(
 internal object SequenceCardCodec {
     fun encode(cards: List<SequenceCard>): String = cards.filter { it.valid() }.joinToString("\n") {
         "${URLEncoder.encode(it.id, "UTF-8")}|${URLEncoder.encode(it.name, "UTF-8")}|" +
-            it.frame(1).trim().removePrefix("STATE,1,")
+            it.frame(1).trim().removePrefix("STATE,1,").removePrefix("STATE_V2,1,")
     }
 
     fun decode(value: String): List<SequenceCard> = value.lineSequence().mapNotNull { line ->
@@ -36,11 +36,14 @@ internal object SequenceCardCodec {
                     URLDecoder.decode(parts[1], "UTF-8"), 'T',
                     turn = TurnSettings(fields[1].toInt(), fields[2].toInt(), fields[3].toInt())).takeIf { it.valid() }
             }
-            if (fields.size != 14 || fields[0].length != 1) return@mapNotNull null
+            if (fields.size !in listOf(12, 14) || fields[0].length != 1) return@mapNotNull null
             val v = fields.drop(1).map(String::toInt)
+            if (fields.size == 14 && (v[4] !in 5..300 || v[5] !in 5..300 || v[6] !in 5..300)) return@mapNotNull null
             SequenceCard(URLDecoder.decode(parts[0], "UTF-8"), URLDecoder.decode(parts[1], "UTF-8"),
-                fields[0][0], SequenceSettings(v[0], v[1], v[2], v[3], v[4], v[5], v[6],
-                    v[7], v[8], v[9], v[10], v[11], v[12])).takeIf { it.valid() }
+                fields[0][0], if (fields.size == 14) {
+                    // Old cards keep radial speed as their new combined speed.
+                    SequenceSettings(v[0], v[1], v[2], v[3], v[4], v[7], v[8], v[9], v[10], v[11], v[12])
+                } else SequenceSettings(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10])).takeIf { it.valid() }
         } catch (_: IllegalArgumentException) { null }
     }.toList()
 }
@@ -51,6 +54,7 @@ internal object SequencePlan {
         if (sequence !in 1..0xFFFFFFFFL || cards.isEmpty() || cards.size > MAX_ITEMS || cards.any { !it.valid() }) return emptyList()
         return listOf("PLAN_BEGIN,$sequence,${cards.size}\n") + cards.mapIndexed { index, card ->
             card.frame(sequence).replaceFirst("STATE,$sequence,", "PLAN_ITEM,$sequence,$index,")
+                .replaceFirst("STATE_V2,$sequence,", "PLAN_ITEM_V2,$sequence,$index,")
         } + "PLAN_RUN,$sequence\n"
     }
 }

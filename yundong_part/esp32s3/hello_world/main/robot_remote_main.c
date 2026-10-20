@@ -3,7 +3,7 @@
  * ESP32-S3 小车遥控桥接程序。
  * 数据路径：手机 App --Wi-Fi/TCP--> ESP32 --UART1--> STM32。
  * STM32 负责距离换算后的四轮电机控制、机械臂和舵机执行；
- * ESP32 负责命令校验、单向转发及通信中断时请求停车。
+ * ESP32 负责任务规划、命令校验、双向转发及通信中断时请求停车。
  * ASCII 协议每行以 \n 结束，具体字段见 esp32s3/PROTOCOL.md。
  */
 #include <errno.h>
@@ -28,6 +28,9 @@
 #include "nvs_flash.h"
 #include "../../../shared/robot_distance_protocol.h"
 #include "../../../shared/camera_position_protocol.h"
+#include "autonomous_task.h"
+#include "../../../shared/gyro_turn_protocol.h"
+#include "../../../shared/bridge_link_protocol.h"
 
 /* 手机连接此热点，再连接 TCP 3333 端口；最多允许一个 Wi-Fi 客户端。 */
 #define WIFI_SSID               "RobotCar-ESP32S3"
@@ -35,39 +38,38 @@
 #define TCP_PORT                3333
 /* 机械臂升降超过 250 ms 未续期时请求停止；底盘和前后定距无心跳超时。
  * socket 最多等待 100 ms，让主循环定期处理机械臂超时检查。
- * 命令上限为 63 字节（不含换行），超长命令丢弃到下一换行。 */
+ * 命令上限为 191 字节（不含换行），超长命令丢弃到下一换行。 */
 #define COMMAND_TIMEOUT_MS      250
 #define SOCKET_TIMEOUT_MS       100
-#define MAX_FRAME_LENGTH        127
+#define MAX_FRAME_LENGTH        191
 #define STM32_UART_PORT         UART_NUM_1
-/* 交叉接线：GPIO17 TX -> STM32 PB11 RX，GPIO18 RX <- STM32 PB10 TX。
- * 两板必须共地；ESP32 的 UART1 对接 STM32 的 USART3，串口编号无需相同。 */
+/* 交叉接线：GPIO17 TX -> STM32 PB12 RX，GPIO18 RX <- STM32 PB13 TX。
+ * 两板必须共地；ESP32 的 UART1 对接 STM32 的 UART5，串口编号无需相同。 */
 #define STM32_UART_TX_GPIO      17
 #define STM32_UART_RX_GPIO      18
 #define STM32_UART_BAUD_RATE    115200
 #define STM32_UART_BUFFER_SIZE  1024
 
 static const char *TAG = "robot_remote";
+static int s_client_fd=-1;
+static bool s_link_failed;
+static char s_stm_frame[192];
+static unsigned s_stm_length;
+static bool s_stm_drop;
 
 /* 协议字符：S 停底盘，U/D/H 升/降/停，Q 停止前后移动；E/C 只用于 ARM_MOVE 的方向。
  * F/B/L/R 只作为 MOVE 的方向，不再接受旧的连续底盘 CMD 命令。 */
 typedef enum {
-    MOTION_STOP = 'S',
-    MOTION_FORWARD = 'F',
-    MOTION_BACKWARD = 'B',
-    MOTION_LEFT = 'L',
-    MOTION_RIGHT = 'R',
     LIFT_UP = 'U',
     LIFT_DOWN = 'D',
     LIFT_HOLD = 'H',
-    ARM_FORE_AFT_HOLD = 'Q',
 } motion_t;
 
 /* 仅升降维护续期状态；底盘和前后定距只转发命令，不等待回包。 */
 static motion_t current_lift = LIFT_HOLD;
 
 /* 初始化桥接串口：115200 波特率、8 数据位、无校验、1 停止位。
- * 驱动提供发送缓冲；应用不读取或转发 STM32 回包。 */
+ * 驱动提供收发缓冲，主循环读取并分发 STM32 回包。 */
 static void start_stm32_uart(void)
 {
     const uart_config_t config = {
@@ -90,7 +92,7 @@ static void start_stm32_uart(void)
 }
 
 /* frame 必须已包含换行。成功仅表示全部字节交给 UART 驱动，
- * 不保证 STM32 已收到或执行；本协议不返回执行结果。 */
+ * 不保证 STM32 已收到或执行；全流程由 EXEC/ACTION 协议确认执行结果。 */
 static bool send_to_stm32(const char *frame)
 {
     int expected = (int)strlen(frame);
@@ -101,6 +103,44 @@ static bool send_to_stm32(const char *frame)
         return false;
     }
     return true;
+}
+
+static void task_send(const char *line)
+{
+    if(!send_to_stm32(line)) s_link_failed=true;
+}
+static void task_event(const char *line)
+{
+    ESP_LOGI(TAG,"%s",line);
+    if(s_client_fd<0) return;
+    size_t size=strlen(line),written=0;
+    while(written<size) {
+        ssize_t n=send(s_client_fd,line+written,size-written,0);
+        if(n<=0) { s_link_failed=true; return; }
+        written+=(size_t)n;
+    }
+}
+static void poll_stm32(void)
+{
+    uint8_t bytes[256];
+    int count=uart_read_bytes(STM32_UART_PORT,bytes,sizeof(bytes),0);
+    for(int i=0;i<count;++i) {
+        char c=(char)bytes[i];
+        if(c=='\n') {
+            if(!s_stm_drop) {
+                if(s_stm_length&&s_stm_frame[s_stm_length-1U]=='\r') --s_stm_length;
+                s_stm_frame[s_stm_length]=0;
+                AutoTask_Input(s_stm_frame,(uint32_t)(esp_timer_get_time()/1000));
+                if(BridgeLink_Feedback(s_stm_frame)) {
+                    char line[194]; snprintf(line,sizeof(line),"%s\n",s_stm_frame); task_event(line);
+                }
+            }
+            s_stm_length=0; s_stm_drop=false;
+        } else if(!s_stm_drop) {
+            if(s_stm_length<sizeof(s_stm_frame)-1U) s_stm_frame[s_stm_length++]=c;
+            else s_stm_drop=true;
+        }
+    }
 }
 
 /* 校验 CMD,<无符号32位序号>,<单字符动作>，不含换行。
@@ -184,9 +224,35 @@ static bool parse_servo(const char *frame, uint32_t *sequence,
  * ESP32 不维护底盘 BUSY 状态，由 STM32 在本地判断是否接受新 MOVE。 */
 static bool handle_frame(const char *frame, int64_t *last_lift_us)
 {
+    uint32_t query_id;
+    BridgeQuery query=BridgeLink_Query(frame,&query_id);
+    if(query!=BRIDGE_NONE) {
+        char line[64];
+        if(query==BRIDGE_PING) {
+            snprintf(line,sizeof(line),"LINK,%lu,ESP_OK\n",(unsigned long)query_id);
+            task_event(line); // Confirms only App <-> ESP32, not STM32 or motion.
+        }
+        snprintf(line,sizeof(line),"%s\n",frame); return send_to_stm32(line);
+    }
+    if(AutoTask_Command(frame,(uint32_t)(esp_timer_get_time()/1000))) return !s_link_failed;
+    if(AutoTask_Running()) {
+        uint32_t id; motion_t direction;
+        if(parse_command(frame,&id,&direction)&&
+            (direction=='Z'||direction=='S'||direction=='H'||direction=='Q')) AutoTask_Stop("USER_STOP");
+        else { task_event("AUTO,0,BUSY,0,0,0,0,MANUAL_REJECTED\n"); return true; }
+    }
     uint32_t sequence;
     motion_t motion;
-    if (strncmp(frame, "ALIGN_POSE,", 11U) == 0) {
+    if (strncmp(frame, "EXEC,", 5U) == 0) {
+        if (!BridgeLink_ManualExec(frame)) {
+            const char *p=frame+5U; uint32_t id;
+            if(RobotProtocol_U32(&p,&id,',')&&id) {
+                char line[80]; snprintf(line,sizeof(line),"ACTION,%lu,ERROR,ESP_INVALID_COMMAND\n",(unsigned long)id);
+                task_event(line);
+            }
+            return true;
+        }
+    } else if (strncmp(frame, "ALIGN_POSE,", 11U) == 0) {
         CameraPoseAlignCommand command;
         if (!CameraProtocol_ParsePoseAlign(frame, &command)) return true;
     } else if (strncmp(frame, "BASE,", 5U) == 0) {
@@ -219,7 +285,8 @@ static bool handle_frame(const char *frame, int64_t *last_lift_us)
     } else if (strncmp(frame, "GRIP,", 5U) == 0 || strncmp(frame, "GRIP_STOP,", 10U) == 0) {
         RobotGripperCommand command;
         if (!RobotProtocol_ParseGripper(frame, &command)) return true;
-    } else if (strncmp(frame, "STATE,", 6U) == 0 || strncmp(frame, "PLAN_ITEM,", 10U) == 0) {
+    } else if (strncmp(frame, "STATE,", 6U) == 0 || strncmp(frame, "PLAN_ITEM,", 10U) == 0 ||
+               strncmp(frame, "STATE_V2,", 9U) == 0 || strncmp(frame, "PLAN_ITEM_V2,", 13U) == 0) {
         RobotSequenceCommand command;
         if (!RobotProtocol_ParseSequence(frame, &command)) return true;
     } else if (strncmp(frame, "MOVE,", 5U) == 0) {
@@ -254,11 +321,14 @@ static bool handle_frame(const char *frame, int64_t *last_lift_us)
  * recv 等待超时不是断线；返回 0 或其他网络错误才退出。 */
 static void handle_client(int socket_fd)
 {
+    s_client_fd=socket_fd; s_link_failed=false;
+    s_stm_length=0U; s_stm_drop=false;
     struct timeval timeout = {
         .tv_sec = 0,
         .tv_usec = SOCKET_TIMEOUT_MS * 1000,
     };
     setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     /* 小型命令/STOP 帧立即提交 TCP，减少 Nagle 合包造成的延迟。 */
     int no_delay = 1;
     setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay));
@@ -278,6 +348,9 @@ static void handle_client(int socket_fd)
     int64_t last_lift_us = esp_timer_get_time();
 
     while (true) {
+        poll_stm32();
+        AutoTask_Tick((uint32_t)(esp_timer_get_time()/1000));
+        if(s_link_failed) break;
         char incoming[128];
         ssize_t received = recv(socket_fd, incoming, sizeof(incoming), 0);
         if (received == 0) {
@@ -324,6 +397,8 @@ static void handle_client(int socket_fd)
     }
 
 disconnected:
+    if(AutoTask_Running()) AutoTask_Stop("DISCONNECTED");
+    s_client_fd=-1;
     /* 断线或转发失败时请求三轴停止，STM32 另有任务总时限和电机故障保护。
      * 此处不复位舵机角度，也不将请求停车视为已经收到停止确认。 */
     current_lift = LIFT_HOLD;
@@ -369,6 +444,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(nvs_result);
     start_stm32_uart();
+    AutoTask_Init(task_send,task_event);
     start_wifi_ap();
 
     /* 建立 IPv4 TCP 服务，监听本机所有网络接口的 3333 端口。 */

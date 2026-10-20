@@ -19,6 +19,7 @@
 # Build artifacts and directories
 **/build/
 build_distance/
+build_autonomous/
 build/
 *.o
 *.a

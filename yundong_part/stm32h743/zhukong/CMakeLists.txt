@@ -34,6 +34,9 @@ enable_language(C ASM)
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
 
+# newlib-nano omits %f conversions unless the float formatter is linked.
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "LINKER:-u,_printf_float")
+
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
@@ -49,6 +52,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/lift_motor.c
     Core/Src/servo_control.c
     Core/Src/camera_link.c
+    Core/Src/imu_link.c
+    Core/Src/gyro_turn.c
 )
 
 # Add include paths

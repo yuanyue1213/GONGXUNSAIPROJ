@@ -33,5 +33,5 @@
     "--compile-commands-dir=f:\\GONGXUNSAIPROJ\\yundong_part\\esp32s3\\hello_world\\build"
   ],
   "idf.flashType": "UART",
-  "idf.port": "COM8"
+  "idf.port": "COM12"
 }

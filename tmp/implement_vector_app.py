@@ -1,0 +1,25 @@
+from pathlib import Path
+base = Path('yundong_part/application/app/src/main/java/com/example/app')
+p = base/'SequenceSettings.kt'
+s = p.read_text(encoding='utf-8')
+s = s.replace('val radialRpm: Int, val upRpm: Int, val downRpm: Int,', 'val combinedRpm: Int,')
+s = s.replace('radialRpm in 5..300 && upRpm in 5..300 && downRpm in 5..300', 'combinedRpm in 5..600')
+s = s.replace('STATE,$sequence,$mode,$r1,$z1,$r2,$z2,$radialRpm,$upRpm,$downRpm', 'STATE_V2,$sequence,$mode,$r1,$z1,$r2,$z2,$combinedRpm')
+s = s.replace('radial: String, up: String, down: String,', 'combined: String,')
+s = s.replace('radial.trim().toInt(), up.trim().toInt(), down.trim().toInt(),', 'combined.trim().toInt(),')
+p.write_text(s, encoding='utf-8')
+p = base/'MainActivity.kt'
+s = p.read_text(encoding='utf-8')
+s = s.replace('var radial by rememberSaveable { mutableStateOf(initial?.radialRpm?.toString() ?: "20") }\n    var up by rememberSaveable { mutableStateOf(initial?.upRpm?.toString() ?: "20") }\n    var down by rememberSaveable { mutableStateOf(initial?.downRpm?.toString() ?: "50") }', 'var combined by rememberSaveable { mutableStateOf(initial?.combinedRpm?.toString() ?: "20") }')
+s = s.replace('DistanceInput("伸缩速度（RPM，5–300）", radial, true) { radial = it }\n    DistanceInput("上升速度（RPM，5–300）", up, true) { up = it }\n    DistanceInput("下降速度（RPM，5–300）", down, true) { down = it }', 'DistanceInput("r/z 合成速度（RPM，5–600）", combined, true) { combined = it }\n    Text("下降时先并行到目标上方10 mm，r到位后z以300 RPM完成末段；下降不足10 mm时全部留到末段。")')
+s = s.replace('radial, up, down, gripper', 'combined, gripper')
+s = s.replace('速度：5–300 RPM；夹子', '合成速度：5–600 RPM；夹子')
+s = s.replace('伸缩/上升/下降 ${p.radialRpm}/${p.upRpm}/${p.downRpm} RPM', 'r/z合成速度 ${p.combinedRpm} RPM')
+p.write_text(s, encoding='utf-8')
+p = base/'SequenceCards.kt'
+s = p.read_text(encoding='utf-8').replace('SequenceSettings(0,0,0,0,20,20,50)', 'SequenceSettings(0,0,0,0,20)')
+s = s.replace('.removePrefix("STATE,1,")', '.removePrefix("STATE,1,").removePrefix("STATE_V2,1,")')
+s = s.replace('if (fields.size != 14 || fields[0].length != 1)', 'if (fields.size !in listOf(12, 14) || fields[0].length != 1)')
+s = s.replace('fields[0][0], SequenceSettings(v[0], v[1], v[2], v[3], v[4], v[5], v[6],\n                    v[7], v[8], v[9], v[10], v[11], v[12])', 'fields[0][0], if (fields.size == 14) {\n                    // Old cards keep radial speed as their new combined speed.\n                    SequenceSettings(v[0], v[1], v[2], v[3], v[4], v[7], v[8], v[9], v[10], v[11], v[12])\n                } else SequenceSettings(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10])')
+s = s.replace('card.frame(sequence).replaceFirst("STATE,$sequence,", "PLAN_ITEM,$sequence,$index,")', 'card.frame(sequence).replaceFirst("STATE,$sequence,", "PLAN_ITEM,$sequence,$index,")\n                .replaceFirst("STATE_V2,$sequence,", "PLAN_ITEM_V2,$sequence,$index,")')
+p.write_text(s, encoding='utf-8')

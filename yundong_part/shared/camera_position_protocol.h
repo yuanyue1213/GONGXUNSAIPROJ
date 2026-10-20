@@ -1,6 +1,7 @@
 #ifndef CAMERA_POSITION_PROTOCOL_H
 #define CAMERA_POSITION_PROTOCOL_H
 #include "robot_distance_protocol.h"
+#include "chassis_wheel_math.h"
 #include <math.h>
 
 typedef struct { float x, y; } CameraCenter;
@@ -181,7 +182,8 @@ static inline bool CameraProtocol_CenterProfile(const CameraCenter *center, uint
     double y = dy * 1.090819 * lateral_ppm / 1000.0;
     if (CAMERA_IMAGE_RIGHT_DIRECTION == 'F') x = -x;
     if (CAMERA_IMAGE_DOWN_DIRECTION == 'R') y = -y;
-    const double targets[4] = {x+y, x-y, x+y, x-y};
+    double targets[4];
+    RobotChassis_WheelTargets(-x, y, 0, targets);
     uint32_t largest = 0U;
     for (unsigned i = 0; i < 4U; ++i) {
         pulses[i] = (int32_t)lround(targets[i]);

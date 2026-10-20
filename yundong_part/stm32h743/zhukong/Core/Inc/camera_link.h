@@ -4,6 +4,7 @@
 #include "../../../../shared/camera_position_protocol.h"
 void CameraLink_Init(UART_HandleTypeDef *uart);
 bool CameraLink_Ready(void);
+bool CameraLink_SendTask(const char *frame);
 void CameraLink_Process(void);
 bool CameraLink_TakeCenter(CameraCenter *center);
 bool CameraLink_TakeRings(CameraCenter rings[3]);

@@ -23,6 +23,8 @@ void RobotControl_Process(void);
 
 /** 在主循环中持续调用，处理通信超时停车。 */
 void RobotControl_Tick(void);
+/** Forward validated task-vision frames through the existing USART3 link. */
+void RobotControl_ForwardCamera(const char *frame);
 
 #ifdef __cplusplus
 }

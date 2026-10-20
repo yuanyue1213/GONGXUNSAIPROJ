@@ -3,6 +3,15 @@ import cv2
 import sys
 
 
+def valid_task_code(payload):
+    """2027 初赛：颜色顺序+放置位置+颜色顺序+粗加工放置位置。"""
+    groups = payload.split("+")
+    if len(groups) != 4 or any(len(group) != 3 for group in groups):
+        return False
+    return (all(c in "123456" for c in groups[0] + groups[2])
+            and all(sorted(groups[i]) == ["1", "2", "3"] for i in (1, 3)))
+
+
 def qr_task():
     question = None
 
@@ -40,21 +49,25 @@ def qr_task():
                                     corners[(i + 1) % 4][0], corners[(i + 1) % 4][1],
                                     image.COLOR_RED)
 
-                question = qr.payload()
-                img_2.draw_string(qr.x(), qr.y() - 15, question, image.COLOR_RED)
+                payload = qr.payload().strip()
+                # 四组三位数字，以 + 分隔；输出完整的实际任务码。
+                if valid_task_code(payload):
+                    question = payload
+                img_2.draw_string(qr.x(), qr.y() - 15, payload, image.COLOR_RED)
             if(count_qrcodes==0 and question!=None):
                 last_qiestion=question
                 count_qrcodes += 1
             elif(count_qrcodes!=0 and last_qiestion==question and question!=None):
                 count_qrcodes += 1
+            else:
+                last_qiestion = question
+                count_qrcodes = 1 if question is not None else 0
 
         disp.show(img_2)
 
-        fps = time.fps()                                          #输出帧率大小
-        print(f"time:{1000/fps:.2f}ms, fps:{fps:.2f}")
-
         if last_qiestion is not None and count_qrcodes==3:
-            serial_dev.write_str(f"The number is {last_qiestion} MaixPy\n")         
+            print(last_qiestion)
+            serial_dev.write_str(last_qiestion + "\n")
 
         #data = serial_dev.read()
 

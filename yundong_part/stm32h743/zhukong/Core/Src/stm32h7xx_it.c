@@ -201,9 +201,11 @@ void SysTick_Handler(void)
 /* USER CODE BEGIN 1 */
 extern UART_HandleTypeDef huart3;
 extern UART_HandleTypeDef huart4;
+extern UART_HandleTypeDef huart5;
+void UART5_IRQHandler(void) { HAL_UART_IRQHandler(&huart5); }
 void UART4_IRQHandler(void) { HAL_UART_IRQHandler(&huart4); }
 
-/* HAL 处理 ESP32 命令串口的接收和错误中断，再调用 robot_control.c
+/* HAL 处理 JY901S 串口的接收和错误中断，再调用 robot_control.c
  * 中的回调。保留在 USER CODE 区，避免 CubeMX 重新生成时覆盖。 */
 void USART3_IRQHandler(void)
 {

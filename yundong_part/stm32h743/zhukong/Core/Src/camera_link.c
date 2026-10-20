@@ -1,4 +1,7 @@
 #include "camera_link.h"
+#include "robot_control.h"
+#include "../../../../shared/task_protocol.h"
+#include <stdio.h>
 /* UART4 interrupt only buffers bytes. Parse in main loop, independently of ESP32 USART3. */
 #define CAMERA_RX_SIZE 256U
 static UART_HandleTypeDef *s_uart;
@@ -6,7 +9,7 @@ static uint8_t s_byte;
 static volatile uint8_t s_buffer[CAMERA_RX_SIZE];
 static volatile uint16_t s_head, s_tail;
 static volatile bool s_fault, s_restart;
-static char s_frame[64];
+static char s_frame[96];
 static uint32_t s_ring_index;
 static unsigned s_length;
 static bool s_drop, s_valid;
@@ -28,6 +31,14 @@ void CameraLink_Init(UART_HandleTypeDef *uart)
     }
 }
 bool CameraLink_Ready(void) { return s_uart != NULL; }
+bool CameraLink_SendTask(const char *frame)
+{
+    TaskCameraRequest request;
+    if(s_uart==NULL||!TaskProtocol_Camera(frame,&request)) return false;
+    char line[64]; int n=snprintf(line,sizeof(line),"%s\n",frame);
+    return n>0&&(size_t)n<sizeof(line)&&
+        HAL_UART_Transmit(s_uart,(uint8_t *)line,(uint16_t)n,20U)==HAL_OK;
+}
 void CameraLink_SelectTarget(uint32_t ring_index)
 {
     s_ring_index = ring_index;
@@ -66,6 +77,7 @@ void CameraLink_Process(void)
             if (!s_drop) {
                 if (s_length > 0U && s_frame[s_length - 1U] == '\r') --s_length;
                 s_frame[s_length] = '\0';
+                RobotControl_ForwardCamera(s_frame);
                 CameraCenter center;
                 CameraCenter rings[3];
                 if (s_ring_index == 0U && CameraProtocol_ParseCenter(s_frame, &center)) {

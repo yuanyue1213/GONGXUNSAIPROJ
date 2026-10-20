@@ -4,11 +4,12 @@
 #include <stddef.h>
 #define HAL_UART_STATE_READY 0U
 #define HAL_UART_STATE_BUSY_RX 1U
-typedef struct { int instance; uint32_t RxState; } UART_HandleTypeDef;
+typedef struct { int instance; uint32_t RxState; uint32_t ErrorCode; } UART_HandleTypeDef;
 typedef enum { HAL_OK, HAL_ERROR, HAL_BUSY, HAL_TIMEOUT } HAL_StatusTypeDef;
 #define HAL_MAX_DELAY UINT32_MAX
 #define USART3_IRQn 0
 #define UART4_IRQn 1
+#define UART7_IRQn 2
 #define __HAL_UART_CLEAR_OREFLAG(x) ((void)(x))
 #define __HAL_UART_CLEAR_NEFLAG(x) ((void)(x))
 #define __HAL_UART_CLEAR_FEFLAG(x) ((void)(x))

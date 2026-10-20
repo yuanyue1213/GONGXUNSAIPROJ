@@ -10,11 +10,23 @@ internal data class DistanceMove(
     val speedRpm: Int,
     val pulsesPerMetre: Int,
     val rotationDegrees: Double? = null,
+    val wheelPulses: Int = 3200,
 ) {
-    fun frame(sequence: Long): String =
-        "MOVE,$sequence,$direction,$distanceMm,$speedRpm,$pulsesPerMetre\n"
+    fun frame(sequence: Long): String = if (rotationDegrees != null)
+        "EXEC,$sequence,TURN,$direction,${java.lang.String.format(java.util.Locale.US, "%.1f", rotationDegrees)},$speedRpm\n"
+        else if (direction in "FB") {
+            val pulses = (distanceMm.toLong() * pulsesPerMetre + 500L) / 1000L
+            "EXEC,$sequence,DRIVE,$direction,$pulses,$speedRpm,$wheelPulses\n"
+        } else "EXEC,$sequence,MOVE,$direction,$distanceMm,$speedRpm,$pulsesPerMetre\n"
 
     companion object {
+        fun gyroRotationFromInputs(direction: Char, angle: String, speed: String): DistanceMove? {
+            val tenths = try { java.math.BigDecimal(angle.trim()).movePointRight(1).intValueExact() }
+                catch (_: IllegalArgumentException) { return null } catch (_: ArithmeticException) { return null }
+            val rpm = speed.toIntOrNull() ?: return null
+            if (direction !in "CW" || tenths !in 1..3600 || rpm !in 5..60) return null
+            return DistanceMove(direction,0,rpm,0,tenths/10.0)
+        }
         fun rotationFromInputs(
             direction: Char, angle: String, speed: String,
             diameter: String, wheelPulses: String, correction: String,
@@ -47,10 +59,10 @@ internal data class DistanceMove(
             val factor = correction.toDoubleOrNull() ?: return null
             if (direction !in "FBLRCW" || mm !in 1..10000 || rpm !in 5..300 ||
                 !diameterMm.isFinite() || diameterMm !in 20.0..500.0 ||
-                pulses !in 1..1000000 || !factor.isFinite() || factor !in 0.1..10.0) return null
+                pulses !in 200..51200 || !factor.isFinite() || factor !in 0.1..10.0) return null
             val perMetre = (1000.0 * pulses * factor / (PI * diameterMm)).roundToInt()
             if (perMetre !in 1..1000000 || mm.toLong() * perMetre < 500L) return null
-            return DistanceMove(direction, mm, rpm, perMetre)
+            return DistanceMove(direction, mm, rpm, perMetre, wheelPulses = pulses)
         }
     }
 }

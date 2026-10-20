@@ -7,7 +7,7 @@ import java.net.Socket
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
-/** One-way commands; no reply, heartbeat, or execution-confirmation timer. */
+/** Manual commands and task uploads share TCP; task feedback arrives as bounded lines. */
 internal class RobotTcpClient(
     private val onConnectionChanged: (Boolean, String) -> Unit,
     private val onMessage: (String) -> Unit,
@@ -37,9 +37,17 @@ internal class RobotTcpClient(
                     writer = newWriter
                 }
                 onConnectionChanged(true, "已连接 $host:$port")
+                val line = StringBuilder()
+                var dropping = false
                 while (true) {
-                    // Observe EOF/disconnection only; legacy replies are discarded.
-                    if (input.read() == -1) break
+                    val byte = input.read()
+                    if (byte == -1) break
+                    if (byte == 10) {
+                        if (!dropping && generation == connectionGeneration.get()) onMessage(line.toString().trimEnd('\r'))
+                        line.setLength(0); dropping = false
+                    } else if (!dropping) {
+                        if (line.length < 191) line.append(byte.toChar()) else dropping = true
+                    }
                 }
             } catch (error: Exception) {
                 if (generation == connectionGeneration.get())
@@ -62,6 +70,15 @@ internal class RobotTcpClient(
         sendFrame(move.frame(id))
         return id
     }
+    fun startAutonomous(settings: AutonomousSettings, parameters: List<AutonomousArmParameters>) {
+        sendFrames(settings.frames(nextSequence(), nextSequence(), parameters))
+    }
+    fun stopAutonomous() { sendFrame("AUTO_STOP,${nextSequence()}\n") }
+    fun requestImu() { sendFrame("QUERY_IMU,${nextSequence()}\n") }
+    fun checkLink(): Long {
+        val id=nextSequence(); sendFrame("PING,$id\n"); return id
+    }
+    fun requestStatus() { sendFrame("QUERY,${nextSequence()}\n") }
 
     fun sendAlignment(forwardPpm: Int, lateralPpm: Int) {
         if (forwardPpm !in 1..1000000 || lateralPpm !in 1..1000000) return
@@ -106,7 +123,10 @@ internal class RobotTcpClient(
     }
 
     fun sendPlan(cards: List<SequenceCard>) {
-        val frames = SequencePlan.frames(nextSequence(), cards.toList())
+        sendFrames(SequencePlan.frames(nextSequence(), cards.toList()))
+    }
+
+    private fun sendFrames(frames: List<String>) {
         if (frames.isEmpty()) return
         val generation = connectionGeneration.get()
         // One executor task keeps the upload contiguous, even if other controls are tapped.

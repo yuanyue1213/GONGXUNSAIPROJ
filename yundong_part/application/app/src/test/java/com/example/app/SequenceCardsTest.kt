@@ -4,7 +4,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SequenceCardsTest {
-    private val settings = SequenceSettings(1105, -50, 200, -40, 20, 25, 60, 30, 10, 65, 5, 249, 141)
+    private val settings = SequenceSettings(1105, -50, 200, -40, 20, 30, 10, 65, 5, 249, 141)
     private val card = SequenceCard("card-1", "抓取 | 物块\n一", 'A', settings)
 
     @Test fun savedSnapshotsRetainNamesAnglesAndFractionalDistances() {
@@ -19,15 +19,15 @@ class SequenceCardsTest {
         val frames = SequencePlan.frames(7, cards)
         assertEquals(5, frames.size)
         assertEquals("PLAN_BEGIN,7,3\n", frames.first())
-        assertTrue(frames[1].startsWith("PLAN_ITEM,7,0,A,1105,-50,"))
-        assertTrue(frames[2].startsWith("PLAN_ITEM,7,1,P,"))
-        assertTrue(frames[3].startsWith("PLAN_ITEM,7,2,A,"))
+        assertTrue(frames[1].startsWith("PLAN_ITEM_V2,7,0,A,1105,-50,"))
+        assertTrue(frames[2].startsWith("PLAN_ITEM_V2,7,1,P,"))
+        assertTrue(frames[3].startsWith("PLAN_ITEM_V2,7,2,A,"))
         assertEquals("PLAN_RUN,7\n", frames.last())
         assertTrue(SequencePlan.frames(0, cards).isEmpty())
         assertTrue(SequencePlan.frames(1, emptyList()).isEmpty())
         assertTrue(SequencePlan.frames(1, List(17) { card }).isEmpty())
         assertTrue(SequencePlan.frames(1, listOf(card.copy(mode = 'X'))).isEmpty())
-        val longest = card.copy(settings = SequenceSettings(-10000, -400, -10000, -400, 120, 120, 120, 300, 270, 270, 270, 360, 360))
+        val longest = card.copy(settings = SequenceSettings(-10000, -400, -10000, -400, 120, 300, 270, 270, 270, 360, 360))
         assertTrue(SequencePlan.frames(0xFFFFFFFFL, List(16) { longest }).all { it.trimEnd().length <= 127 })
     }
     @Test fun turnCardsPersistAndMixWithArmCards() {
@@ -36,7 +36,7 @@ class SequenceCardsTest {
         assertEquals(cards, SequenceCardCodec.decode(SequenceCardCodec.encode(cards)))
         val frames = SequencePlan.frames(8, cards)
         assertEquals("PLAN_ITEM,8,0,T,0,120,60\n", frames[1])
-        assertTrue(frames[2].startsWith("PLAN_ITEM,8,1,P,"))
+        assertTrue(frames[2].startsWith("PLAN_ITEM_V2,8,1,P,"))
         assertEquals("PLAN_ITEM,8,2,T,120,0,120\n", frames[3])
         assertFalse(turn.copy(turn = TurnSettings(0,271,60)).valid())
         assertFalse(turn.copy(turn = TurnSettings(0,120,0)).valid())

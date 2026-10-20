@@ -185,7 +185,7 @@ static inline bool RobotProtocol_ParseArmPose(const char *frame, RobotArmPoseCom
 /* Atomic configurable sequence: r targets in 0.1 mm, z targets in mm. */
 typedef struct {
     uint32_t sequence, r_rpm, up_rpm, down_rpm, gripper_dps, theta, open_angle, close_angle, base_home, base_tilt;
-    uint32_t plan_index;
+    uint32_t plan_index, combined_rpm;
     char mode;
     int32_t r1, z1, r2, z2;
 } RobotSequenceCommand;
@@ -200,6 +200,27 @@ static inline bool RobotProtocol_SequenceCoordinate(const char **p, int32_t *val
 }
 static inline bool RobotProtocol_ParseSequence(const char *frame, RobotSequenceCommand *cmd)
 {
+    bool vector = strncmp(frame, "STATE_V2,", 9U) == 0 || strncmp(frame, "PLAN_ITEM_V2,", 13U) == 0;
+    if (vector) {
+        bool plan = strncmp(frame, "PLAN_ITEM_V2,", 13U) == 0;
+        const char *p = frame + (plan ? 13U : 9U);
+        *cmd = (RobotSequenceCommand){0};
+        if (!RobotProtocol_U32(&p, &cmd->sequence, ',') ||
+            (plan && (!RobotProtocol_U32(&p, &cmd->plan_index, ',') || cmd->plan_index >= 16U))) return false;
+        if ((*p != 'A' && *p != 'P') || p[1] != ',') return false;
+        cmd->mode = *p; p += 2;
+        return RobotProtocol_SequenceCoordinate(&p, &cmd->r1, 10000U) &&
+            RobotProtocol_SequenceCoordinate(&p, &cmd->z1, 400U) &&
+            RobotProtocol_SequenceCoordinate(&p, &cmd->r2, 10000U) &&
+            RobotProtocol_SequenceCoordinate(&p, &cmd->z2, 400U) &&
+            RobotProtocol_U32(&p, &cmd->combined_rpm, ',') &&
+            RobotProtocol_U32(&p, &cmd->gripper_dps, ',') && RobotProtocol_U32(&p, &cmd->theta, ',') &&
+            RobotProtocol_U32(&p, &cmd->open_angle, ',') && RobotProtocol_U32(&p, &cmd->close_angle, ',') &&
+            RobotProtocol_U32(&p, &cmd->base_home, ',') && RobotProtocol_U32(&p, &cmd->base_tilt, '\0') &&
+            cmd->sequence != 0U && cmd->combined_rpm >= 5U && cmd->combined_rpm <= 600U &&
+            cmd->gripper_dps >= 6U && cmd->gripper_dps <= 300U && cmd->theta <= 270U &&
+            cmd->open_angle <= 270U && cmd->close_angle <= 270U && cmd->base_home <= 360U && cmd->base_tilt <= 360U;
+    }
     bool item = strncmp(frame, "PLAN_ITEM,", 10U) == 0;
     if (!item && strncmp(frame, "STATE,", 6U) != 0) return false;
     const char *p = frame + (item ? 10U : 6U);
@@ -234,6 +255,7 @@ static inline bool RobotProtocol_ParseSequence(const char *frame, RobotSequenceC
             !RobotProtocol_U32(&p, &cmd->open_angle, ',') || !RobotProtocol_U32(&p, &cmd->close_angle, ',') ||
             !RobotProtocol_U32(&p, &cmd->base_home, ',') || !RobotProtocol_U32(&p, &cmd->base_tilt, '\0'))) return false;
     }
+    cmd->combined_rpm = cmd->r_rpm; /* Legacy frames migrate their radial speed. */
     return cmd->sequence != 0U && cmd->r_rpm >= 5U && cmd->r_rpm <= 300U &&
         cmd->up_rpm >= 5U && cmd->up_rpm <= 300U && cmd->down_rpm >= 5U && cmd->down_rpm <= 300U &&
         cmd->gripper_dps >= 6U && cmd->gripper_dps <= 300U && cmd->theta <= 270U &&

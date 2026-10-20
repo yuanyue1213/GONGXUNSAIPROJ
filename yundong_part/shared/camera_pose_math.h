@@ -84,11 +84,12 @@ static inline bool CameraProtocol_PoseProfile(const CameraPoseAlignCommand *c, c
     }
     float f = u*c->forward_ppm/1000.0f, l = v*c->lateral_ppm/1000.0f;
     float r = (c->wheelbase_mm+c->track_mm)*0.5f*theta*c->forward_ppm/1000.0f;
-    const float targets[4] = {-f+l+r, -f-l-r, -f+l-r, -f-l+r};
+    double targets[4];
+    RobotChassis_WheelTargets(f, l, r, targets);
     uint32_t largest = 0U;
     for (unsigned i = 0; i < 4U; ++i) {
-        pulses[i] = (int32_t)lroundf(targets[i]);
-        if (pulses[i] == 0 && fabsf(targets[i]) > 0.0001f) pulses[i] = targets[i] > 0 ? 1 : -1;
+        pulses[i] = (int32_t)lround(targets[i]);
+        if (pulses[i] == 0 && fabs(targets[i]) > 0.0001) pulses[i] = targets[i] > 0 ? 1 : -1;
         uint32_t distance = (uint32_t)(pulses[i] < 0 ? -pulses[i] : pulses[i]);
         if (distance > largest) largest = distance;
     }

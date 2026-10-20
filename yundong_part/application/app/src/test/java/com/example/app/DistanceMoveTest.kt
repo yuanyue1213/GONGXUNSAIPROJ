@@ -13,7 +13,7 @@ class DistanceMoveTest {
         val expected = (kotlin.math.PI * 441.4 * 90 / 360 * 9889 / 1000).let {
             kotlin.math.round(it).toInt()
         }
-        assertEquals("MOVE,7,C,1000,10,$expected\n", left.frame(7))
+        assertEquals("EXEC,7,TURN,C,90.0,10\n", left.frame(7))
         assertEquals(90.0, left.rotationDegrees!!, 0.0)
         assertEquals(left.pulsesPerMetre, rotation('W')!!.pulsesPerMetre)
         assertTrue(kotlin.math.abs(expected * 4 - rotation(angle = "360")!!.pulsesPerMetre) <= 2)
@@ -31,16 +31,30 @@ class DistanceMoveTest {
         assertNull(rotation(factor = "0"))
         assertNull(DistanceMove.rotationFromInputs('C', "360", "10", "20", "62831", "0.1", "2000", "2000"))
     }
+    @Test fun measuredRotationCalibrationMatchesAutonomousDefault() {
+        assertEquals(3291, rotation(factor=DEFAULT_TURN_CORRECTION.toString())!!.pulsesPerMetre)
+    }
+    @Test fun gyroTurnNeedsOnlyAngleAndSpeed() {
+        assertEquals("EXEC,42,TURN,W,90.0,20\n",DistanceMove.gyroRotationFromInputs('W',"90","20")!!.frame(42))
+        assertNull(DistanceMove.gyroRotationFromInputs('W',"90.01","20"))
+        assertNull(DistanceMove.gyroRotationFromInputs('F',"90","20"))
+        assertNull(DistanceMove.gyroRotationFromInputs('C',"0","20"))
+        assertNull(DistanceMove.gyroRotationFromInputs('C',"90","61"))
+    }
 
     @Test fun wheel103DirectDriveConversion() {
         val move = DistanceMove.fromInputs('F', "1000", "45", "103", "3200", "1")!!
         assertEquals(9889, move.pulsesPerMetre)
-        assertEquals("MOVE,7,F,1000,45,9889\n", move.frame(7))
+        assertEquals("EXEC,7,DRIVE,F,9889,45,3200\n", move.frame(7))
     }
 
     @Test fun changedMicrostepsAndMeasuredCorrection() {
         val adjusted = DistanceMove.fromInputs('L', "100", "45", "103", "6400", "1.25")!!
         assertEquals(24723, adjusted.pulsesPerMetre)
+        val back = DistanceMove.fromInputs('B', "100", "45", "103", "6400", "1.25")!!
+        assertEquals("EXEC,8,DRIVE,B,2472,45,6400\n",back.frame(8))
+        assertEquals("EXEC,9,MOVE,L,100,45,24723\n",adjusted.frame(9))
+        assertNull(DistanceMove.fromInputs('F',"100","20","103","51201","1"))
     }
 
     @Test fun invalidInputsCannotProduceMovement() {

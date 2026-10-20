@@ -1,8 +1,6 @@
 package com.example.app
 
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -27,15 +25,12 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.runtime.key
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -44,7 +39,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.ui.platform.LocalContext
@@ -62,25 +56,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.app.ui.theme.AppTheme
-import kotlin.math.roundToInt
-
-private const val COMMAND_INTERVAL_MS = 50L
 
 class MainActivity : ComponentActivity() {
-    private val commandHandler = Handler(Looper.getMainLooper())
     private var moveStatus by mutableStateOf("等待定距移动")
-    private var repeatedLiftCommand: Runnable? = null
-    private var activeLiftDirection: Char? = null
-    private val pendingServoValues = mutableMapOf<Char, Int>()
-    private val pendingServoTasks = mutableMapOf<Char, Runnable>()
+    private var moveRunning by mutableStateOf(false)
+    private var manualMoveId = 0L
+    private var manualMoveAccepted = false
+    private val linkProbe = LinkProbe()
+    private var linkStatus by mutableStateOf("尚未检测STM32回包")
+    private var feedbackLines by mutableStateOf(emptyList<String>())
+    private var autoStatus by mutableStateOf("等待一键启动")
+    private var autoRunning by mutableStateOf(false)
+    private var autoCode by mutableStateOf("")
     private lateinit var robotClient: RobotTcpClient
 
     private var connectionText by mutableStateOf("未连接")
@@ -94,13 +87,69 @@ class MainActivity : ComponentActivity() {
                     isConnected = connected
                     connectionText = message
                     if (!connected) {
+                        linkProbe.clear(); linkStatus = "未连接，无法检测STM32回包"
+                        moveRunning = false; manualMoveId = 0L
+                        autoRunning = false
+                        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                         moveStatus = "已断开，无法确认底盘状态"
-                        cancelRepeatedLiftCommand()
-                        cancelPendingServos()
                     }
                 }
             },
-            onMessage = {},
+            onMessage = { line -> runOnUiThread {
+                feedbackLines = (feedbackLines + (if (line.startsWith("TX,")) line else "RX,$line")).takeLast(24)
+                linkProbe.receive(line)?.let { linkStatus = it }
+                if (line.startsWith("STATUS,")) {
+                    val status = line.split(',')
+                    if (status.size == 5) {
+                        linkStatus = "STM32：${if (status[2] == "IDLE") "空闲" else "忙碌"}；机械臂原点${if (status[3] == "1") "已就绪" else "未初始化"}；转盘目标${status[4]}°"
+                    }
+                }
+                if (line.startsWith("IMU,")) {
+                    moveStatus = ImuFeedback.text(line)
+                }
+                if (line.startsWith("ACTION,")) {
+                    val action = line.split(',')
+                    if (action.getOrNull(1)?.toLongOrNull() == manualMoveId) {
+                        if (action.getOrNull(2) == "ACCEPTED") manualMoveAccepted = true
+                        if (action.getOrNull(2) in listOf("DONE", "ERROR", "CANCELLED", "BUSY")) {
+                            moveRunning = false; manualMoveId = 0L
+                        }
+                    }
+                    moveStatus = when (action.getOrNull(2)) {
+                        "ACCEPTED" -> "动作已接收，等待闭环完成"
+                        "DONE" -> "动作完成"
+                        "ERROR" -> "动作失败：${action.getOrNull(3)}"
+                        "CANCELLED" -> "动作已取消"
+                        "BUSY" -> "执行器忙碌：" + when (val reason = action.getOrNull(3)) {
+                            "STARTUP_STOP" -> "底盘启动停车未获全部驱动器确认，请检查四轮驱动器"
+                            "TASK_ACTIVE", "ACTIVE" -> "上一动作尚未结束"
+                            "GYRO_ACTIVE", "CHASSIS_ACTIVE" -> "底盘动作尚未结束"
+                            "CHASSIS_STOP_PENDING" -> "底盘停车确认中"
+                            "ARM_STOP_PENDING" -> "机械臂前后轴停车未确认"
+                            "LIFT_STOP_PENDING" -> "升降轴停车未确认"
+                            "ORIGIN_INITIALIZING" -> "机械臂原点初始化中"
+                            "ARM_ACTIVE" -> "机械臂前后轴动作中"
+                            "LIFT_ACTIVE" -> "升降轴动作中"
+                            "GRAB_ACTIVE" -> "抓放动作中"
+                            "PLAN_ACTIVE", "POSE_ACTIVE" -> "机械臂路径执行中"
+                            "BASE_ACTIVE" -> "机械臂底座动作中"
+                            "GRIPPER_ACTIVE" -> "夹爪动作中"
+                            "VISION_ACTIVE" -> "视觉校准中"
+                            else -> reason ?: "原因未知"
+                        }
+                        else -> line
+                    }
+                }
+                if (line.startsWith("AUTO,") || line.startsWith("TASK,")) {
+                    autoStatus = AutonomousStatus.text(line)
+                    if (line.startsWith("TASK,")) autoCode = line.split(',').getOrNull(2) ?: ""
+                    val state = line.split(',').getOrNull(2)
+                    if (line.startsWith("AUTO,") && state in listOf("DONE", "STOPPED", "ERROR")) autoRunning = false
+                    if (line.startsWith("AUTO,") && state in listOf("STARTING", "RUNNING", "TURNING", "SCANNING", "WORK", "CALIBRATING")) autoRunning = true
+                    if (autoRunning) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            } },
         )
 
         enableEdgeToEdge()
@@ -113,7 +162,7 @@ class MainActivity : ComponentActivity() {
                         robotClient.connect(host, port)
                     },
                     onDisconnect = { robotClient.sendMotion('Z'); stopMotion(); stopLift(); stopForeAft(); robotClient.disconnect() },
-                    moveRunning = false,
+                    moveRunning = moveRunning,
                     moveStatus = moveStatus,
                     onMove = ::startDistanceMove,
                     onAlign = { forward, lateral, settings ->
@@ -127,32 +176,41 @@ class MainActivity : ComponentActivity() {
                     onJointAlign = { ring, forward, lateral, settings, geometry -> robotClient.sendJointAlignment(ring, forward, lateral, settings, geometry) },
                     onParallel = { ppm, rpm, step, reverse -> robotClient.sendParallel(ppm, rpm, step, reverse) },
                     onStopMotion = ::stopMotion,
-                    onStartLift = ::startLift,
-                    onStopLift = ::stopLift,
-                    onLiftDistance = { direction, distance, rpm, pulses ->
-                        stopLift()
-                        robotClient.sendLiftDistance(direction, distance, rpm, pulses)
-                    },
-                    onStopForeAft = ::stopForeAft,
-                    onArmDistance = { direction, distance, rpm, pulses ->
-                        robotClient.sendArmDistance(direction, distance, rpm, pulses)
-                    },
                     onArmPose = { theta, r, z, rpm, pulses ->
-                        cancelPendingServos()
                         robotClient.sendArmPose(theta, r, z, rpm, pulses)
                     },
-                    onHome = { cancelPendingServos(); robotClient.sendMotion('O') },
-                    onInitializeOrigin = { base -> cancelPendingServos(); robotClient.initializeOrigin(base) },
+                    onHome = { robotClient.sendMotion('O') },
+                    onInitializeOrigin = { base -> robotClient.initializeOrigin(base) },
                     onStopArm = { robotClient.sendMotion('Z'); stopLift(); stopForeAft() },
-                    onGrab = { settings -> cancelPendingServos(); robotClient.sendSequence('A', settings) },
-                    onRelease = { settings -> cancelPendingServos(); robotClient.sendSequence('P', settings) },
-                    onPlan = { cards -> cancelPendingServos(); robotClient.sendPlan(cards) },
+                    onGrab = { settings -> robotClient.sendSequence('A', settings) },
+                    onRelease = { settings -> robotClient.sendSequence('P', settings) },
+                    onPlan = { cards -> robotClient.sendPlan(cards) },
                     onCancelGrab = { robotClient.sendMotion('Z') },
-                    onGripper = { start, end, dps -> cancelPendingServos(); robotClient.sendGripper(start, end, dps) },
+                    onGripper = { start, end, dps -> robotClient.sendGripper(start, end, dps) },
                     onStopGripper = { robotClient.stopGripper() },
-                    onServoChange = ::queueServoAngle,
                     onServoFinished = ::sendServoAngle,
-                    onBaseMove = { target, dps -> cancelPendingServos(); robotClient.sendBase(target, dps) },
+                    onBaseMove = { target, dps -> robotClient.sendBase(target, dps) },
+                    autoStatus = autoStatus,
+                    autoRunning = autoRunning,
+                    autoCode = autoCode,
+                    onAutoStart = { settings, parameters ->
+                        robotClient.startAutonomous(settings, parameters)
+                        autoRunning = true
+                        autoCode = ""
+                        autoStatus = "已提交，等待ESP32检查配置及STM32状态"
+                    },
+                    onAutoStop = { robotClient.stopAutonomous() },
+                    onRequestImu = { robotClient.requestImu() },
+                    linkStatus = linkStatus,
+                    feedbackLog = feedbackLines.joinToString("\n"),
+                    onCheckLink = {
+                        val id = robotClient.checkLink()
+                        linkStatus = linkProbe.start(id)
+                        window.decorView.postDelayed({
+                            if (isConnected) linkProbe.timeout(id)?.let { linkStatus = it }
+                        }, 3000)
+                    },
+                    onRequestStatus = { robotClient.requestStatus() },
                 )
             }
         }
@@ -164,83 +222,47 @@ class MainActivity : ComponentActivity() {
         stopMotion()
         stopLift()
         stopForeAft()
-        cancelPendingServos()
     }
 
     override fun onDestroy() {
         stopMotion()
         stopLift()
         stopForeAft()
-        cancelPendingServos()
         robotClient.close()
         super.onDestroy()
     }
 
     private fun startDistanceMove(move: DistanceMove) {
         if (!isConnected) return
-        robotClient.sendMove(move)
+        manualMoveId = robotClient.sendMove(move)
+        manualMoveAccepted = false
+        moveRunning = true
+        val pendingId = manualMoveId
+        window.decorView.postDelayed({
+            if (manualMoveId == pendingId && !manualMoveAccepted && isConnected)
+                moveStatus = "3秒内未收到动作确认，请检测双向通信或停止底盘；不会自动重发移动命令"
+        }, 3000)
         moveStatus = move.rotationDegrees?.let {
             "正在提交${if (move.direction == 'C') "左转" else "右转"} $it° 命令"
         } ?: "正在提交 ${move.distanceMm} mm 命令"
     }
 
     private fun stopMotion() {
+        moveRunning = false; manualMoveId = 0L
         moveStatus = "已请求底盘停车"
         robotClient.sendMotion('S')
     }
 
-    private fun startLift(direction: Char) {
-        if (!isConnected) return
-        cancelRepeatedLiftCommand()
-        activeLiftDirection = direction
-        robotClient.sendMotion(direction)
-        repeatedLiftCommand = object : Runnable {
-            override fun run() {
-                if (activeLiftDirection == direction && isConnected) {
-                    robotClient.sendMotion(direction)
-                    commandHandler.postDelayed(this, COMMAND_INTERVAL_MS)
-                }
-            }
-        }.also { commandHandler.postDelayed(it, COMMAND_INTERVAL_MS) }
-    }
-
     private fun stopLift() {
-        cancelRepeatedLiftCommand()
-        activeLiftDirection = null
         robotClient.sendMotion('H')
-    }
-
-    private fun cancelRepeatedLiftCommand() {
-        repeatedLiftCommand?.let(commandHandler::removeCallbacks)
-        repeatedLiftCommand = null
     }
 
     private fun stopForeAft() {
         robotClient.sendMotion('Q')
     }
 
-    private fun queueServoAngle(channel: Char, angle: Int) {
-        if (!isConnected) return
-        pendingServoValues[channel] = angle
-        if (pendingServoTasks.containsKey(channel)) return
-        val task = Runnable {
-            pendingServoTasks.remove(channel)
-            pendingServoValues.remove(channel)?.let { robotClient.sendServo(channel, it) }
-        }
-        pendingServoTasks[channel] = task
-        commandHandler.postDelayed(task, 50L)
-    }
-
     private fun sendServoAngle(channel: Char, angle: Int) {
-        pendingServoTasks.remove(channel)?.let(commandHandler::removeCallbacks)
-        pendingServoValues.remove(channel)
         if (isConnected) robotClient.sendServo(channel, angle)
-    }
-
-    private fun cancelPendingServos() {
-        pendingServoTasks.values.forEach(commandHandler::removeCallbacks)
-        pendingServoTasks.clear()
-        pendingServoValues.clear()
     }
 }
 
@@ -261,11 +283,6 @@ private fun RemoteControlScreen(
     onJointAlign: (Int, Int, Int, AlignmentSettings, JointAlignmentSettings) -> Unit,
     onParallel: (Int, Int, Int, Boolean) -> Unit,
     onStopMotion: () -> Unit,
-    onStartLift: (Char) -> Unit,
-    onStopLift: () -> Unit,
-    onLiftDistance: (Char, Int, Int, Int) -> Unit,
-    onStopForeAft: () -> Unit,
-    onArmDistance: (Char, Int, Int, Int) -> Unit,
     onArmPose: (Int, Int, Int, Int, Int) -> Unit,
     onHome: () -> Unit,
     onInitializeOrigin: (Int) -> Unit,
@@ -276,16 +293,25 @@ private fun RemoteControlScreen(
     onCancelGrab: () -> Unit,
     onGripper: (Int, Int, Int) -> Unit,
     onStopGripper: () -> Unit,
-    onServoChange: (Char, Int) -> Unit,
     onServoFinished: (Char, Int) -> Unit,
     onBaseMove: (Int, Int) -> Unit = { _, _ -> },
+    autoStatus: String = "等待一键启动",
+    autoRunning: Boolean = false,
+    autoCode: String = "",
+    onAutoStart: (AutonomousSettings, List<AutonomousArmParameters>) -> Unit = { _, _ -> },
+    onAutoStop: () -> Unit = {},
+    onRequestImu: () -> Unit = {},
+    linkStatus: String = "尚未检测STM32回包",
+    feedbackLog: String = "",
+    onCheckLink: () -> Unit = {},
+    onRequestStatus: () -> Unit = {},
 ) {
     var host by rememberSaveable { mutableStateOf("192.168.4.1") }
     var portText by rememberSaveable { mutableStateOf("3333") }
     var addressError by remember { mutableStateOf<String?>(null) }
 
     var page by rememberSaveable { mutableStateOf(0) }
-    val pages = listOf("连接", "底盘", "机械臂", "舵机", "流程")
+    val pages = listOf("连接", "底盘", "机械臂", "舵机", "调试", "全流程")
     val pageState = rememberSaveableStateHolder()
     val context = LocalContext.current
     val cardStore = remember(context) { SequenceCardStore(context) }
@@ -338,6 +364,7 @@ private fun RemoteControlScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 when (page) {
+                    5 -> AutonomousPanel(connected, autoRunning, autoStatus, autoCode, onAutoStart, onAutoStop)
                     0 -> {
                         VisibleTextField(
                             value = host,
@@ -375,10 +402,23 @@ private fun RemoteControlScreen(
                             },
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text(if (connected) "断开连接" else "连接 ESP32-S3") }
-
+                        Spacer(Modifier.height(12.dp))
+                        Text(linkStatus, modifier = Modifier.fillMaxWidth())
+                        Button(onClick = onCheckLink, enabled = connected, modifier = Modifier.fillMaxWidth()) {
+                            Text("检测双向通信（不驱动电机）")
+                        }
+                        Button(onClick = onRequestStatus, enabled = connected, modifier = Modifier.fillMaxWidth()) {
+                            Text("查询STM32状态")
+                        }
+                        Text("串口：ESP TX17→STM PB12；STM PB13→ESP RX18；两板共地，115200。")
+                        Text("最近24条通信记录（TX为App发出，RX为收到；TX不代表执行成功）")
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Text(feedbackLog.ifEmpty { "暂无记录" }, style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.fillMaxWidth())
+                        }
                     }
                     1 -> DistanceMovePanel(connected, moveRunning, moveStatus, onMove, onAlign, onRingAlign, onJointAlign, onParallel, onStopMotion,
-                        onSectionSelected = { scope.launch { scroll.scrollTo(0) } })
+                        onSectionSelected = { scope.launch { scroll.scrollTo(0) } }, onRequestImu = onRequestImu)
                     2 -> ArmPosePanel(connected, onArmPose, onInitializeOrigin, onHome, onStopArm)
                     3 -> {
                         ServoAngleInput("夹子 · PC8", 'G', 270, connected, onServoFinished)
@@ -445,6 +485,7 @@ private fun DistanceMovePanel(
     onParallel: (Int, Int, Int, Boolean) -> Unit,
     onStop: () -> Unit,
     onSectionSelected: () -> Unit = {},
+    onRequestImu: () -> Unit = {},
 ) {
     var direction by rememberSaveable { mutableStateOf('F') }
     var distance by rememberSaveable { mutableStateOf("100") }
@@ -457,7 +498,6 @@ private fun DistanceMovePanel(
     var ring by rememberSaveable { mutableStateOf(2) }
     var turnMm by rememberSaveable { mutableStateOf("5") }
     var turnDegrees by rememberSaveable { mutableStateOf("90") }
-    var turnCorrection by rememberSaveable { mutableStateOf("1.0") }
     var turnRpm by rememberSaveable { mutableStateOf("10") }
     var parallelStep by rememberSaveable { mutableStateOf("3") }
     var reverseTurn by rememberSaveable { mutableStateOf(false) }
@@ -483,6 +523,7 @@ private fun DistanceMovePanel(
         }
     }
     Spacer(Modifier.height(12.dp))
+    Text(status, modifier = Modifier.fillMaxWidth())
     if (section == 0) {
         Text("底盘定距移动", style = MaterialTheme.typography.titleMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -500,13 +541,14 @@ private fun DistanceMovePanel(
             }
         }
         DistanceInput("距离（mm，1–10000）", distance, !running) { distance = it }
+        Text("前进/后退：JY901S保持起步朝向，四轮编码器控制距离。需陀螺仪在线，且每圈脉冲与电机设置一致。")
         DistanceInput("电机速度（RPM，5–300）", speed, !running) { speed = it }
         Button(
             onClick = {
                 val correction = if (direction in "LR") lateralCorrection else forwardCorrection
                 val move = DistanceMove.fromInputs(direction, distance, speed, diameter, wheelPulses, correction)
                 if (move == null) {
-                    error = "请检查距离、速度及标定参数：轮径 20–500 mm，脉冲 1–1000000，修正系数 0.1–10。"
+                    error = "请检查距离、速度及标定参数：轮径 20–500 mm，每圈脉冲 200–51200，修正系数 0.1–10。"
                 } else {
                     error = null
                     onMove(move)
@@ -575,25 +617,23 @@ private fun DistanceMovePanel(
         }, enabled = connected && !running, modifier = Modifier.fillMaxWidth()) { Text("执行中心＋平行校准") }
     }
     if (section == 2) {
-        Text("底盘定角度旋转", style = MaterialTheme.typography.titleMedium)
+        Text("JY901S · PD闭环旋转", style = MaterialTheme.typography.titleMedium)
+        Text("X前、Y右、Z下；USART3固定9600，启动配置10Hz角度/角速度输出，需接通PB11与PB10双向串口。")
+        Button(onClick = onRequestImu, enabled = connected) { Text("读取JY901S角度") }
         DistanceInput("旋转角度（度，0.1–360）", turnDegrees, !running, true) { turnDegrees = it }
-        DistanceInput("前后轮中心间距（mm，50–2000）", wheelbase, !running, true) { wheelbase = it }
-        DistanceInput("左右轮中心间距（mm，50–2000）", track, !running, true) { track = it }
-        DistanceInput("旋转角度修正系数（0.1–10）", turnCorrection, !running, true) { turnCorrection = it }
         DistanceInput("定角度转速（RPM，5–60）", turnRpm, !running) { turnRpm = it }
-        Text("相对当前朝向旋转；角度精度受轮径、轮距和地面打滑影响。")
+        Text("相对当前朝向旋转；需要JY901S在线并静止，角度由传感器闭环判断。")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf('C' to "定角度左转", 'W' to "定角度右转").forEach { (dir, label) ->
                 Button(onClick = {
-                    val turn = DistanceMove.rotationFromInputs(dir, turnDegrees, turnRpm,
-                        diameter, wheelPulses, turnCorrection, wheelbase, track)
-                    if (turn == null) error = "请检查角度、转速、轮距及底盘标定；目标脉冲需在 1–1000000 内。"
+                    val turn = DistanceMove.gyroRotationFromInputs(dir, turnDegrees, turnRpm)
+                    if (turn == null) error = "请输入0.1–360度（一位小数）和5–60 RPM速度上限"
                     else { error = null; onMove(turn) }
                 }, enabled = connected && !running) { Text(label) }
             }
         }
         HorizontalDivider(Modifier.padding(vertical = 12.dp))
-        Text("左右转 / 圆心连线校准", style = MaterialTheme.typography.titleMedium)
+        Text("原始脉冲转向测试 / 圆心连线校准（不使用陀螺仪闭环）", style = MaterialTheme.typography.titleMedium)
         DistanceInput("转动车轮距离（mm）", turnMm, true) { turnMm = it }
         DistanceInput("转向速度（RPM，5–60）", turnRpm, true) { turnRpm = it }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -739,9 +779,7 @@ private fun SequenceSettingsPanel(
     var z1 by rememberSaveable { mutableStateOf(initial?.z1?.toString() ?: if (release) "-40" else "-50") }
     var r2 by rememberSaveable { mutableStateOf(initial?.let { (it.r2 / 10.0).toString() } ?: if (release) "130" else "20") }
     var z2 by rememberSaveable { mutableStateOf(initial?.z2?.toString() ?: if (release) "-110" else "-40") }
-    var radial by rememberSaveable { mutableStateOf(initial?.radialRpm?.toString() ?: "20") }
-    var up by rememberSaveable { mutableStateOf(initial?.upRpm?.toString() ?: "20") }
-    var down by rememberSaveable { mutableStateOf(initial?.downRpm?.toString() ?: "50") }
+    var combined by rememberSaveable { mutableStateOf(initial?.combinedRpm?.toString() ?: "20") }
     var gripper by rememberSaveable { mutableStateOf(initial?.gripperDps?.toString() ?: "60") }
     var openAngle by rememberSaveable { mutableStateOf(initial?.openAngle?.toString() ?: "60") }
     var closeAngle by rememberSaveable { mutableStateOf(initial?.closeAngle?.toString() ?: "0") }
@@ -761,9 +799,8 @@ private fun SequenceSettingsPanel(
         singleLine = true, modifier = Modifier.fillMaxWidth())
     VisibleTextField(value = z2, onValueChange = { z2 = it }, label = { Text("$second z（mm）") },
         singleLine = true, modifier = Modifier.fillMaxWidth())
-    DistanceInput("伸缩速度（RPM，5–300）", radial, true) { radial = it }
-    DistanceInput("上升速度（RPM，5–300）", up, true) { up = it }
-    DistanceInput("下降速度（RPM，5–300）", down, true) { down = it }
+    DistanceInput("r/z 合成速度（RPM，5–600）", combined, true) { combined = it }
+    Text("下降时先并行到目标上方10 mm，r到位后z以300 RPM完成末段；下降不足10 mm时全部留到末段。")
     DistanceInput("夹子张开速度（度/秒，6–300）", gripper, true) { gripper = it }
     DistanceInput("夹子张开角度（0–270 度）", openAngle, true) { openAngle = it }
     DistanceInput("夹子夹紧角度（0–270 度）", closeAngle, true) { closeAngle = it }
@@ -772,7 +809,7 @@ private fun SequenceSettingsPanel(
     VisibleTextField(value = cardName, onValueChange = { cardName = it; saved = false },
         label = { Text("卡片名称（最多40字）") }, modifier = Modifier.fillMaxWidth())
     Button(onClick = {
-        val settings = SequenceSettings.parse(r1, z1, r2, z2, radial, up, down, gripper, (initial?.theta ?: 0).toString(), openAngle, closeAngle, baseHome, baseTilt)
+        val settings = SequenceSettings.parse(r1, z1, r2, z2, combined, gripper, (initial?.theta ?: 0).toString(), openAngle, closeAngle, baseHome, baseTilt)
         if (settings == null) error = "请检查位置、速度和角度参数"
         else if (cardName.isBlank() || cardName.trim().length > 40) error = "请填写1–40字的卡片名称"
         else { error = null; onSave(cardName.trim(), settings); saved = true }
@@ -780,8 +817,8 @@ private fun SequenceSettingsPanel(
     if (saved) Text("已保存，可在卡片编排中选择")
     error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     if (!editing) Button(onClick = {
-        val settings = SequenceSettings.parse(r1, z1, r2, z2, radial, up, down, gripper, "0", openAngle, closeAngle, baseHome, baseTilt)
-        if (settings == null) error = "r：±1000 mm（最多1位小数）；z：±400 mm（整数）；速度：5–300 RPM；夹子：6–300 度/秒"
+        val settings = SequenceSettings.parse(r1, z1, r2, z2, combined, gripper, "0", openAngle, closeAngle, baseHome, baseTilt)
+        if (settings == null) error = "r：±1000 mm（最多1位小数）；z：±400 mm（整数）；合成速度：5–600 RPM；夹子：6–300 度/秒"
         else { error = null; onExecute(settings) }
     }, enabled = connected, modifier = Modifier.fillMaxWidth()) { Text("执行$title") }
     Spacer(Modifier.height(12.dp))
@@ -867,7 +904,7 @@ private fun SequenceCardView(card: SequenceCard, prefix: String = "", onClick: (
                 Text("转盘 ${t.start}° → ${t.end}°；速度 ${t.dps}°/秒")
             } else {
             Text("目标1 r=${p.r1 / 10.0} mm  z=${p.z1} mm；目标2 r=${p.r2 / 10.0} mm  z=${p.z2} mm")
-            Text("伸缩/上升/下降 ${p.radialRpm}/${p.upRpm}/${p.downRpm} RPM；夹子 ${p.gripperDps}°/s")
+            Text("r/z合成速度 ${p.combinedRpm} RPM；夹子 ${p.gripperDps}°/s")
             Text("夹子开/合 ${p.openAngle}/${p.closeAngle}°")
             Text(if (card.mode == 'P') "基座：转盘取物 ${p.baseTilt}° → 放置 ${p.baseHome}°"
                 else "基座：抓取 ${p.baseHome}° → 转盘存放 ${p.baseTilt}°")
@@ -923,115 +960,6 @@ private fun ArmPosePanel(
     Spacer(Modifier.height(16.dp))
 }
 
-@Composable
-private fun LiftDistancePanel(
-    connected: Boolean,
-    onMove: (Char, Int, Int, Int) -> Unit,
-    onStop: () -> Unit,
-) {
-    var distance by rememberSaveable { mutableStateOf("10") }
-    var rpm by rememberSaveable { mutableStateOf("5") }
-    var pulses by rememberSaveable { mutableStateOf("3200") }
-    var note by rememberSaveable { mutableStateOf("等待升降定距移动") }
-    Text("机械臂升降：定距移动", style = MaterialTheme.typography.titleMedium)
-    Text("实测标定：电机一圈 360° = 40 mm（4 cm），每毫米对应 9°。")
-    DistanceInput("移动距离（mm，1–400）", distance, connected) { distance = it }
-    DistanceInput("速度（RPM，5–300）", rpm, connected) { rpm = it }
-    DistanceInput("电机每圈脉冲（默认 3200，须匹配细分）", pulses, connected) { pulses = it }
-    fun move(direction: Char) {
-        val mm = distance.toIntOrNull()
-        val speed = rpm.toIntOrNull()
-        val perRev = pulses.toIntOrNull()
-        if (mm == null || mm !in 1..400 || speed == null || speed !in 5..300 ||
-            perRev == null || perRev !in 200..51200) {
-            note = "请输入有效距离、速度和每圈脉冲"
-            return
-        }
-        onMove(direction, mm, speed, perRev)
-        note = "已提交${if (direction == 'U') "上升" else "下降"} $mm mm（电机转角 ${mm * 9}°）"
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Button(onClick = { move('U') }, enabled = connected) { Text("上升") }
-        Button(onClick = { move('D') }, enabled = connected) { Text("下降") }
-    }
-    Button(onClick = { onStop(); note = "已请求停止升降" },
-        enabled = connected, modifier = Modifier.fillMaxWidth()) {
-        Text("停止升降")
-    }
-    if (note.startsWith("请输入") || note.startsWith("请检查")) Text(note, color = MaterialTheme.colorScheme.error)
-    Text("每次只发一次，无到位回包；停稳后再发送。请按剩余行程选择距离，每圈脉冲须匹配电机细分。")
-    Spacer(Modifier.height(16.dp))
-}
-
-@Composable
-private fun ArmDistancePanel(
-    connected: Boolean,
-    onMove: (Char, Int, Int, Int) -> Unit,
-    onStop: () -> Unit,
-) {
-    var distance by rememberSaveable { mutableStateOf("10") }
-    var rpm by rememberSaveable { mutableStateOf("10") }
-    var pulses by rememberSaveable { mutableStateOf("3200") }
-    var note by rememberSaveable { mutableStateOf("等待前后定距移动") }
-    Text("机械臂前后：定距移动", style = MaterialTheme.typography.titleMedium)
-    Text("实测标定：电机一圈 360° = 127 mm（12.7 cm）。")
-    DistanceInput("移动距离（mm，1–1000）", distance, connected) { distance = it }
-    DistanceInput("速度（RPM，5–300）", rpm, connected) { rpm = it }
-    DistanceInput("电机每圈脉冲（默认 1.8° / 16 细分：3200）", pulses, connected) { pulses = it }
-    fun move(direction: Char) {
-        val mm = distance.toIntOrNull()
-        val speed = rpm.toIntOrNull()
-        val perRev = pulses.toIntOrNull()
-        if (mm == null || mm !in 1..1000 || speed == null || speed !in 5..300 ||
-            perRev == null || perRev !in 200..51200) {
-            note = "请输入有效距离、速度和每圈脉冲"
-            return
-        }
-        onMove(direction, mm, speed, perRev)
-        note = "已提交${if (direction == 'E') "前伸" else "后收"} $mm mm"
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Button(onClick = { move('E') }, enabled = connected) { Text("前伸") }
-        Button(onClick = { move('C') }, enabled = connected) { Text("后收") }
-        Button(onClick = { onStop(); note = "已请求停止前后移动" }, enabled = connected) { Text("停止") }
-    }
-    if (note.startsWith("请输入") || note.startsWith("请检查")) Text(note, color = MaterialTheme.colorScheme.error)
-    Text("每次只发一次，无到位回包；机构停稳后再发送。每圈脉冲需匹配电机细分。")
-    Spacer(Modifier.height(16.dp))
-}
-
-@Composable
-private fun MotionButton(
-    label: String,
-    direction: Char,
-    enabled: Boolean,
-    onStartMotion: (Char) -> Unit,
-    onStopMotion: () -> Unit,
-) {
-    val touchModifier = if (enabled) {
-        Modifier.pointerInput(direction) {
-            detectTapGestures(onPress = {
-                onStartMotion(direction)
-                tryAwaitRelease()
-                onStopMotion()
-            })
-        }
-    } else Modifier
-
-    Box(
-        modifier = Modifier.size(96.dp).clip(RoundedCornerShape(18.dp))
-            .background(if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-            .then(touchModifier),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.displaySmall,
-            color = if (enabled) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
 @Preview(showBackground = true)
 @Composable
 private fun RemoteControlPreview() {
@@ -1049,11 +977,6 @@ private fun RemoteControlPreview() {
             onJointAlign = { _, _, _, _, _ -> },
             onParallel = { _, _, _, _ -> },
             onStopMotion = {},
-            onStartLift = {},
-            onStopLift = {},
-            onLiftDistance = { _, _, _, _ -> },
-            onStopForeAft = {},
-            onArmDistance = { _, _, _, _ -> },
             onArmPose = { _, _, _, _, _ -> },
             onHome = {},
             onInitializeOrigin = {},
@@ -1063,7 +986,6 @@ private fun RemoteControlPreview() {
             onCancelGrab = {},
             onGripper = { _, _, _ -> },
             onStopGripper = {},
-            onServoChange = { _, _ -> },
             onServoFinished = { _, _ -> },
         )
     }

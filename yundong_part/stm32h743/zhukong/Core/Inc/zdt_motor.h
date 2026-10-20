@@ -24,6 +24,23 @@ extern "C" {
 #define ZDT_MOTOR_WHEEL_COUNT       4U
 #define ZDT_MOTOR_MAX_SPEED_RPM      3000U
 
+/* Completed STOP/status transactions for read-only SWD inspection. Slot 0..3
+ * corresponds to motor ID 1..4. An even unchanged publish_sequence means the
+ * snapshot is stable. These records never transmit commands themselves. */
+#define ZDT_DIAGNOSTIC_RX_BYTES 32U
+typedef struct {
+    uint32_t attempts,started_tick,finished_tick;
+    uint32_t tx_result,rx_result,result,uart_error;
+    uint16_t tx_length,rx_length;
+    uint8_t tx[8],rx[ZDT_DIAGNOSTIC_RX_BYTES];
+    uint8_t matched,status_flags,reserved[2];
+} ZDT_RawTransaction;
+typedef struct {
+    uint32_t publish_sequence;
+    ZDT_RawTransaction stop,status;
+} ZDT_MotorDiagnostics;
+extern volatile ZDT_MotorDiagnostics g_zdt_diagnostics[ZDT_MOTOR_WHEEL_COUNT];
+
 /* 机械安装方向由实际接线决定；CW/CCW 仅表示电机协议中的方向位。 */
 typedef enum
 {
@@ -74,9 +91,14 @@ HAL_StatusTypeDef ZDT_Motor_MoveWheelPulses(
 HAL_StatusTypeDef ZDT_Motor_MoveWheelProfile(
     const int32_t wheel_pulses[ZDT_MOTOR_WHEEL_COUNT],
     const uint16_t speed_rpm[ZDT_MOTOR_WHEEL_COUNT], uint8_t acceleration);
+/** AA + four Emm F6 velocity commands, simultaneous update; zero RPM allowed. */
+HAL_StatusTypeDef ZDT_Motor_SetWheelSpeeds(const int16_t rpm[4], uint8_t acceleration);
 
 /** 读取 3A 状态：bit0 使能，bit1 到位，bit2 堵转，bit3 堵转保护。 */
 HAL_StatusTypeDef ZDT_Motor_ReadStatus(uint8_t id, uint8_t *flags);
+/** Emm 36 actual encoder position, 65536 counts/revolution, normalized to
+ * the same signed wheel convention as SetWheelSpeeds (not microstep pulses). */
+HAL_StatusTypeDef ZDT_Motor_ReadWheelPosition(uint8_t id, int64_t *counts);
 
 /** @brief 以电机内部减速度停止。 */
 HAL_StatusTypeDef ZDT_Motor_Stop(uint8_t id, bool sync);

@@ -26,6 +26,8 @@
 #include "lift_motor.h"
 #include "servo_control.h"
 #include "camera_link.h"
+#include "imu_link.h"
+#include "gyro_turn.h"
 
 /* USER CODE END Includes */
 
@@ -50,6 +52,7 @@ TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart4;
+UART_HandleTypeDef huart5;
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
@@ -68,6 +71,7 @@ static void MX_USART2_UART_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_UART4_Init(void);
+static void MX_UART5_Init(void);
 /* USER CODE BEGIN PFP */
 
 
@@ -117,16 +121,20 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM3_Init();
   MX_UART4_Init();
+  MX_UART5_Init();
   /* USER CODE BEGIN 2 */
-  /* 四路串口：USART1 底盘，USART2 机械臂，USART3 接收 ESP32 命令，
+  /* 五路串口：USART1 底盘，USART2 机械臂，UART5 接收 ESP32 命令，USART3 接 JY901S，
    * UART4 PA1 接收摄像头坐标。MX 初始化失败会进入 Error_Handler。 */
   wheel_uart_ready = true;
   lift_uart_ready = true;
   ZDT_Motor_Init(wheel_uart_ready ? &huart1 : NULL, true, 20U);
   LiftMotor_Init(lift_uart_ready ? &huart2 : NULL);
   ServoControl_Init();
-  RobotControl_Init(&huart3, wheel_uart_ready);
+  RobotControl_Init(&huart5, wheel_uart_ready);
   CameraLink_Init(&huart4);
+  ImuLink_Init(&huart3);
+  GyroTurn_SafeBoot();
+  ImuLink_StartConfiguration();
 
 
 
@@ -140,7 +148,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     /* 裸机轮询：先解析中断缓存的命令，再处理到位查询、超时和停车重试。
-     * 电机应答等待期间 USART3 中断仍能接收，具体命令在主循环继续执行。 */
+     * 电机应答等待期间 UART5 中断仍能接收，具体命令在主循环继续执行。 */
     RobotControl_Process();
     RobotControl_Tick();
   }
@@ -333,6 +341,33 @@ static void MX_TIM3_Init(void)
   * @param None
   * @retval None
   */
+HAL_StatusTypeDef ImuLink_SetBaud(UART_HandleTypeDef *uart,uint32_t baud)
+{
+  if(uart!=&huart3) return HAL_ERROR;
+  if(HAL_UART_AbortReceive(uart)!=HAL_OK) return HAL_ERROR;
+  uart->Init.BaudRate=baud;
+  if(HAL_UART_Init(uart)!=HAL_OK||HAL_UARTEx_DisableFifoMode(uart)!=HAL_OK) return HAL_ERROR;
+  __HAL_UART_CLEAR_OREFLAG(uart); __HAL_UART_CLEAR_NEFLAG(uart); __HAL_UART_CLEAR_FEFLAG(uart);
+  __HAL_UART_SEND_REQ(uart,UART_RXDATA_FLUSH_REQUEST);
+  return HAL_OK;
+}
+
+static void MX_UART5_Init(void)
+{
+  huart5.Instance = UART5;
+  huart5.Init.BaudRate = 115200;
+  huart5.Init.WordLength = UART_WORDLENGTH_8B;
+  huart5.Init.StopBits = UART_STOPBITS_1;
+  huart5.Init.Parity = UART_PARITY_NONE;
+  huart5.Init.Mode = UART_MODE_TX_RX;
+  huart5.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart5.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart5.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart5.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart5.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart5) != HAL_OK || HAL_UARTEx_DisableFifoMode(&huart5) != HAL_OK) Error_Handler();
+}
+
 static void MX_UART4_Init(void)
 {
 
@@ -488,7 +523,7 @@ static void MX_USART3_UART_Init(void)
 
   /* USER CODE END USART3_Init 1 */
   huart3.Instance = USART3;
-  huart3.Init.BaudRate = 115200;
+  huart3.Init.BaudRate = IMU_UART_BAUD_RATE;
   huart3.Init.WordLength = UART_WORDLENGTH_8B;
   huart3.Init.StopBits = UART_STOPBITS_1;
   huart3.Init.Parity = UART_PARITY_NONE;

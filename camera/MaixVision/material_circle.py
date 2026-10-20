@@ -258,7 +258,7 @@ def coarse_boxes(hsv, sx, sy, color):
     return proposals
 
 
-def detect_materials(img, draw=True):
+def detect_materials(img, draw=True, select_three=True):
     """缩小图查找连通区域，再在原图局部拟合底座；返回全图坐标。"""
     height,width=img.shape[:2]
     x0,y0,x1,y1=[int(v*s) for v,s in zip(ROI,(width,height,width,height))]
@@ -282,7 +282,7 @@ def detect_materials(img, draw=True):
             continue
         unique.append(item)
     unique.sort(key=lambda t:t["center"][0])
-    if len(unique)>=3:
+    if select_three and len(unique)>=3:
         unique=select_three_materials(unique)
     if draw:
         draw_materials(img,unique)

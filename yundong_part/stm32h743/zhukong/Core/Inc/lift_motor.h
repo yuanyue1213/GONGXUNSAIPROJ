@@ -22,7 +22,8 @@ const char *LiftMotor_LastError(uint8_t id);
 bool LiftMotor_ReadStatus(uint8_t id, uint8_t *status);
 /* Signed real motor position in 0.1 degrees, converted for Emm/X firmware. */
 bool ArmMotor_ReadPosition(uint8_t id, int64_t *angle_tenths);
-/* FD mode 01: signed absolute target in the driver's coordinate system. */
+/* FD mode 01: signed absolute target in the driver's coordinate system.
+ * Internal vector commands accept 1..600 RPM; manual protocols retain 5..300. */
 HAL_StatusTypeDef ArmMotor_MoveAbsolute(uint8_t id, int64_t angle_tenths,
                                        uint16_t rpm, uint32_t pulses_per_rev);
 
