@@ -1,6 +1,7 @@
 #ifndef BRIDGE_LINK_PROTOCOL_H
 #define BRIDGE_LINK_PROTOCOL_H
 #include "gyro_turn_protocol.h"
+#include "route_move_protocol.h"
 
 typedef enum { BRIDGE_NONE, BRIDGE_PING, BRIDGE_QUERY, BRIDGE_IMU } BridgeQuery;
 static inline BridgeQuery BridgeLink_Query(const char *line,uint32_t *id)
@@ -26,7 +27,13 @@ static inline bool BridgeLink_ManualExec(const char *line)
     if(GyroProtocol_ParseExec(line,&gyro)) return true;
     if(strncmp(line,"EXEC,",5U)!=0) return false;
     const char *p=line+5; uint32_t id;
-    if(!RobotProtocol_U32(&p,&id,',')||!id||strncmp(p,"MOVE,",5U)!=0) return false;
+    if(!RobotProtocol_U32(&p,&id,',')||!id) return false;
+    if(strncmp(p,"ROUTE_MOVE,",11U)==0) {
+        char frame[96]; RouteMove c;
+        int n=snprintf(frame,sizeof(frame),"ROUTE_MOVE,%lu,%s",(unsigned long)id,p+11U);
+        return n>0&&(size_t)n<sizeof(frame)&&RouteMove_Parse(frame,&c);
+    }
+    if(strncmp(p,"MOVE,",5U)!=0) return false;
     char move[96]; RobotDistanceCommand c;
     int n=snprintf(move,sizeof(move),"MOVE,%lu,%s",(unsigned long)id,p+5);
     return n>0&&(size_t)n<sizeof(move)&&RobotProtocol_ParseMove(move,&c)&&RobotProtocol_MovePulses(&c)>0;

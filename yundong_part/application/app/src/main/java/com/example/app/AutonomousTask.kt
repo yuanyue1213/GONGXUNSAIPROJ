@@ -2,22 +2,14 @@ package com.example.app
 
 internal const val DEFAULT_TURN_CORRECTION = 0.96
 
-internal data class AutonomousRoutePoint(val x: Int, val y: Int) {
-    fun valid(): Boolean {
-        if (x !in 150..2250 || y !in 150..2250) return false
-        return !(((x > 400 && x < 1150) || (x > 1250 && x < 2000)) &&
-            ((y > 400 && y < 1150) || (y > 1250 && y < 2000)))
-    }
-}
 internal object AutonomousRoute {
-    val names = listOf("起步前进", "右上途经点NE", "扫码工位Q", "返回NE", "第一批原料区R",
-        "前往粗加工：中心C", "第一批粗加工P", "前往暂存：中心C", "第一批暂存T", "左上途经点NW",
-        "第二批原料区R", "前往粗加工：中心C", "第二批粗加工P", "前往码垛：中心C", "第二批暂存码垛T",
-        "驶向终点：中心C", "右侧通道Q", "右下途经点SE", "终点接近点", "终点S2")
-    val defaults = listOf(2250 to 2200, 2200 to 2200, 2200 to 1200, 2200 to 2200, 1200 to 2200,
-        1200 to 1200, 1200 to 300, 1200 to 1200, 300 to 1200, 300 to 2200,
-        1200 to 2200, 1200 to 1200, 1200 to 300, 1200 to 1200, 300 to 1200,
-        1200 to 1200, 2200 to 1200, 2200 to 300, 2250 to 300, 2250 to 150).map { AutonomousRoutePoint(it.first, it.second) }
+    const val version = "BODY_V1"
+    val names = listOf("左移100mm", "后退1000mm · 识别二维码", "前进900mm", "左转90°",
+        "前进1000mm · 第一批圆盘抓取", "左转90°", "前进1900mm", "左转90° · 第一批放置后抓回",
+        "后退900mm", "右转90°", "后退900mm · 第一批放下", "后退900mm", "右转90°",
+        "后退900mm · 第二批圆盘抓取", "左转90°", "前进1900mm", "左转90° · 第二批放置后抓回",
+        "后退900mm", "右转90°", "后退900mm · 堆叠", "左转90°", "前进1900mm", "右转90°",
+        "前进1000mm", "左移100mm · 结束")
 }
 internal data class AutonomousArmParameters(val role: Char, val slot: Int, val settings: SequenceSettings) {
     fun valid() = role in "RGPTK" && slot in 1..3 && settings.valid()
@@ -36,24 +28,23 @@ internal data class AutonomousSettings(
     val targetX: Float, val targetY: Float, val processMap: String, val storageMap: String,
     val slots: List<Int>,
     val visionEnabled: Boolean = false, val armEnabled: Boolean = false, val manualCode: String = "",
-    val route: List<AutonomousRoutePoint> = AutonomousRoute.defaults,
     val wheelbaseMm: Double = 190.0, val trackMm: Double = 251.4,
-    val turnCorrection: Double = DEFAULT_TURN_CORRECTION, val turnRpm: Int = 20,
+    val turnCorrection: Double = DEFAULT_TURN_CORRECTION, val turnRpm: Int = 40,
     val wheelPulses: Int = 3200,
 ) {
     fun turnPulses(): Int? {
         if (!wheelbaseMm.isFinite() || wheelbaseMm !in 50.0..2000.0 ||
             !trackMm.isFinite() || trackMm !in 50.0..2000.0 ||
-            !turnCorrection.isFinite() || turnCorrection !in 0.1..10.0 || turnRpm !in 5..60) return null
+            !turnCorrection.isFinite() || turnCorrection !in 0.1..10.0 || turnRpm !in 5..120) return null
         val pulses = Math.round(Math.PI * (wheelbaseMm + trackMm) / 4.0 * forwardPpm / 1000.0 * turnCorrection)
         return pulses.takeIf { it in 1L..500000L }?.toInt()
     }
-    fun valid() = wheelPulses in 200..51200 && forwardPpm in 1..1000000 && lateralPpm in 1..1000000 && rpm in 5..300 && (!visionEnabled || (fineRpm in 5..300 &&
+    fun valid() = wheelPulses in 200..51200 && forwardPpm in 1..1000000 && lateralPpm in 1..1000000 && rpm in 5..1200 && (!visionEnabled || (fineRpm in 5..300 &&
         targetX.isFinite() && targetY.isFinite() && targetX >= 0 && targetX <= 511.9f && targetY >= 0 && targetY <= 319.9f &&
         processMap.toList().sorted() == "123".toList() && storageMap.toList().sorted() == "123".toList())) &&
         (!armEnabled || (slots.size == 3 && slots.all { it in 0..270 } && slots.distinct().size == 3)) &&
         (visionEnabled || !armEnabled || validAutonomousCode(manualCode)) &&
-        route.size == 20 && route.all { it.valid() } && route.last() == AutonomousRoute.defaults.last() && turnPulses() != null
+        turnPulses() != null
     fun frames(config: Long, run: Long, parameters: List<AutonomousArmParameters>): List<String> {
         val required = "RGPTK".flatMap { role -> (1..3).map { role to it } }.toSet()
         if (!valid() || config !in 1..0xFFFFFFFFL || run !in 1..0xFFFFFFFFL ||
@@ -68,8 +59,8 @@ internal data class AutonomousSettings(
         val code = if (!visionEnabled && armEnabled) manualCode else "-"
         return listOf("AUTO_CFG,$config,$forwardPpm,$lateralPpm,$rpm,$fine,$x,$y,$mp,$mt,${angles.joinToString(",")}\n",
             "AUTO_OPTIONS,$config,${if (visionEnabled) 1 else 0},${if (armEnabled) 1 else 0},$code\n",
-            "AUTO_DRIVE,$config,${turnPulses()},$turnRpm,$wheelPulses\n") +
-            route.mapIndexed { index, point -> "AUTO_ROUTE,$config,$index,${point.x},${point.y}\n" } +
+            "AUTO_DRIVE,$config,${turnPulses()},$turnRpm,$wheelPulses\n",
+            "AUTO_PATH,$config,${AutonomousRoute.version}\n") +
             (if (armEnabled) parameters.map { it.frame(config) } else emptyList()) + "AUTO_START,$run,$config\n"
     }
 }
@@ -87,13 +78,13 @@ internal object AutonomousStatus {
             "SCANNING" -> "正在读取二维码"
             "WORK" -> "正在取放物料"
             "CALIBRATING" -> "正在视觉校准"
-            "DONE" -> "任务完成，已到S2"
+            "DONE" -> "任务完成，已执行车身路线"
             "STOPPED" -> "自动任务已停止"
             "BUSY" -> "自动任务正在执行"
             "CONFIGURED" -> "已接收路线参数"
             "PROFILE", "PARAMETERS" -> "已接收机械臂参数"
             "OPTIONS" -> "已接收执行模式"
-            "ROUTE" -> "已接收路线坐标"
+            "ROUTE" -> "已接收车身动作路线"
             else -> "任务配置失败"
         }
         val reason = when (fields[7]) {
@@ -101,7 +92,7 @@ internal object AutonomousStatus {
             "STM_NOT_IDLE" -> "执行器忙碌，请先停止并等待空闲"
             "NOT_CONFIGURED_OR_DUPLICATE" -> "配置不完整或重复启动"
             "TASK_CODE_REQUIRED", "TASK_CODE" -> "请填写有效的四组任务码"
-            "ROUTE" -> "路线坐标无效或超出车道"
+            "ROUTE" -> "路线版本无效，请同步更新App与ESP32"
             "OPTIONS" -> "执行模式配置无效"
             "DRIVE" -> "行驶细分脉冲或转向参数无效"
             "VISION_TIMEOUT" -> "等待视觉识别超时"
@@ -117,13 +108,14 @@ internal object AutonomousStatus {
             "IMU_DIRECTION" -> "航向变化与指令不一致，请检查传感器安装与轮子方向"
             "TURN_TIMEOUT" -> "陀螺仪转向超时"
             "DRIVE_TIMEOUT" -> "直行距离控制超时"
+            "ROUTE_TIMEOUT" -> "位置运动超时，四轮未全部到位"
             "DRIVE_NO_PROGRESS" -> "直行未检测到编码器距离进展"
             "ODOM_READ" -> "读取底盘电机编码器失败，已停车"
             "ODOM_DIRECTION" -> "编码器方向与前后指令不一致"
             "MOTOR_FAULT", "MOTOR_COMMAND", "MOTOR_ENABLE", "MOTOR_STOP" -> "底盘电机故障或通信失败"
             "DISCONNECTED" -> "连接已断开"
             "USER", "USER_STOP" -> "手动停止"
-            "0", "S1_HEAD_DOWN", "CARD_DONE", "S2" -> ""
+            "0", "S1_HEAD_DOWN", "TAIL_TO_OTHER_START", "CARD_DONE", "S2" -> ""
             else -> fields[7]
         }
         return "$state · 抓取动作${fields[5]} / 放置动作${fields[6]}${if (reason.isEmpty()) "" else " · $reason"}"

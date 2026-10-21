@@ -45,7 +45,7 @@ static inline bool GyroProtocol_Parse(const char *frame,GyroCommand *c)
         p+=2;
     }
     return GyroProtocol_Angle(&p,&c->degrees,',')&&RobotProtocol_U32(&p,&c->rpm,0)&&
-        c->rpm>=5U&&c->rpm<=60U&&(c->kind==GYRO_RELATIVE?c->degrees>=0.1f:c->degrees<360.0f);
+        c->rpm>=5U&&c->rpm<=120U&&(c->kind==GYRO_RELATIVE?c->degrees>=0.1f:c->degrees<360.0f);
 }
 static inline bool GyroProtocol_ParseExec(const char *frame,GyroCommand *c)
 {

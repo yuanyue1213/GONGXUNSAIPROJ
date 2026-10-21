@@ -6,15 +6,24 @@
  */
 
 #include "zdt_motor.h"
+#include "zdt_motor_transport.h"
 #include <string.h>
 
 #define ZDT_ACK_LENGTH              4U
 #define ZDT_TX_TIMEOUT_MS           20U
 #define ZDT_MAX_ACK_SCAN_BYTES      16U
+#define ZDT_POSITION_SCAN_BYTES     128U
 static UART_HandleTypeDef *s_motor_uart;
 static bool s_wait_for_ack;
 static uint32_t s_response_timeout_ms;
 volatile ZDT_MotorDiagnostics g_zdt_diagnostics[ZDT_MOTOR_WHEEL_COUNT];
+/* The hardware build links zdt_motor_uart.c to override these test fallbacks. */
+__attribute__((weak)) void ZDT_Transport_Start(UART_HandleTypeDef *uart) { (void)uart; }
+__attribute__((weak)) void ZDT_Transport_PrepareTx(void) {}
+__attribute__((weak)) HAL_StatusTypeDef ZDT_Transport_Receive(UART_HandleTypeDef *uart,uint8_t *byte,uint32_t timeout)
+{ return HAL_UART_Receive(uart,byte,1U,timeout); }
+__attribute__((weak)) uint32_t ZDT_Transport_Error(UART_HandleTypeDef *uart)
+{ return uart?uart->ErrorCode:0U; }
 static void diagnostic_begin(ZDT_RawTransaction *record,const uint8_t *tx,uint16_t length,uint32_t attempts)
 {
     memset(record,0,sizeof(*record)); record->attempts=attempts+1U;
@@ -26,13 +35,16 @@ static void diagnostic_byte(ZDT_RawTransaction *record,uint8_t byte)
 {
     if(record&&record->rx_length<ZDT_DIAGNOSTIC_RX_BYTES) record->rx[record->rx_length++]=byte;
 }
-static void diagnostic_publish(uint8_t id,bool stop,ZDT_RawTransaction *record,HAL_StatusTypeDef result)
+/* kind: 0=status, 1=stop, 2=actual position. */
+static void diagnostic_publish(uint8_t id,unsigned kind,ZDT_RawTransaction *record,HAL_StatusTypeDef result)
 {
     record->result=result; record->finished_tick=HAL_GetTick();
-    record->uart_error=s_motor_uart?s_motor_uart->ErrorCode:0U;
+    record->uart_error=ZDT_Transport_Error(s_motor_uart);
     volatile ZDT_MotorDiagnostics *slot=&g_zdt_diagnostics[id-1U];
     ++slot->publish_sequence;
-    if(stop) slot->stop=*record; else slot->status=*record;
+    if(kind==2U) slot->position=*record;
+    else if(kind==1U) slot->stop=*record;
+    else slot->status=*record;
     ++slot->publish_sequence;
 }
 
@@ -43,7 +55,7 @@ typedef struct
 } ZDT_WheelConfig;
 
 /* 软件正号的安装映射：左侧 CCW、右侧 CW。
- * 车体前进 F 在上层实际使用负脉冲；此表不能直接当作 F 的方向表。 */
+ * 按实车反向反馈标定后，车体前进 F 在上层使用正脉冲。 */
 static const ZDT_WheelConfig s_wheel_config[ZDT_MOTOR_WHEEL_COUNT] =
 {
     [ZDT_WHEEL_INDEX_LEFT_UP] = {ZDT_WHEEL_LEFT_UP, ZDT_DIRECTION_CCW},
@@ -59,12 +71,21 @@ static HAL_StatusTypeDef read_wheel_position(uint8_t id, int64_t *counts)
 {
     if(id<1U||id>4U||counts==NULL) return HAL_ERROR;
     const uint8_t request[]={id,0x36U,ZDT_MOTOR_FRAME_TAIL};
-    if(ZDT_Motor_SendRaw(request,sizeof(request))!=HAL_OK) return HAL_ERROR;
+    ZDT_RawTransaction record;
+    diagnostic_begin(&record,request,sizeof(request),g_zdt_diagnostics[id-1U].position.attempts);
+    record.tx_result=ZDT_Motor_SendRaw(request,sizeof(request));
+    if(record.tx_result!=HAL_OK) {
+        diagnostic_publish(id,2U,&record,(HAL_StatusTypeDef)record.tx_result);
+        return (HAL_StatusTypeDef)record.tx_result;
+    }
+    HAL_StatusTypeDef result=HAL_TIMEOUT;
     uint8_t response[8]; unsigned length=0,scanned=0; uint32_t start=HAL_GetTick();
-    while((uint32_t)(HAL_GetTick()-start)<s_response_timeout_ms&&scanned++<32U) {
+    while((uint32_t)(HAL_GetTick()-start)<s_response_timeout_ms&&scanned++<ZDT_POSITION_SCAN_BYTES) {
         uint32_t elapsed=HAL_GetTick()-start;
-        if(elapsed>=s_response_timeout_ms||HAL_UART_Receive(s_motor_uart,&response[length],1U,
-            s_response_timeout_ms-elapsed)!=HAL_OK) break;
+        if(elapsed>=s_response_timeout_ms) break;
+        record.rx_result=ZDT_Transport_Receive(s_motor_uart,&response[length],s_response_timeout_ms-elapsed);
+        if(record.rx_result!=HAL_OK) { result=(HAL_StatusTypeDef)record.rx_result; break; }
+        diagnostic_byte(&record,response[length]);
         if(++length<8U) continue;
         if(response[0]==id&&response[1]==0x36U&&response[2]<=1U&&response[7]==ZDT_MOTOR_FRAME_TAIL) {
             uint32_t raw=((uint32_t)response[3]<<24)|((uint32_t)response[4]<<16)|
@@ -72,17 +93,26 @@ static HAL_StatusTypeDef read_wheel_position(uint8_t id, int64_t *counts)
             int64_t signed_counts=response[2]?-(int64_t)raw:(int64_t)raw;
             /* Protocol positive is CW; normalized positive is CCW on left wheels. */
             *counts=s_wheel_config[id-1U].forward_direction==ZDT_DIRECTION_CW?signed_counts:-signed_counts;
+            record.matched=1U;
+            diagnostic_publish(id,2U,&record,HAL_OK);
             return HAL_OK;
         }
         for(unsigned i=0;i<7U;++i) response[i]=response[i+1U];
         length=7U;
     }
-    return HAL_TIMEOUT;
+    diagnostic_publish(id,2U,&record,result);
+    return result;
 }
 
 HAL_StatusTypeDef ZDT_Motor_ReadWheelPosition(uint8_t id, int64_t *counts)
 {
     HAL_StatusTypeDef result=read_wheel_position(id,counts);
+    /* Only this read-only query is retried, at most once on RX failure.
+     * Each attempt keeps its configured deadline. No stale value is used and
+     * no motion/relative-position command is replayed. TX failures return now. */
+    if(result!=HAL_OK&&id>=1U&&id<=4U&&counts!=NULL&&
+       g_zdt_diagnostics[id-1U].position.tx_result==HAL_OK)
+        result=read_wheel_position(id,counts);
     if(result!=HAL_OK) ZDT_Motor_Fault(id,"POSITION_READ");
     return result;
 }
@@ -99,6 +129,7 @@ void ZDT_Motor_Init(UART_HandleTypeDef *huart, bool wait_for_ack,
     s_response_timeout_ms = response_timeout_ms;
     for(unsigned i=0;i<ZDT_MOTOR_WHEEL_COUNT;++i)
         g_zdt_diagnostics[i]=(ZDT_MotorDiagnostics){0};
+    ZDT_Transport_Start(huart);
 }
 
 HAL_StatusTypeDef ZDT_Motor_SendRaw(const uint8_t *frame, uint16_t length)
@@ -108,6 +139,7 @@ HAL_StatusTypeDef ZDT_Motor_SendRaw(const uint8_t *frame, uint16_t length)
         return HAL_ERROR;
     }
 
+    ZDT_Transport_PrepareTx();
     return HAL_UART_Transmit(s_motor_uart, (uint8_t *)frame, length,
                              ZDT_TX_TIMEOUT_MS);
 }
@@ -145,6 +177,25 @@ HAL_StatusTypeDef ZDT_Motor_MoveWheelPulses(
 {
     const uint16_t speeds[ZDT_MOTOR_WHEEL_COUNT] = {speed_rpm,speed_rpm,speed_rpm,speed_rpm};
     return ZDT_Motor_MoveWheelProfile(wheel_pulses, speeds, acceleration);
+}
+HAL_StatusTypeDef ZDT_Motor_MoveWheelSynchronous(const int32_t pulses[4],
+    uint16_t rpm,uint8_t acceleration)
+{
+    if(!pulses||!rpm||rpm>ZDT_MOTOR_MAX_SPEED_RPM) return HAL_ERROR;
+    for(unsigned i=0;i<4U;++i) {
+        int64_t value=pulses[i];
+        uint32_t magnitude=(uint32_t)(value<0?-value:value);
+        ZDT_Direction forward=s_wheel_config[i].forward_direction;
+        uint8_t dir=value>=0?(uint8_t)forward:(uint8_t)(forward==ZDT_DIRECTION_CW?ZDT_DIRECTION_CCW:ZDT_DIRECTION_CW);
+        uint8_t frame[]={s_wheel_config[i].id,0xFD,dir,(uint8_t)(rpm>>8),(uint8_t)rpm,acceleration,
+            (uint8_t)(magnitude>>24),(uint8_t)(magnitude>>16),(uint8_t)(magnitude>>8),(uint8_t)magnitude,
+            0x02,0x01,ZDT_MOTOR_FRAME_TAIL}; /* relative to actual position, wait for sync */
+        if(ZDT_Motor_SendControl(frame,sizeof(frame),frame[0],0xFD)!=HAL_OK) return HAL_ERROR;
+    }
+    const uint8_t trigger[]={0,0xFF,0x66,ZDT_MOTOR_FRAME_TAIL};
+    HAL_StatusTypeDef result=ZDT_Motor_SendRaw(trigger,sizeof(trigger));
+    if(result!=HAL_OK) ZDT_Motor_Fault(0U,"COMMAND");
+    return result;
 }
 HAL_StatusTypeDef ZDT_Motor_MoveWheelProfile(
     const int32_t wheel_pulses[ZDT_MOTOR_WHEEL_COUNT],
@@ -214,6 +265,27 @@ HAL_StatusTypeDef ZDT_Motor_SetWheelSpeeds(const int16_t rpm[4], uint8_t acceler
     return status;
 }
 
+HAL_StatusTypeDef ZDT_Motor_SetWheelSpeedsSynchronous(const int16_t rpm[4],uint8_t acceleration)
+{
+    if(!rpm) return HAL_ERROR;
+    for(unsigned i=0;i<4U;++i) {
+        int32_t value=rpm[i];
+        if((uint32_t)(value<0?-value:value)>ZDT_MOTOR_MAX_SPEED_RPM) return HAL_ERROR;
+    }
+    for(unsigned i=0;i<4U;++i) {
+        int32_t value=rpm[i]; uint16_t magnitude=(uint16_t)(value<0?-value:value);
+        ZDT_Direction forward=s_wheel_config[i].forward_direction;
+        uint8_t dir=value>=0?(uint8_t)forward:(uint8_t)(forward==ZDT_DIRECTION_CW?ZDT_DIRECTION_CCW:ZDT_DIRECTION_CW);
+        uint8_t frame[]={s_wheel_config[i].id,0xF6,dir,(uint8_t)(magnitude>>8),(uint8_t)magnitude,
+            acceleration,0x01,ZDT_MOTOR_FRAME_TAIL};
+        if(ZDT_Motor_SendControl(frame,sizeof(frame),frame[0],0xF6)!=HAL_OK) return HAL_ERROR;
+    }
+    const uint8_t trigger[]={0,0xFF,0x66,ZDT_MOTOR_FRAME_TAIL};
+    HAL_StatusTypeDef result=ZDT_Motor_SendRaw(trigger,sizeof(trigger));
+    if(result!=HAL_OK) ZDT_Motor_Fault(0U,"SPEED_COMMAND");
+    return result;
+}
+
 /* 发送 ID 3A 6B，匹配 ID 3A flags 6B；滑动窗口跳过不匹配字节。
  * flags 位含义由 robot_control.c 判断；总接收时间受配置的超时限制。 */
 static HAL_StatusTypeDef read_status(uint8_t id, uint8_t *flags)
@@ -227,13 +299,14 @@ static HAL_StatusTypeDef read_status(uint8_t id, uint8_t *flags)
     diagnostic_begin(&record,request,sizeof(request),g_zdt_diagnostics[id-1U].status.attempts);
     record.tx_result=ZDT_Motor_SendRaw(request,sizeof(request));
     if(record.tx_result!=HAL_OK) { diagnostic_publish(id,false,&record,HAL_ERROR); return HAL_ERROR; }
+    HAL_StatusTypeDef result=HAL_TIMEOUT;
     start = HAL_GetTick();
     while ((uint32_t)(HAL_GetTick() - start) < s_response_timeout_ms)
     {
         uint32_t elapsed = HAL_GetTick() - start;
         if (elapsed >= s_response_timeout_ms) break;
-        record.rx_result=HAL_UART_Receive(s_motor_uart,&response[length],1U,s_response_timeout_ms-elapsed);
-        if(record.rx_result!=HAL_OK) break;
+        record.rx_result=ZDT_Transport_Receive(s_motor_uart,&response[length],s_response_timeout_ms-elapsed);
+        if(record.rx_result!=HAL_OK) { result=(HAL_StatusTypeDef)record.rx_result; break; }
         diagnostic_byte(&record,response[length]);
         if (++length < 4U) continue;
         if ((response[0] == id) && (response[1] == 0x3AU) &&
@@ -249,13 +322,18 @@ static HAL_StatusTypeDef read_status(uint8_t id, uint8_t *flags)
         response[2] = response[3];
         length = 3U;
     }
-    diagnostic_publish(id,false,&record,HAL_TIMEOUT);
-    return HAL_TIMEOUT;
+    diagnostic_publish(id,false,&record,result);
+    return result;
 }
 
 HAL_StatusTypeDef ZDT_Motor_ReadStatus(uint8_t id, uint8_t *flags)
 {
     HAL_StatusTypeDef result=read_status(id,flags);
+    /* Retry only a failed read transaction, not a valid protection/disabled
+     * status. A second failure still reaches the original stop path. */
+    if(result!=HAL_OK&&id>=1U&&id<=4U&&flags!=NULL&&
+       g_zdt_diagnostics[id-1U].status.tx_result==HAL_OK)
+        result=read_status(id,flags);
     if(result!=HAL_OK) ZDT_Motor_Fault(id,"STATUS_READ");
     return result;
 }
@@ -306,7 +384,7 @@ static HAL_StatusTypeDef ZDT_Motor_WaitAck(uint8_t id, uint8_t function,ZDT_RawT
         if (elapsed >= s_response_timeout_ms) break;
         uint32_t remaining = s_response_timeout_ms - elapsed;
 
-        HAL_StatusTypeDef rx=HAL_UART_Receive(s_motor_uart,&byte,1U,remaining);
+        HAL_StatusTypeDef rx=ZDT_Transport_Receive(s_motor_uart,&byte,remaining);
         if(record) record->rx_result=rx;
         if (rx != HAL_OK)
         {

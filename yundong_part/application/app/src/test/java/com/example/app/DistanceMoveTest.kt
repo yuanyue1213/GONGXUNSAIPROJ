@@ -27,7 +27,8 @@ class DistanceMoveTest {
         for (base in listOf("49", "2001", "NaN", "Infinity")) assertNull(rotation(base = base))
         for (track in listOf("49", "2001", "NaN", "Infinity")) assertNull(rotation(track = track))
         assertNull(rotation('F'))
-        assertNull(rotation(rpm = "61"))
+        assertNotNull(rotation(rpm = "120"))
+        assertNull(rotation(rpm = "121"))
         assertNull(rotation(factor = "0"))
         assertNull(DistanceMove.rotationFromInputs('C', "360", "10", "20", "62831", "0.1", "2000", "2000"))
     }
@@ -39,21 +40,28 @@ class DistanceMoveTest {
         assertNull(DistanceMove.gyroRotationFromInputs('W',"90.01","20"))
         assertNull(DistanceMove.gyroRotationFromInputs('F',"90","20"))
         assertNull(DistanceMove.gyroRotationFromInputs('C',"0","20"))
-        assertNull(DistanceMove.gyroRotationFromInputs('C',"90","61"))
+        assertNotNull(DistanceMove.gyroRotationFromInputs('C',"90","120"))
+        assertNull(DistanceMove.gyroRotationFromInputs('C',"90","121"))
     }
 
     @Test fun wheel103DirectDriveConversion() {
         val move = DistanceMove.fromInputs('F', "1000", "45", "103", "3200", "1")!!
         assertEquals(9889, move.pulsesPerMetre)
-        assertEquals("EXEC,7,DRIVE,F,9889,45,3200\n", move.frame(7))
+        assertEquals("EXEC,7,ROUTE_MOVE,F,9889,45,3200\n", move.frame(7))
+    }
+    @Test fun rawPulseTurnsUseSynchronousPositionMode() {
+        assertEquals("EXEC,12,ROUTE_MOVE,C,989,20,3200\n",
+            DistanceMove.fromInputs('C',"100","20","103","3200","1")!!.frame(12))
+        assertEquals("EXEC,13,ROUTE_MOVE,W,989,20,3200\n",
+            DistanceMove.fromInputs('W',"100","20","103","3200","1")!!.frame(13))
     }
 
     @Test fun changedMicrostepsAndMeasuredCorrection() {
         val adjusted = DistanceMove.fromInputs('L', "100", "45", "103", "6400", "1.25")!!
         assertEquals(24723, adjusted.pulsesPerMetre)
         val back = DistanceMove.fromInputs('B', "100", "45", "103", "6400", "1.25")!!
-        assertEquals("EXEC,8,DRIVE,B,2472,45,6400\n",back.frame(8))
-        assertEquals("EXEC,9,MOVE,L,100,45,24723\n",adjusted.frame(9))
+        assertEquals("EXEC,8,ROUTE_MOVE,B,2472,45,6400\n",back.frame(8))
+        assertEquals("EXEC,9,ROUTE_MOVE,L,2472,45,6400\n",adjusted.frame(9))
         assertNull(DistanceMove.fromInputs('F',"100","20","103","51201","1"))
     }
 

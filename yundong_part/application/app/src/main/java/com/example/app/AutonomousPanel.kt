@@ -24,10 +24,36 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
     val context = LocalContext.current
     val preferences = remember {
         context.getSharedPreferences("full_process_parameters", 0).also { prefs ->
+            if (!prefs.getBoolean("wheel_77_defaults_migrated", false)) {
+                val edit = prefs.edit().putBoolean("wheel_77_defaults_migrated", true)
+                for (key in listOf("forward", "lateral")) {
+                    if (prefs.getString(key, null)?.toIntOrNull() == 9889)
+                        edit.putString(key, "13228")
+                }
+                edit.apply()
+            }
+            if (!prefs.getBoolean("forward_15_to_11_migrated", false)) {
+                val edit = prefs.edit().putBoolean("forward_15_to_11_migrated", true)
+                if (prefs.getString("forward", null)?.toIntOrNull() == 13228)
+                    edit.putString("forward", "18039")
+                edit.apply()
+            }
+            if (!prefs.getBoolean("forward_30_to_43_migrated", false)) {
+                val edit = prefs.edit().putBoolean("forward_30_to_43_migrated", true)
+                prefs.getString("forward", null)?.toIntOrNull()?.takeIf { it in 1..1000000 }?.let {
+                    edit.putString("forward", ((it.toLong() * 30L + 21L) / 43L).coerceAtLeast(1L).toString())
+                }
+                edit.apply()
+            }
             if (!prefs.getBoolean("turn_calibration_096_migrated", false)) {
                 val edit = prefs.edit().putBoolean("turn_calibration_096_migrated", true)
                 if (prefs.getString("turnCorrection", null)?.toDoubleOrNull() == 1.0)
                     edit.putString("turnCorrection", DEFAULT_TURN_CORRECTION.toString())
+                edit.apply()
+            }
+            if (!prefs.getBoolean("turn_speed_40_migrated", false)) {
+                val edit = prefs.edit().putBoolean("turn_speed_40_migrated", true)
+                if (prefs.getString("turnRpm", null)?.toIntOrNull() == 20) edit.putString("turnRpm", "40")
                 edit.apply()
             }
         }
@@ -54,9 +80,9 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
             ?.let { AutonomousArmParameters(role, slot, it) }
     }
 
-    Text("全流程 · S1 → 两批搬运 → S2", style = MaterialTheme.typography.titleMedium)
-    Text("从S1、车头朝下启动。参数独立保存；中断后重新启动需将车放回S1。")
-    Text("起步到NE在地图上向左平移50mm（车头朝下，车身右移），其余路段先转向再前进；工位停车后恢复车头朝下。")
+    Text("全流程 · 车身坐标路线 · 两批搬运", style = MaterialTheme.typography.titleMedium)
+    Text("开始时车尾朝向另一个启停区。所有前后左右均以车自身为准，左右转为相对当前朝向转90°。中断重启前请恢复起始位置和朝向。")
+    Text("按下列25步顺序执行，工位保持当前朝向；两次加工区均先放置三件，再抓回三件，最后堆叠。动作完成后间隔100ms。")
     Text(status, modifier = Modifier.fillMaxWidth())
     Text("任务码：${taskCode.ifEmpty { if (vision) "等待扫码" else if (arm) "使用下方手动任务码" else "底盘模式不使用" }}")
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -88,24 +114,19 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
     Spacer(Modifier.height(8.dp))
     when (section) {
         0 -> {
-            listOf(Triple("forward", "前进每米脉冲", "9889"),
-                Triple("lateral", "起步横移每米脉冲", "9889"),
-                Triple("rpm", "路线速度 RPM（5–300）", "45"),
+            listOf(Triple("forward", "前进每米脉冲", "12585"),
+                Triple("lateral", "起步横移每米脉冲", "13228"),
+                Triple("rpm", "路线速度 RPM（5–1200）", "45"),
                 Triple("wheelPulses", "底盘电机每圈脉冲（须与电机细分一致）", "3200"),
-                Triple("turnRpm", "陀螺仪转向速度上限 RPM（5–60）", "20")).forEach { (key, label, initial) ->
+                Triple("turnRpm", "陀螺仪转向速度上限 RPM（5–120）", "40")).forEach { (key, label, initial) ->
                 OutlinedTextField(value(key, initial), { put(key, it) }, label = { Text(label) }, enabled = !running, modifier = Modifier.fillMaxWidth())
             }
-            Text("需要JY901S在线并静止（固定9600、10Hz）。前进保持起步航向，距离由四轮编码器反馈决定；转向使用PD闭环。每圈脉冲须与电机设置一致。终点保持S2(2250,150)。")
+            Text("JY901S只用于转向（固定9600、10Hz），启动时需在线并静止。前后左右按标定脉冲执行四轮同步位置运动，不用陀螺仪纠偏；确认四轮到位后衔接下一步。每圈脉冲须与电机设置一致。")
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 OutlinedButton(onClick = { routeIndex-- }, enabled = !running && routeIndex > 0) { Text("上一点") }
-                OutlinedButton(onClick = { routeIndex++ }, enabled = !running && routeIndex < 19) { Text("下一点") }
+                OutlinedButton(onClick = { routeIndex++ }, enabled = !running && routeIndex < AutonomousRoute.names.lastIndex) { Text("下一点") }
             }
-            Text("${routeIndex + 1}/20 · ${AutonomousRoute.names[routeIndex]}")
-            val point = AutonomousRoute.defaults[routeIndex]
-            OutlinedTextField(value("route_${routeIndex}_x", point.x.toString()), { put("route_${routeIndex}_x", it) },
-                label = { Text("世界坐标 X（mm）") }, enabled = !running && routeIndex != 19, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value("route_${routeIndex}_y", point.y.toString()), { put("route_${routeIndex}_y", it) },
-                label = { Text("世界坐标 Y（mm）") }, enabled = !running && routeIndex != 19, modifier = Modifier.fillMaxWidth())
+            Text("${routeIndex + 1}/${AutonomousRoute.names.size} · ${AutonomousRoute.names[routeIndex]}")
         }
         1 -> {
             Text(if (vision) "按实车相机与夹爪位置填写。" else "视觉校准已关闭，此处参数不参与本次执行。")
@@ -146,23 +167,14 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
             if (parsed == null) { roleIndex = index; slot = number; section = 2; error = "${roles[index]} · 槽$number 参数无效"; return@start }
             parameters.add(parsed)
         }
-        val points = mutableListOf<AutonomousRoutePoint>()
-        for ((index, initial) in AutonomousRoute.defaults.withIndex()) {
-            val x = value("route_${index}_x", initial.x.toString()).toIntOrNull()
-            val y = value("route_${index}_y", initial.y.toString()).toIntOrNull()
-            if (x == null || y == null || !AutonomousRoutePoint(x,y).valid()) {
-                routeIndex = index; section = 0; error = "路线第${index+1}点坐标无效或超出车道"; return@start
-            }
-            points.add(AutonomousRoutePoint(x,y))
-        }
         val settings = try {
-            AutonomousSettings(value("forward","9889").toInt(), value("lateral","9889").toInt(), value("rpm","45").toInt(),
+            AutonomousSettings(value("forward","12585").toInt(), value("lateral","13228").toInt(), value("rpm","45").toInt(),
                 if (vision) value("fine","10").toInt() else 10,
                 if (vision) value("targetX","256.0").toFloat() else 256f, if (vision) value("targetY","160.0").toFloat() else 160f,
                 if (vision) value("processMap","321") else "321", if (vision) value("storageMap","321") else "321",
                 if (arm) value("slots","0,90,180").split(',').map { it.trim().toInt() } else listOf(0,90,180),
-                vision, arm, if (arm && !vision) value("taskCode","156+123+516+231").trim() else "", points,
-                turnRpm = value("turnRpm","20").toInt(), wheelPulses = value("wheelPulses","3200").toInt())
+                vision, arm, if (arm && !vision) value("taskCode","156+123+516+231").trim() else "",
+                turnRpm = value("turnRpm","40").toInt(), wheelPulses = value("wheelPulses","3200").toInt())
         } catch (_: IllegalArgumentException) { null }
         if (settings == null || settings.frames(1,2,parameters).isEmpty()) error = "请检查速度、脉冲、任务码、视觉或槽位参数"
         else { error = null; onStart(settings, parameters) }

@@ -504,15 +504,21 @@ private fun DistanceMovePanel(
     var direction by rememberSaveable { mutableStateOf('F') }
     var distance by rememberSaveable { mutableStateOf("100") }
     var speed by rememberSaveable { mutableStateOf("45") }
-    var diameter by rememberSaveable { mutableStateOf("103") }
+    var diameter by rememberSaveable { mutableStateOf("77") }
     var wheelPulses by rememberSaveable { mutableStateOf("3200") }
-    var forwardCorrection by rememberSaveable { mutableStateOf("1.0") }
+    var forwardCorrection by rememberSaveable { mutableStateOf("0.951374") }
+    LaunchedEffect(Unit) {
+        // Upgrade a restored previous default once; preserve other manual settings.
+        if (forwardCorrection.toDoubleOrNull()?.let { kotlin.math.abs(it - 1.363636) < 0.000001 } == true)
+            forwardCorrection = "0.951374"
+    }
     var lateralCorrection by rememberSaveable { mutableStateOf("1.0") }
     var error by remember { mutableStateOf<String?>(null) }
     var ring by rememberSaveable { mutableStateOf(2) }
     var turnMm by rememberSaveable { mutableStateOf("5") }
     var turnDegrees by rememberSaveable { mutableStateOf("90") }
-    var turnRpm by rememberSaveable { mutableStateOf("10") }
+    var turnRpm by rememberSaveable { mutableStateOf("40") }
+    LaunchedEffect(Unit) { if (turnRpm == "10" || turnRpm == "20") turnRpm = "40" }
     var parallelStep by rememberSaveable { mutableStateOf("3") }
     var reverseTurn by rememberSaveable { mutableStateOf(false) }
     var fineRpm by rememberSaveable { mutableStateOf("10") }
@@ -555,7 +561,7 @@ private fun DistanceMovePanel(
             }
         }
         DistanceInput("距离（mm，1–10000）", distance, !running) { distance = it }
-        Text("前进/后退：JY901S保持起步朝向，四轮编码器控制距离。需陀螺仪在线，且每圈脉冲与电机设置一致。")
+        Text("前后左右均按标定脉冲下发四轮位置指令并同步启动，不使用陀螺仪纠偏。连续两轮确认四轮到位后结束，不再等满估算时间；每圈脉冲须与电机设置一致。")
         DistanceInput("电机速度（RPM，5–300）", speed, !running) { speed = it }
         Button(
             onClick = {
@@ -635,13 +641,13 @@ private fun DistanceMovePanel(
         Text("X前、Y右、Z下；USART3固定9600，启动配置10Hz角度/角速度输出，需接通PB11与PB10双向串口。")
         Button(onClick = onRequestImu, enabled = connected) { Text("读取JY901S角度") }
         DistanceInput("旋转角度（度，0.1–360）", turnDegrees, !running, true) { turnDegrees = it }
-        DistanceInput("定角度转速（RPM，5–60）", turnRpm, !running) { turnRpm = it }
+        DistanceInput("定角度转速（RPM，5–120）", turnRpm, !running) { turnRpm = it }
         Text("相对当前朝向旋转；需要JY901S在线并静止，角度由传感器闭环判断。")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf('C' to "定角度左转", 'W' to "定角度右转").forEach { (dir, label) ->
                 Button(onClick = {
                     val turn = DistanceMove.gyroRotationFromInputs(dir, turnDegrees, turnRpm)
-                    if (turn == null) error = "请输入0.1–360度（一位小数）和5–60 RPM速度上限"
+                    if (turn == null) error = "请输入0.1–360度（一位小数）和5–120 RPM速度上限"
                     else { error = null; onMove(turn) }
                 }, enabled = connected && !running) { Text(label) }
             }
@@ -649,12 +655,12 @@ private fun DistanceMovePanel(
         HorizontalDivider(Modifier.padding(vertical = 12.dp))
         Text("原始脉冲转向测试 / 圆心连线校准（不使用陀螺仪闭环）", style = MaterialTheme.typography.titleMedium)
         DistanceInput("转动车轮距离（mm）", turnMm, true) { turnMm = it }
-        DistanceInput("转向速度（RPM，5–60）", turnRpm, true) { turnRpm = it }
+        DistanceInput("转向速度（RPM，5–120）", turnRpm, true) { turnRpm = it }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf('C' to "左转", 'W' to "右转").forEach { (dir, label) ->
                 Button(onClick = {
                     val turn = DistanceMove.fromInputs(dir, turnMm, turnRpm, diameter, wheelPulses, forwardCorrection)
-                    if (turn == null || turn.speedRpm !in 5..60) error = "请检查转向距离、速度和底盘标定"
+                    if (turn == null || turn.speedRpm !in 5..120) error = "请检查转向距离、速度和底盘标定"
                     else { error = null; onMove(turn) }
                 }, enabled = connected && !running) { Text(label) }
             }

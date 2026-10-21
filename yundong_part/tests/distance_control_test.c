@@ -14,6 +14,7 @@
 #include "../shared/camera_pose_math.h"
 #include "../shared/arm_vector_math.h"
 #include "../shared/motor_status_guard.h"
+#include "../shared/route_move_protocol.h"
 
 static UART_HandleTypeDef motor_uart = {1, HAL_UART_STATE_READY};
 static UART_HandleTypeDef command_uart = {3, HAL_UART_STATE_READY};
@@ -51,9 +52,15 @@ static UART_HandleTypeDef imu_uart={7,HAL_UART_STATE_READY};
 static uint8_t *imu_rx_byte;
 static unsigned velocity_frames;
 static uint8_t velocity_frame[37];
+static uint8_t sync_velocity[4][8],pending_velocity_mask;
+static unsigned fail_speed_id;
 static int simulated_rpm;
 static double wheel_encoder[4];
 static int wheel_velocity[4],fail_encoder;
+static unsigned sync_frames,queued_frames,encoder_queries,status_queries;
+static uint8_t queued[4][13];
+static unsigned fail_queue_id;
+static bool fail_sync;
 
 uint32_t HAL_GetTick(void) { return tick; }
 HAL_StatusTypeDef ImuLink_SetBaud(UART_HandleTypeDef *uart,uint32_t baud)
@@ -93,6 +100,30 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data,
     assert(uart == &motor_uart);
     reply_index = 0; reply_length=4;
     reply[0] = data[0]; reply[1] = data[1]; reply[2] = 2; reply[3] = 0x6B;
+    if(data[1]==0xFD) {
+        assert(length==13U&&data[0]>=1U&&data[0]<=4U);
+        memcpy(queued[data[0]-1U],data,13U); ++queued_frames;
+        if(data[0]==fail_queue_id) reply_index=4;
+    }
+    if(data[1]==0xF6) {
+        assert(length==8U&&data[0]>=1U&&data[0]<=4U&&data[6]==1U);
+        unsigned i=data[0]-1U;
+        memcpy(sync_velocity[i],data,8); ++velocity_frames;
+        pending_velocity_mask|=(uint8_t)(1U<<i);
+        if(fail_position_ack||data[0]==fail_speed_id) reply_index=4;
+    }
+    if(data[1]==0xFF) {
+        assert(length==4U&&data[0]==0&&data[2]==0x66); ++sync_frames; if(fail_sync) return HAL_ERROR;
+        if(pending_velocity_mask) {
+            assert(pending_velocity_mask==15U);
+            for(unsigned i=0;i<4U;++i) {
+                const uint8_t *v=sync_velocity[i]; int magnitude=v[3]*256+v[4];
+                wheel_velocity[i]=v[2]==(i==0||i==3)?magnitude:-magnitude;
+            }
+            simulated_rpm=(sync_velocity[0][2]==0?1:-1)*(sync_velocity[0][3]*256+sync_velocity[0][4]);
+            pending_velocity_mask=0;
+        }
+    }
     if (data[1] == 0xAA)
     {
         if(length==37U) {
@@ -115,6 +146,7 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data,
         if (fail_position_ack) reply_index = 4;
     }
     if(data[1]==0x36) {
+        ++encoder_queries;
         unsigned i=data[0]-1U; assert(i<4&&length==3);
         int64_t signed_counts=(int64_t)llround(wheel_encoder[i]);
         if(i==0||i==3) signed_counts=-signed_counts;
@@ -126,11 +158,13 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data,
     }
     if (data[1] == 0x3A)
     {
+        ++status_queries;
         reply[2] = motor_status[data[0] - 1];
         if (fail_status) reply_index = 4;
     }
     if (data[1] == 0xFE)
     {
+        pending_velocity_mask=0;
         simulated_rpm=0;
         wheel_velocity[data[0]-1U]=0;
         ++stop_frames;
@@ -198,6 +232,8 @@ static void reset(void)
 {
     application_reply[0]=camera_request[0]=0;
     tick = 0; position_frames = stop_frames = 0;
+    sync_frames=queued_frames=encoder_queries=status_queries=fail_queue_id=0; fail_sync=false;
+    fail_speed_id=0; pending_velocity_mask=0;
     fail_status = fail_position_ack = fail_stop_ack = 0;
     memset(motor_status, 1, sizeof(motor_status));
     lift_stops = arm_stops = 0;
@@ -255,7 +291,7 @@ static void test_parser(void)
 static void test_direction_frames(void)
 {
     const char directions[] = "FBLRCW";
-    const uint8_t expected[6][4] = {{0,1,1,0}, {1,0,0,1}, {1,1,0,0}, {0,0,1,1}, {1,1,1,1}, {0,0,0,0}};
+    const uint8_t expected[6][4] = {{1,0,0,1}, {0,1,1,0}, {0,0,1,1}, {1,1,0,0}, {1,1,1,1}, {0,0,0,0}};
     for (unsigned d = 0; d < 6; ++d)
     {
         char command[64]; reset();
@@ -565,7 +601,7 @@ static void test_ring_alignment(void)
         center_average_sample("RINGS,100,160,300,180,400,160\n");
         assert(position_frames == 1); /* Ignore newer coordinates while moving. */
         finish_alignment_move();
-        assert(position_frames == 2 && wheel_pulses() == 100U && frame[6] == 1);
+        assert(position_frames == 2 && wheel_pulses() == 100U && frame[6] == 0);
         feed("MOVE,2,F,100,45,9889\n"); assert(position_frames == 2);
         finish_alignment_move();
         center_average_sample("RINGS,100,160,300,180,400,160\n"); assert(position_frames == 2);
@@ -637,7 +673,7 @@ static void test_camera_alignment(void)
     camera_feed("x=400,y=160\n"); /* Discard stale coordinates at start. */
     feed("ALIGN,1,10000,20000\n"); RobotControl_Tick(); assert(position_frames == 0);
     center_average_sample("x=266,y=160\n");
-    assert(position_frames == 1 && wheel_pulses() == 109 && frame[6] == 1 && frame[8] == 10);
+    assert(position_frames == 1 && wheel_pulses() == 109 && frame[6] == 0 && frame[8] == 10);
     center_average_sample("x=256,y=180\n"); assert(position_frames == 1);
     feed("MOVE,2,F,100,45,9889\nCMD,3,A\n");
     assert(position_frames == 1 && servo_commands == 0);
@@ -651,10 +687,10 @@ static void test_camera_alignment(void)
 
     reset(); camera_ready(); feed("ALIGN_CFG,1,0,10000,10000,10,20,0\n");
     center_average_sample("x=356,y=210\n");
-    assert(position_frames == 1 && wheel_pulses() == 1091 && frame[8] == 20 && frame[6] == 1); /* X first. */
+    assert(position_frames == 1 && wheel_pulses() == 1091 && frame[8] == 20 && frame[6] == 0); /* X first. */
     center_average_sample("x=400,y=180\n"); assert(position_frames == 1); /* No Y before X arrival. */
     finish_alignment_move();
-    assert(position_frames == 2 && wheel_pulses() == 545 && frame[8] == 20 && frame[19] == 1); /* Original averaged Y, L. */
+    assert(position_frames == 2 && wheel_pulses() == 545 && frame[8] == 20 && frame[19] == 0); /* Original averaged Y, L. */
     finish_alignment_move(); center_average_sample("x=400,y=180\n"); assert(position_frames == 2);
     feed("MOVE,2,F,100,45,9889\n"); assert(position_frames == 3); /* Zero offset completes on Y arrival. */
     reset(); camera_ready(); feed("ALIGN,1,9889,9889\n");
@@ -693,7 +729,7 @@ static void test_configured_alignment(void)
         center_average_sample(mode ? "RINGS,100,160,296,160,400,160\n" : "x=296,y=160\n");
         assert(position_frames == 1 && wheel_pulses() == 436U && frame[8] == 30);
         finish_alignment_move();
-        assert(position_frames == 2 && wheel_pulses() == 70U && frame[8] == 12 && frame[6] == 0);
+        assert(position_frames == 2 && wheel_pulses() == 70U && frame[8] == 12 && frame[6] == 1);
         const char *center = mode ? "RINGS,100,160,266,160,400,160\n" : "x=266,y=160\n";
         center_average_sample(center); assert(position_frames == 2);
         finish_alignment_move(); center_average_sample(center); assert(position_frames == 2);
@@ -961,11 +997,11 @@ static void test_center_axis_stages(void)
 {
     reset(); camera_ready(); feed("ALIGN_RING,1600,2,10000,20000\n");
     center_average_sample("RINGS,100,160,246,170,400,160\n");
-    assert(position_frames == 1 && wheel_pulses() == 109 && frame[6] == 0); /* Negative X -> F. */
+    assert(position_frames == 1 && wheel_pulses() == 109 && frame[6] == 1); /* Negative X -> F. */
     finish_alignment_move();
-    assert(position_frames == 2 && wheel_pulses() == 218 && frame[19] == 1); /* Positive Y -> L. */
+    assert(position_frames == 2 && wheel_pulses() == 218 && frame[19] == 0); /* Positive Y -> L. */
     finish_alignment_move();
-    assert(position_frames == 3 && wheel_pulses() == 100 && frame[6] == 1); /* Final X compensation. */
+    assert(position_frames == 3 && wheel_pulses() == 100 && frame[6] == 0); /* Final X compensation. */
     finish_alignment_move();
     feed("MOVE,1601,F,100,45,9889\n"); assert(position_frames == 4);
 
@@ -1458,7 +1494,7 @@ static void test_gyro_link_and_controller(void)
     assert(GyroProtocol_ParseExec("EXEC,2,TURN,W,360.0,20",&c)&&c.degrees==360);
     assert(GyroProtocol_ParseExec("EXEC,3,HEADING,270.0,20",&c)&&c.kind==GYRO_HEADING);
     const char *bad[]={"EXEC,0,IMU_ZERO","EXEC,1,TURN,X,90.0,20","EXEC,1,TURN,W,0.0,20",
-        "EXEC,1,TURN,W,90.01,20","EXEC,1,TURN,W,90.0,61","EXEC,1,HEADING,360.0,20","EXEC,1,IMU_ZERO,junk"};
+        "EXEC,1,TURN,W,90.01,20","EXEC,1,TURN,W,90.0,121","EXEC,1,HEADING,360.0,20","EXEC,1,IMU_ZERO,junk"};
     for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);++i) assert(!GyroProtocol_ParseExec(bad[i],&c));
     reset(); feed("EXEC,4000,TURN,W,90.0,20\n"); assert(strstr(application_reply,"ERROR,IMU_NOT_READY"));
     feed("QUERY_IMU,4000\n"); assert(strstr(application_reply,"IMU,4000,NOT_READY"));
@@ -1498,11 +1534,11 @@ static void test_gyro_link_and_controller(void)
     assert(GyroTurn_State()==GYRO_DONE&&fabsf(yaw-90)<=1.0f&&velocity_frames>start_commands);
     assert(strstr(application_reply,"ACTION,4002,DONE,0"));
     /* Four equal magnitudes and the expected CW/CCW grouping, synchronized F6. */
-    assert(velocity_frame[0]==0&&velocity_frame[1]==0xAA&&velocity_frame[3]==37);
+    assert(sync_frames>0U);
     for(unsigned i=0;i<4;++i) {
-        unsigned offset=4+i*8; assert(velocity_frame[offset]==i+1&&velocity_frame[offset+1]==0xF6);
-        assert(velocity_frame[offset+3]==velocity_frame[7]&&velocity_frame[offset+4]==velocity_frame[8]);
-        assert(velocity_frame[offset+6]==0&&velocity_frame[offset+7]==0x6B);
+        assert(sync_velocity[i][0]==i+1&&sync_velocity[i][1]==0xF6);
+        assert(sync_velocity[i][3]==sync_velocity[0][3]&&sync_velocity[i][4]==sync_velocity[0][4]);
+        assert(sync_velocity[i][6]==1&&sync_velocity[i][7]==0x6B);
     }
     feed("EXEC,4003,HEADING,0.0,20\n");
     for(unsigned i=0;i<10U;++i) { tick+=20; imu_sample(yaw,0); RobotControl_Tick(); }
@@ -1513,11 +1549,15 @@ static void test_gyro_link_and_controller(void)
     tick+=201; RobotControl_Tick(); assert(GyroTurn_State()==GYRO_ERROR);
     assert(strstr(application_reply,"ERROR,IMU_TIMEOUT")&&stop_frames>=4);
     reset(); imu_ready(0); feed("EXEC,4011,TURN,W,90.0,20\n");
-    motor_status[0]=9; tick+=60; imu_sample(0,0); RobotControl_Tick();
+    motor_status[0]=9; tick+=200; imu_sample(0,0); RobotControl_Tick();
     assert(strstr(application_reply,"ERROR,MOTOR_FAULT"));
     reset(); imu_ready(0); feed("EXEC,4012,TURN,W,90.0,20\n");
     fail_position_ack=1; tick+=20; imu_sample(0,0); RobotControl_Tick();
     assert(strstr(application_reply,"ERROR,MOTOR_COMMAND"));
+    reset(); imu_ready(0); feed("EXEC,4090,TURN,W,90.0,20\n");
+    fail_speed_id=3; tick+=20; imu_sample(0,0); RobotControl_Tick();
+    assert(sync_frames==0&&velocity_frames==3&&stop_frames>=4);
+    assert(strstr(application_reply,"ERROR,MOTOR_COMMAND")&&simulated_rpm==0);
     reset(); imu_ready(0); feed("EXEC,4013,TURN,W,90.0,20\n");
     fail_stop_ack=1; tick+=201; RobotControl_Tick(); assert(GyroTurn_Busy());
     unsigned before=position_frames; feed("MOVE,4014,F,100,20,9889\n"); assert(position_frames==before);
@@ -1538,6 +1578,19 @@ static void test_gyro_link_and_controller(void)
     tick+=201;
     for(unsigned i=0;i<12U;++i) { tick+=20; imu_sample(0,0); }
     feed("EXEC,4023,HEADING,90.0,20\n"); assert(strstr(application_reply,"ERROR,IMU_NO_REFERENCE"));
+    /* Faster requested limits still converge and stop through the IMU loop. */
+    const unsigned fast_limits[]={40U,120U};
+    for(unsigned j=0;j<2U;++j) {
+        reset(); imu_ready(0); char command[96];
+        snprintf(command,sizeof(command),"EXEC,4050,TURN,W,90.0,%u\n",fast_limits[j]); feed(command);
+        yaw=rate=0;
+        for(unsigned i=0;i<1500U&&GyroTurn_State()==GYRO_RUNNING;++i) {
+            rate+=(simulated_rpm*1.4f-rate)*0.25f; yaw+=rate*0.02f;
+            tick+=20; imu_sample(yaw,rate); RobotControl_Tick(); assert(abs(simulated_rpm)<=(int)fast_limits[j]);
+        }
+        assert(GyroTurn_State()==GYRO_DONE&&fabsf(yaw-90)<=1.0f);
+        assert(strstr(application_reply,"ACTION,4050,DONE,0"));
+    }
 }
 
 static void test_gyro_straight(void)
@@ -1561,7 +1614,7 @@ static void test_gyro_straight(void)
             for(unsigned i=0;i<4;++i) {
                 assert(abs(wheel_velocity[i])<=30);
                 wheel_encoder[i]+=wheel_velocity[i]*65536.0*0.10/60.0;
-                forward-=wheel_velocity[i]/4.0;
+                forward+=wheel_velocity[i]/4.0;
             }
             double clockwise=(-wheel_velocity[0]+wheel_velocity[1]+wheel_velocity[2]-wheel_velocity[3])/4.0;
             if(clockwise< -0.1) corrected=true;
@@ -1569,7 +1622,7 @@ static void test_gyro_straight(void)
             yaw+=rate*0.10f;
             tick+=100; imu_sample(yaw,rate); RobotControl_Tick();
         }
-        for(unsigned i=0;i<4;++i) distance-=(wheel_encoder[i]+100000)*(backward?-1:1)/4.0;
+        for(unsigned i=0;i<4;++i) distance+=(wheel_encoder[i]+100000)*(backward?-1:1)/4.0;
         assert(GyroTurn_State()==GYRO_DONE&&corrected&&fabsf(yaw-179)<=1.05f);
         assert(distance>=32767&&distance<33000); // measured 0.5 revolution, yaw cancels
         for(unsigned i=0;i<4;++i) assert(wheel_velocity[i]==0);
@@ -1590,7 +1643,7 @@ static void test_gyro_straight(void)
     reset(); imu_ready(0); feed("EXEC,4105,DRIVE,F,1600,30,3200\n");
     feed("CMD,4106,S\n"); assert(!GyroTurn_Busy()&&strstr(application_reply,"ACTION,4105,CANCELLED,STOP"));
     reset(); imu_ready(0); feed("EXEC,4107,DRIVE,F,1600,30,3200\n");
-    for(unsigned i=0;i<4;++i) wheel_encoder[i]=1000;
+    for(unsigned i=0;i<4;++i) wheel_encoder[i]=-1000;
     tick+=20; imu_sample(0,0); RobotControl_Tick(); assert(strstr(application_reply,"ERROR,ODOM_DIRECTION"));
 }
 
@@ -1642,8 +1695,97 @@ static void test_motor_fault_feedback(void)
     assert(strstr(application_reply,"MOTOR_DIAG,ARM,1,STOP"));
     assert(strstr(application_reply,"MOTOR_DIAG,CHASSIS,1,STATUS_READ"));
 }
+static void test_route_position_moves(void)
+{
+    RouteMove c;
+    assert(RouteMove_Parse("ROUTE_MOVE,1,F,3200,60,3200",&c));
+    assert(RouteMove_Duration(&c)==4999U); /* triangular profile, 2*sqrt(6) s + margin */
+    const char *bad[]={"ROUTE_MOVE,0,F,3200,60,3200","ROUTE_MOVE,1,C,3200,121,3200",
+        "ROUTE_MOVE,1,F,0,60,3200","ROUTE_MOVE,1,F,10000000,5,200",
+        "ROUTE_MOVE,1,F,3200,60,3200,","ROUTE_MOVE,1,F,3200,1201,3200"};
+    for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);++i) assert(!RouteMove_Parse(bad[i],&c));
+    assert(RouteMove_Parse("ROUTE_MOVE,1,F,3200,1200,3200",&c));
+    assert(RouteMove_Parse("ROUTE_MOVE,1,F,3200,60,3200",&c));
+    uint32_t duration=RouteMove_Duration(&c);
+    assert(RouteMove_MinDuration(&c)==1000U);
+    const char dirs[]="FBLRCW";
+    const uint8_t polarity[6][4]={{1,0,0,1},{0,1,1,0},{0,0,1,1},{1,1,0,0},{1,1,1,1},{0,0,0,0}};
+    for(unsigned d=0;d<6U;++d) {
+        reset(); fail_encoder=1; /* No IMU initialized and encoder reads would fail. */
+        char cmd[96]; snprintf(cmd,sizeof(cmd),"EXEC,900,ROUTE_MOVE,%c,3200,60,3200\n",dirs[d]);
+        feed(cmd); assert(strstr(application_reply,"ACTION,900,ACCEPTED,0"));
+        assert(queued_frames==4&&sync_frames==1&&position_frames==0&&velocity_frames==0&&encoder_queries==0);
+        for(unsigned i=0;i<4U;++i) {
+            assert(queued[i][2]==polarity[d][i]&&queued[i][5]==ROUTE_MOVE_ACCELERATION);
+            assert(queued[i][6]==0&&queued[i][7]==0&&queued[i][8]==12&&queued[i][9]==128);
+            assert(queued[i][10]==2&&queued[i][11]==1&&queued[i][12]==0x6B);
+        }
+        memset(motor_status,3,sizeof(motor_status));
+        for(unsigned i=0;i<4U;++i) poll_without_keep(200);
+        assert(!strstr(application_reply,"ACTION,900,DONE")); /* Ignore early/stale reached bits. */
+        feed(cmd); assert(queued_frames==4&&sync_frames==1); /* Duplicate cannot replay movement. */
+        tick=1000;
+        motor_status[3]=1;
+        for(unsigned i=0;i<8U;++i) poll_without_keep(50);
+        assert(!strstr(application_reply,"ACTION,900,DONE")); /* Never finish with only three wheels. */
+        motor_status[3]=3;
+        for(unsigned i=0;i<8U;++i) poll_without_keep(50);
+        assert(strstr(application_reply,"ACTION,900,DONE,0"));
+        assert(tick<duration); /* Completion no longer waits for the ramp estimate. */
+        assert(stop_frames>=4&&encoder_queries==0&&velocity_frames==0);
+        feed(cmd); assert(queued_frames==4&&sync_frames==1);
+    }
+    reset(); fail_queue_id=3;
+    feed("EXEC,901,ROUTE_MOVE,F,3200,60,3200\n");
+    assert(queued_frames==3&&sync_frames==0&&stop_frames>=4&&strstr(application_reply,"ACTION,901,ERROR,START"));
+    reset(); fail_sync=true;
+    feed("EXEC,902,ROUTE_MOVE,F,3200,60,3200\n");
+    assert(queued_frames==4&&sync_frames==1&&stop_frames>=4&&strstr(application_reply,"ACTION,902,ERROR,START"));
+    reset(); feed("EXEC,903,ROUTE_MOVE,F,3200,60,3200\n");
+    fail_status=1; poll_without_keep(200);
+    assert(strstr(application_reply,"ACTION,903,ERROR,MOTOR_FAULT")&&stop_frames>=4);
+    reset(); feed("EXEC,904,ROUTE_MOVE,F,3200,60,3200\n");
+    motor_status[0]=9; poll_without_keep(200);
+    assert(strstr(application_reply,"ACTION,904,ERROR,MOTOR_FAULT"));
+    reset(); feed("EXEC,905,ROUTE_MOVE,F,3200,60,3200\n");
+    tick=duration+ROUTE_MOVE_FINISH_GRACE_MS; RobotControl_Tick();
+    assert(strstr(application_reply,"ACTION,905,ERROR,ROUTE_TIMEOUT"));
+    reset(); feed("EXEC,906,ROUTE_MOVE,F,3200,60,3200\n");
+    memset(motor_status,3,sizeof(motor_status)); tick=duration;
+    fail_stop_ack=1;
+    for(unsigned i=0;i<8U;++i) poll_without_keep(50);
+    assert(!strstr(application_reply,"ACTION,906,DONE"));
+    fail_stop_ack=0; RobotControl_Tick();
+    assert(strstr(application_reply,"ACTION,906,DONE,0"));
+    reset(); feed("EXEC,907,ROUTE_MOVE,F,3200,60,3200\n");
+    feed("CMD,0,S\n"); poll_without_keep(duration+1000U);
+    assert(strstr(application_reply,"ACTION,907,CANCELLED,STOP")&&!strstr(application_reply,"ACTION,907,DONE"));
+    reset(); feed("EXEC,908,ROUTE_MOVE,F,10000000,5,200\n");
+    assert(queued_frames==0&&sync_frames==0&&strstr(application_reply,"ACTION,908,ERROR"));
+    reset(); feed("EXEC,909,ROUTE_MOVE,F,3200,1200,3200\n");
+    assert(queued_frames==4&&sync_frames==1&&strstr(application_reply,"ACTION,909,ACCEPTED"));
+    for(unsigned i=0;i<4U;++i) assert(queued[i][3]==4U&&queued[i][4]==176U);
+    reset(); feed("EXEC,910,ROUTE_MOVE,F,3200,1201,3200\n");
+    assert(queued_frames==0&&sync_frames==0&&strstr(application_reply,"ACTION,910,ERROR"));
+    /* A tiny move may finish before the first poll; no busy transition is required.
+     * One all-reached scan is insufficient, and a later busy sample cancels it. */
+    reset(); feed("EXEC,911,ROUTE_MOVE,F,1,1200,3200\n");
+    memset(motor_status,3,sizeof(motor_status));
+    poll_without_keep(50); assert(status_queries==0&&!strstr(application_reply,"ACTION,911,DONE"));
+    for(unsigned i=0;i<4U;++i) poll_without_keep(50);
+    assert(!strstr(application_reply,"ACTION,911,DONE"));
+    motor_status[0]=1;
+    for(unsigned i=0;i<4U;++i) poll_without_keep(50);
+    assert(!strstr(application_reply,"ACTION,911,DONE"));
+    motor_status[0]=3;
+    for(unsigned i=0;i<4U;++i) poll_without_keep(50);
+    assert(!strstr(application_reply,"ACTION,911,DONE"));
+    for(unsigned i=0;i<4U;++i) poll_without_keep(50);
+    assert(strstr(application_reply,"ACTION,911,DONE,0"));
+}
 int main(void)
 {
+    test_route_position_moves();
     test_startup_stop_busy_reason();
     test_motor_fault_feedback();
     test_gyro_straight();

@@ -14,6 +14,14 @@ int main(void)
     assert(BridgeLink_ManualExec("EXEC,3,DRIVE,B,989,20,3200"));
     assert(BridgeLink_ManualExec("EXEC,4,TURN,W,90.0,20"));
     assert(BridgeLink_ManualExec("EXEC,5,IMU_ZERO"));
+    assert(BridgeLink_ManualExec("EXEC,6,ROUTE_MOVE,F,3200,300,3200"));
+    assert(BridgeLink_ManualExec("EXEC,7,ROUTE_MOVE,R,3200,1200,3200"));
+    assert(!BridgeLink_ManualExec("EXEC,7,ROUTE_MOVE,R,3200,1201,3200"));
+    assert(BridgeLink_ManualExec("EXEC,7,ROUTE_MOVE,C,3200,60,3200"));
+    assert(BridgeLink_ManualExec("EXEC,7,TURN,C,90.0,120"));
+    assert(!BridgeLink_ManualExec("EXEC,7,TURN,C,90.0,121"));
+    assert(!BridgeLink_ManualExec("EXEC,7,ROUTE_MOVE,C,3200,121,3200"));
+    assert(!BridgeLink_ManualExec("EXEC,7,ROUTE_MOVE,R,3200,60,3200,junk"));
     assert(!BridgeLink_ManualExec("EXEC,0,MOVE,F,50,20,9889"));
     assert(!BridgeLink_ManualExec("EXEC,1,MOVE,X,50,20,9889"));
     assert(!BridgeLink_ManualExec("EXEC,1,MOVE,F,50,301,9889"));

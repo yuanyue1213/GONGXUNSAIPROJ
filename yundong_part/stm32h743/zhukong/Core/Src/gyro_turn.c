@@ -9,7 +9,7 @@
  * These conservative starting gains require tuning on the actual chassis. */
 #define GYRO_KP 0.8f
 #define GYRO_KD 0.18f
-#define GYRO_SLEW_RPM_S 60.0f
+#define GYRO_SLEW_RPM_S 120.0f
 static struct {
     GyroTurnState state;
     const char *reason;
@@ -103,7 +103,7 @@ void GyroTurn_Tick(void)
     if(!ImuLink_Read(&s)) { fail("IMU_TIMEOUT"); return; }
     if(s.epoch!=g.sample_epoch) { fail("IMU_RESET"); return; }
     if((uint32_t)(now-g.started)>(g.driving?1800000U:60000U)) { fail(g.driving?"DRIVE_TIMEOUT":"TURN_TIMEOUT"); return; }
-    if((uint32_t)(now-g.status_tick)>=50U) {
+    if((uint32_t)(now-g.status_tick)>=200U) {
         uint8_t flags=0; g.status_tick=now;
         HAL_StatusTypeDef status_result=ZDT_Motor_ReadStatus((uint8_t)(g.wheel+1U),&flags);
         if(status_result!=HAL_OK||
@@ -123,9 +123,9 @@ void GyroTurn_Tick(void)
         for(unsigned i=0;i<4U;++i) {
             int64_t position;
             if(ZDT_Motor_ReadWheelPosition((uint8_t)(i+1U),&position)!=HAL_OK) { fail("ODOM_READ"); return; }
-            /* Forward is negative in the shared wheel convention. Yaw terms
+            /* Calibrated forward is positive in the wheel convention. Yaw terms
              * cancel in the four-wheel mean. Distance comes from encoders. */
-            distance-=(double)(position-g.origin[i])*g.direction/4.0;
+            distance+=(double)(position-g.origin[i])*g.direction/4.0;
         }
         if(distance < -655.36) { fail("ODOM_DIRECTION"); return; }
         if(distance-g.progress_counts>=65.536) { g.progress_counts=distance; g.progress_tick=now; }
@@ -162,7 +162,7 @@ void GyroTurn_Tick(void)
     g.stable=false; g.braking=false; g.stop_mask=0;
     if((!g.driving||g.travel_done)&&(uint32_t)(now-g.progress_tick)>5000U) { fail("TURN_NO_PROGRESS"); return; }
     float output=GYRO_KP*error-GYRO_KD*s.rate;
-    float limit=g.driving&&!g.travel_done?fminf(20.0f,fabsf(forward)*0.5f):fminf(60.0f,(float)g.rpm);
+    float limit=g.driving&&!g.travel_done?fminf(20.0f,fabsf(forward)*0.5f):fminf(120.0f,(float)g.rpm);
     output=fmaxf(-limit,fminf(limit,output));
     float slew=GYRO_SLEW_RPM_S*fminf(elapsed*0.001f,0.05f);
     output=fmaxf(g.output-slew,fminf(g.output+slew,output));
@@ -171,7 +171,8 @@ void GyroTurn_Tick(void)
     /* Correction sign is independent of forward/reverse direction. Leave
      * headroom so no wheel exceeds the requested maximum RPM. */
     forward=copysignf(fminf(fabsf(forward),fmaxf(0,(float)g.rpm-fabsf(output))),forward);
-    RobotChassis_WheelTargets(forward,0,-output,targets);
+    /* Invert translation for the installed chassis, keep working yaw sign. */
+    RobotChassis_WheelTargets(-forward,0,-output,targets);
     for(unsigned i=0;i<4U;++i) speeds[i]=(int16_t)lround(targets[i]);
-    if(ZDT_Motor_SetWheelSpeeds(speeds,240U)!=HAL_OK) fail("MOTOR_COMMAND");
+    if(ZDT_Motor_SetWheelSpeedsSynchronous(speeds,240U)!=HAL_OK) fail("MOTOR_COMMAND");
 }

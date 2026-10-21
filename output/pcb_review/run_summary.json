@@ -1,0 +1,611 @@
+{
+  "shape_count": 900,
+  "hole_count": 290,
+  "connected_groups": 172,
+  "supplies": [
+    {
+      "root": 40,
+      "nets": [
+        "12V"
+      ],
+      "pins": [
+        "H13_1",
+        "H14_1",
+        "H1_1",
+        "H2_1",
+        "H3_1",
+        "H4_1",
+        "H5_1",
+        "H6_1",
+        "PAD13_1",
+        "PAD17_1",
+        "PAD1_1",
+        "PAD21_1",
+        "PAD54_1",
+        "PAD56_1",
+        "PAD5_1",
+        "PAD9_1"
+      ],
+      "tracks_mm_by_width": {
+        "1.0": 168.894
+      },
+      "shape_count": 37
+    },
+    {
+      "root": 1,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H1_2",
+        "PAD2_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 9,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H2_2",
+        "PAD6_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 17,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H3_2",
+        "PAD10_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 25,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H4_2",
+        "PAD14_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 33,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H5_2",
+        "PAD18_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 41,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H6_2",
+        "PAD22_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 309,
+      "nets": [
+        "3.3V"
+      ],
+      "pins": [
+        "H10_1",
+        "H15_1",
+        "H16_1",
+        "H22_1",
+        "H7_1",
+        "PAD25_1",
+        "PAD35_1",
+        "PAD58_1",
+        "PAD60_1",
+        "PAD72_1",
+        "PAD89_1",
+        "PAD90_2",
+        "U1_1",
+        "U1_2"
+      ],
+      "tracks_mm_by_width": {
+        "1.0": 208.478
+      },
+      "shape_count": 40
+    },
+    {
+      "root": 51,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H7_4",
+        "PAD28_4"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 52,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H8_3",
+        "PAD29_3"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 55,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H9_3",
+        "PAD32_3"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 282,
+      "nets": [
+        "8.4V"
+      ],
+      "pins": [
+        "H20_1",
+        "H21_1",
+        "H24_2",
+        "H25_2",
+        "H9_2",
+        "PAD33_2",
+        "PAD69_1",
+        "PAD71_1",
+        "PAD84_2",
+        "PAD87_2"
+      ],
+      "tracks_mm_by_width": {
+        "1.0": 107.736
+      },
+      "shape_count": 20
+    },
+    {
+      "root": 61,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H10_4",
+        "PAD38_4"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 76,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H13_2",
+        "PAD53_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 78,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H14_2",
+        "PAD55_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 80,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H15_2",
+        "PAD57_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 82,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H16_2",
+        "PAD59_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 84,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H17_2",
+        "PAD61_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 296,
+      "nets": [
+        "+5V"
+      ],
+      "pins": [
+        "H17_1",
+        "H19_1",
+        "PAD170_1",
+        "PAD62_1",
+        "PAD67_1",
+        "PAD91_3",
+        "PAD92_4",
+        "U1_3",
+        "U1_4",
+        "U3_1"
+      ],
+      "tracks_mm_by_width": {
+        "1.0": 115.947
+      },
+      "shape_count": 26
+    },
+    {
+      "root": 86,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H18_3",
+        "PAD63_3"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 89,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H19_2",
+        "PAD66_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 91,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H20_2",
+        "PAD68_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 93,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H21_2",
+        "PAD70_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 96,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H22_2",
+        "PAD73_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 103,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H23_3",
+        "PAD80_3"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 106,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H24_3",
+        "PAD83_3"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 109,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "H25_3",
+        "PAD86_3"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 124,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "PAD96_13",
+        "U1_13"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 125,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "PAD97_14",
+        "U1_14"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 172,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "PAD132_1",
+        "U2_1"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 173,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "PAD133_2",
+        "U2_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 174,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "PAD134_3",
+        "U2_3"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 175,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "PAD135_4",
+        "U2_4"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    },
+    {
+      "root": 238,
+      "nets": [
+        "GND"
+      ],
+      "pins": [
+        "PAD169_2",
+        "U3_2"
+      ],
+      "tracks_mm_by_width": {},
+      "shape_count": 2
+    }
+  ],
+  "closest_clearances": [
+    {
+      "gap_mm": 0.152,
+      "layer": "T",
+      "shape_ids": [
+        128,
+        394
+      ],
+      "roots": [
+        234,
+        394
+      ]
+    },
+    {
+      "gap_mm": 0.18882,
+      "layer": "T",
+      "shape_ids": [
+        192,
+        416
+      ],
+      "roots": [
+        192,
+        99
+      ]
+    },
+    {
+      "gap_mm": 0.236661,
+      "layer": "T",
+      "shape_ids": [
+        193,
+        416
+      ],
+      "roots": [
+        193,
+        99
+      ]
+    },
+    {
+      "gap_mm": 0.236661,
+      "layer": "T",
+      "shape_ids": [
+        193,
+        417
+      ],
+      "roots": [
+        193,
+        99
+      ]
+    },
+    {
+      "gap_mm": 0.23715,
+      "layer": "B",
+      "shape_ids": [
+        611,
+        832
+      ],
+      "roots": [
+        97,
+        232
+      ]
+    },
+    {
+      "gap_mm": 0.24318,
+      "layer": "T",
+      "shape_ids": [
+        192,
+        364
+      ],
+      "roots": [
+        192,
+        367
+      ]
+    },
+    {
+      "gap_mm": 0.24318,
+      "layer": "T",
+      "shape_ids": [
+        193,
+        364
+      ],
+      "roots": [
+        193,
+        367
+      ]
+    },
+    {
+      "gap_mm": 0.24318,
+      "layer": "T",
+      "shape_ids": [
+        188,
+        372
+      ],
+      "roots": [
+        188,
+        375
+      ]
+    },
+    {
+      "gap_mm": 0.24318,
+      "layer": "T",
+      "shape_ids": [
+        189,
+        372
+      ],
+      "roots": [
+        189,
+        375
+      ]
+    },
+    {
+      "gap_mm": 0.24318,
+      "layer": "T",
+      "shape_ids": [
+        132,
+        382
+      ],
+      "roots": [
+        132,
+        391
+      ]
+    },
+    {
+      "gap_mm": 0.24318,
+      "layer": "T",
+      "shape_ids": [
+        136,
+        435
+      ],
+      "roots": [
+        97,
+        440
+      ]
+    },
+    {
+      "gap_mm": 0.24318,
+      "layer": "T",
+      "shape_ids": [
+        137,
+        435
+      ],
+      "roots": [
+        232,
+        440
+      ]
+    }
+  ]
+}

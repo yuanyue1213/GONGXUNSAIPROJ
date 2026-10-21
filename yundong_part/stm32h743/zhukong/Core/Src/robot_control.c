@@ -7,6 +7,7 @@
 
 #include "robot_control.h"
 #include "zdt_motor.h"
+#include "zdt_motor_transport.h"
 #include "lift_motor.h"
 #include "servo_control.h"
 #include "camera_link.h"
@@ -17,6 +18,7 @@
 #include "../../../../shared/arm_vector_math.h"
 #include "../../../../shared/motor_status_guard.h"
 #include "../../../../shared/task_protocol.h"
+#include "../../../../shared/route_move_protocol.h"
 #include <stdio.h>
 
 #include <errno.h>
@@ -138,6 +140,14 @@ static uint8_t s_reached_mask;
 static bool s_stop_pending;
 static bool s_wheel_move_reached;
 static MotorStatusGuard s_wheel_status_guard[4], s_arm_status_guard, s_lift_status_guard;
+static struct {
+    bool active,reached;
+    uint32_t started,duration,min_duration,last_status;
+    unsigned wheel,confirmed_scans;
+    uint8_t reached_mask;
+    const char *reason;
+    MotorStatusGuard guard[4];
+} s_route;
 /* USART3 中断逐字节写入环形队列，主循环取出后组帧。
  * ISR 不解析命令、不等待电机 ACK，避免长时间占用中断。 */
 static uint8_t s_rx_byte;
@@ -880,6 +890,7 @@ static void RobotControl_ArmReceive(void)
 /* 上电只开启接收；舵机姿态和两轴零点由 App 的 I 命令初始化。 */
 void RobotControl_Init(UART_HandleTypeDef *command_uart, bool wheel_uart_ready)
 {
+    memset(&s_route,0,sizeof(s_route));
     GyroTurn_Init();
     memset(s_wheel_status_guard, 0, sizeof(s_wheel_status_guard));
     s_arm_status_guard = s_lift_status_guard = (MotorStatusGuard){0};
@@ -1001,8 +1012,12 @@ void RobotControl_Process(void)
 }
 
 /* HAL 收满一个字节后调用；只处理命令串口，入队后立即挂接下一字节。 */
+/* Standalone control tests may omit the hardware motor transport. */
+__attribute__((weak)) bool ZDT_Motor_RxCallback(UART_HandleTypeDef *uart) { (void)uart; return false; }
+__attribute__((weak)) bool ZDT_Motor_ErrorCallback(UART_HandleTypeDef *uart) { (void)uart; return false; }
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
+    if (ZDT_Motor_RxCallback(huart)) return;
     if (ImuLink_RxCallback(huart)) return;
     if (CameraLink_RxCallback(huart)) return;
     if (huart != s_command_uart) return;
@@ -1018,6 +1033,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
+    if (ZDT_Motor_ErrorCallback(huart)) return;
     if (ImuLink_ErrorCallback(huart)) return;
     if (CameraLink_ErrorCallback(huart)) return;
     if (huart != s_command_uart) return;
@@ -1027,6 +1043,45 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     __HAL_UART_CLEAR_NEFLAG(huart);
     __HAL_UART_CLEAR_FEFLAG(huart);
     RobotControl_ArmReceive();
+}
+
+static void RobotControl_EndRoute(bool reached,const char *reason)
+{
+    s_route.reason=reason;
+    s_exec_failed=!reached;
+    s_stop_pending=RobotControl_StopMotors()!=HAL_OK;
+    s_route.reached=reached; /* StopMotors clears the generic completion latch. */
+    if(!s_stop_pending) s_motion='S';
+}
+static void RobotControl_TickRoute(void)
+{
+    uint32_t now=HAL_GetTick(),elapsed=now-s_route.started;
+    if(elapsed>=s_route.duration+ROUTE_MOVE_FINISH_GRACE_MS) {
+        RobotControl_EndRoute(false,"ROUTE_TIMEOUT"); return;
+    }
+    /* Estimated ramp duration is a timeout budget only. Never wait for it
+     * after fresh driver feedback proves all wheels reached. */
+    if(elapsed<ROUTE_MOVE_START_GUARD_MS) return;
+    if((uint32_t)(now-s_route.last_status)<ROUTE_MOVE_STATUS_MS) return;
+    s_route.last_status=now;
+    uint8_t flags=0,id=(uint8_t)(s_route.wheel+1U);
+    if(ZDT_Motor_ReadStatus(id,&flags)!=HAL_OK) {
+        RobotControl_EndRoute(false,"MOTOR_FAULT"); return;
+    }
+    if(MotorStatusGuard_Fault(&s_route.guard[id-1U],flags,HAL_GetTick())) {
+        ZDT_Motor_Fault(id,"DRIVER_FAULT");
+        RobotControl_EndRoute(false,"MOTOR_FAULT"); return;
+    }
+    uint8_t bit=(uint8_t)(1U<<(id-1U));
+    if((flags&3U)==3U) s_route.reached_mask|=bit;
+    else s_route.reached_mask&=(uint8_t)~bit;
+    s_route.wheel=(s_route.wheel+1U)%4U;
+    if(s_route.wheel==0U) {
+        if(s_route.reached_mask==15U&&elapsed>=s_route.min_duration) ++s_route.confirmed_scans;
+        else s_route.confirmed_scans=0;
+        s_route.reached_mask=0; /* Each confirmation must contain four fresh replies. */
+        if(s_route.confirmed_scans>=ROUTE_MOVE_CONFIRM_SCANS) RobotControl_EndRoute(true,"0");
+    }
 }
 
 /* 主循环中的任务维护：停车重试优先，其次检查底盘总时限和电机状态。
@@ -1052,6 +1107,7 @@ void RobotControl_Tick(void)
             s_motion = 'S';
         }
     }
+    else if (s_route.active) RobotControl_TickRoute();
     else if ((s_motion != 'S') &&
         ((uint32_t)(HAL_GetTick() - s_move_started_tick) >= ROBOT_MOVE_MAX_TIME_MS))
     {
@@ -1217,6 +1273,7 @@ static HAL_StatusTypeDef RobotControl_EnableMotors(void)
  * 只有四轮应答均成功才返回 HAL_OK。 */
 static HAL_StatusTypeDef RobotControl_StopMotors(void)
 {
+    s_route.active=false;
     s_wheel_move_reached = false;
     static const ZDT_WheelId wheels[ZDT_MOTOR_WHEEL_COUNT] =
     {
@@ -1258,10 +1315,11 @@ static HAL_StatusTypeDef RobotControl_ApplyWheelPulses(char direction, int32_t p
 
     double targets[ZDT_MOTOR_WHEEL_COUNT];
     switch (direction) {
-    case 'F': RobotChassis_WheelTargets(pulses, 0, 0, targets); break;
-    case 'B': RobotChassis_WheelTargets(-pulses, 0, 0, targets); break;
-    case 'L': RobotChassis_WheelTargets(0, pulses, 0, targets); break;
-    case 'R': RobotChassis_WheelTargets(0, -pulses, 0, targets); break;
+    /* Real chassis calibration: reverse translation, preserve confirmed yaw. */
+    case 'F': RobotChassis_WheelTargets(-pulses, 0, 0, targets); break;
+    case 'B': RobotChassis_WheelTargets(pulses, 0, 0, targets); break;
+    case 'L': RobotChassis_WheelTargets(0, -pulses, 0, targets); break;
+    case 'R': RobotChassis_WheelTargets(0, pulses, 0, targets); break;
     case 'C': RobotChassis_WheelTargets(0, 0, pulses, targets); break;
     case 'W': RobotChassis_WheelTargets(0, 0, -pulses, targets); break;
     default: return HAL_ERROR;
@@ -1596,7 +1654,7 @@ static void RobotControl_HandleFrame(const char *frame)
 }
 
 /* Task commands opt into feedback; old manual commands retain their behavior. */
-typedef enum { EXEC_MOVE, EXEC_SEQUENCE, EXEC_BASE, EXEC_PULSE, EXEC_POSE, EXEC_GYRO } ExecKind;
+typedef enum { EXEC_MOVE, EXEC_SEQUENCE, EXEC_BASE, EXEC_PULSE, EXEC_POSE, EXEC_GYRO, EXEC_ROUTE } ExecKind;
 static ExecKind s_exec_kind;
 static uint32_t s_exec_id, s_exec_tick, s_exec_hash;
 typedef struct { uint32_t id,hash; const char *state,*reason; } ExecResult;
@@ -1667,6 +1725,11 @@ static void RobotControl_TickReport(void)
         RobotControl_FinishReport("ERROR","TIMEOUT"); RobotControl_StopEverything(); return;
     }
     if(!RobotControl_AllIdle()) return;
+    if(s_exec_kind==EXEC_ROUTE) {
+        bool done=s_route.reached&&!s_exec_failed;
+        RobotControl_FinishReport(done?"DONE":"ERROR",done?"0":s_route.reason?s_route.reason:"FAULT");
+        return;
+    }
     bool done=!s_exec_failed && ((s_exec_kind==EXEC_MOVE||s_exec_kind==EXEC_PULSE)?
         s_wheel_move_reached:s_exec_kind==EXEC_SEQUENCE?s_exec_sequence_done:true);
     RobotControl_FinishReport(done?"DONE":"ERROR",done?"0":"FAULT");
@@ -1745,8 +1808,10 @@ static void RobotControl_Dispatch(const char *frame)
     if(length<0||(size_t)length>=sizeof(command)) { RobotControl_Report(id,"ERROR","FORMAT"); return; }
     RobotDistanceCommand move; RobotSequenceCommand settings; RobotBaseCommand base; RobotArmPoseCommand pose;
     GyroCommand gyro;
+    RouteMove route;
     uint32_t pulses=0,rpm=0; char direction=0;
-    if(GyroProtocol_Parse(command,&gyro)&&s_wheel_uart_ready) s_exec_kind=EXEC_GYRO;
+    if(RouteMove_Parse(command,&route)&&s_wheel_uart_ready) s_exec_kind=EXEC_ROUTE;
+    else if(GyroProtocol_Parse(command,&gyro)&&s_wheel_uart_ready) s_exec_kind=EXEC_GYRO;
     else if(RobotProtocol_ParseMove(command,&move)&&RobotProtocol_MovePulses(&move)>0U&&s_wheel_uart_ready) s_exec_kind=EXEC_MOVE;
     else if(strncmp(command,"STATE_V2,",9U)==0&&RobotProtocol_ParseSequence(command,&settings)&&
             settings.mode!='T'&&RobotControl_SequenceIdle()) s_exec_kind=EXEC_SEQUENCE;
@@ -1766,7 +1831,24 @@ static void RobotControl_Dispatch(const char *frame)
     } else { RobotControl_Report(id,"ERROR","INVALID_OR_NOT_READY"); return; }
     s_exec_id=id; s_exec_hash=hash; s_exec_tick=HAL_GetTick();
     s_exec_active=true; s_exec_failed=s_exec_sequence_done=false;
-    if(s_exec_kind==EXEC_GYRO) {
+    if(s_exec_kind==EXEC_ROUTE) {
+        memset(&s_route,0,sizeof(s_route));
+        s_route.duration=RouteMove_Duration(&route);
+        s_route.min_duration=RouteMove_MinDuration(&route);
+        s_route.reason="START";
+        double targets[4]; int32_t pulses[4];
+        RobotChassis_WheelTargets(route.direction=='F'?-(double)route.pulses:route.direction=='B'?route.pulses:0,
+            route.direction=='L'?-(double)route.pulses:route.direction=='R'?route.pulses:0,
+            route.direction=='C'?route.pulses:route.direction=='W'?-(double)route.pulses:0,targets);
+        for(unsigned i=0;i<4U;++i) pulses[i]=(int32_t)targets[i];
+        if(RobotControl_EnableMotors()!=HAL_OK||
+           ZDT_Motor_MoveWheelSynchronous(pulses,(uint16_t)route.rpm,ROUTE_MOVE_ACCELERATION)!=HAL_OK) {
+            s_exec_failed=true; s_stop_pending=RobotControl_StopMotors()!=HAL_OK;
+        } else {
+            s_route.active=true; s_route.started=s_route.last_status=HAL_GetTick();
+            s_motion=route.direction;
+        }
+    } else if(s_exec_kind==EXEC_GYRO) {
         if(!GyroTurn_Start(&gyro)) {
             RobotControl_FinishReport("ERROR",GyroTurn_Reason()); return;
         }

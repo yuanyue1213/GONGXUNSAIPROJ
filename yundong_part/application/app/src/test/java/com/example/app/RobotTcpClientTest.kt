@@ -230,7 +230,7 @@ class RobotTcpClientTest {
                     socket.soTimeout = 3000
                     val reader = socket.getInputStream().bufferedReader()
                     val first = reader.readLine()
-                    assertTrue(first.startsWith("EXEC,") && first.contains(",DRIVE,F,"))
+                    assertTrue(first.startsWith("EXEC,") && first.contains(",ROUTE_MOVE,F,"))
                     // Never send ACK/EXEC: missing replies must not produce an automatic S.
                     socket.soTimeout = 2500
                     try {
@@ -254,9 +254,9 @@ class RobotTcpClientTest {
                 client.sendMotion('S')
                 val secondId = client.sendMove(move)
                 val trace = result.get(3, TimeUnit.SECONDS)
-                assertEquals("EXEC,$firstId,DRIVE,F,9889,45,3200", trace[0])
+                assertEquals("EXEC,$firstId,ROUTE_MOVE,F,9889,45,3200", trace[0])
                 assertTrue(trace[1].startsWith("CMD,") && trace[1].endsWith(",S"))
-                assertEquals("EXEC,$secondId,DRIVE,F,9889,45,3200", trace[2])
+                assertEquals("EXEC,$secondId,ROUTE_MOVE,F,9889,45,3200", trace[2])
                 assertNotEquals(firstId, secondId)
             } finally {
                 client.close()

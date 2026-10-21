@@ -14,17 +14,17 @@ internal data class DistanceMove(
 ) {
     fun frame(sequence: Long): String = if (rotationDegrees != null)
         "EXEC,$sequence,TURN,$direction,${java.lang.String.format(java.util.Locale.US, "%.1f", rotationDegrees)},$speedRpm\n"
-        else if (direction in "FB") {
+        else {
             val pulses = (distanceMm.toLong() * pulsesPerMetre + 500L) / 1000L
-            "EXEC,$sequence,DRIVE,$direction,$pulses,$speedRpm,$wheelPulses\n"
-        } else "EXEC,$sequence,MOVE,$direction,$distanceMm,$speedRpm,$pulsesPerMetre\n"
+            "EXEC,$sequence,ROUTE_MOVE,$direction,$pulses,$speedRpm,$wheelPulses\n"
+        }
 
     companion object {
         fun gyroRotationFromInputs(direction: Char, angle: String, speed: String): DistanceMove? {
             val tenths = try { java.math.BigDecimal(angle.trim()).movePointRight(1).intValueExact() }
                 catch (_: IllegalArgumentException) { return null } catch (_: ArithmeticException) { return null }
             val rpm = speed.toIntOrNull() ?: return null
-            if (direction !in "CW" || tenths !in 1..3600 || rpm !in 5..60) return null
+            if (direction !in "CW" || tenths !in 1..3600 || rpm !in 5..120) return null
             return DistanceMove(direction,0,rpm,0,tenths/10.0)
         }
         fun rotationFromInputs(
@@ -38,7 +38,7 @@ internal data class DistanceMove(
             val calibration = fromInputs(direction, "1000", speed, diameter, wheelPulses, correction)
                 ?: return null
             if (direction !in "CW" || !degrees.isFinite() || degrees !in 0.1..360.0 ||
-                calibration.speedRpm !in 5..60 || !baseMm.isFinite() || baseMm !in 50.0..2000.0 ||
+                calibration.speedRpm !in 5..120 || !baseMm.isFinite() || baseMm !in 50.0..2000.0 ||
                 !trackMm.isFinite() || trackMm !in 50.0..2000.0) return null
             val wheelTravelMm = PI * (baseMm + trackMm) * degrees / 360.0
             val pulses = (wheelTravelMm * calibration.pulsesPerMetre / 1000.0).roundToInt()

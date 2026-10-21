@@ -24,10 +24,10 @@ extern "C" {
 #define ZDT_MOTOR_WHEEL_COUNT       4U
 #define ZDT_MOTOR_MAX_SPEED_RPM      3000U
 
-/* Completed STOP/status transactions for read-only SWD inspection. Slot 0..3
+/* Completed STOP/status/position transactions for read-only SWD inspection. Slot 0..3
  * corresponds to motor ID 1..4. An even unchanged publish_sequence means the
  * snapshot is stable. These records never transmit commands themselves. */
-#define ZDT_DIAGNOSTIC_RX_BYTES 32U
+#define ZDT_DIAGNOSTIC_RX_BYTES 128U
 typedef struct {
     uint32_t attempts,started_tick,finished_tick;
     uint32_t tx_result,rx_result,result,uart_error;
@@ -37,7 +37,7 @@ typedef struct {
 } ZDT_RawTransaction;
 typedef struct {
     uint32_t publish_sequence;
-    ZDT_RawTransaction stop,status;
+    ZDT_RawTransaction stop,status,position;
 } ZDT_MotorDiagnostics;
 extern volatile ZDT_MotorDiagnostics g_zdt_diagnostics[ZDT_MOTOR_WHEEL_COUNT];
 
@@ -58,7 +58,7 @@ typedef enum
 } ZDT_WheelId;
 
 /* 脉冲数组顺序：左前、右前、右后、左后。
- * 正号映射为左侧 CCW、右侧 CW；当前车体前进 F 使用负脉冲。 */
+ * 正号映射为左侧 CCW、右侧 CW；当前车体前进 F 使用正脉冲。 */
 typedef enum
 {
     ZDT_WHEEL_INDEX_LEFT_UP = 0U,
@@ -87,19 +87,27 @@ HAL_StatusTypeDef ZDT_Motor_Enable(uint8_t id, bool enable);
 HAL_StatusTypeDef ZDT_Motor_MoveWheelPulses(
     const int32_t wheel_pulses[ZDT_MOTOR_WHEEL_COUNT],
     uint16_t speed_rpm, uint8_t acceleration);
+/** Queue four individual relative FD commands, confirm each ACK, then FF sync.
+ * On any failure no further commands/trigger are sent; caller must stop all. */
+HAL_StatusTypeDef ZDT_Motor_MoveWheelSynchronous(const int32_t pulses[4],
+    uint16_t rpm, uint8_t acceleration);
 /** Combined translation/rotation: per-wheel speeds scale with displacement. */
 HAL_StatusTypeDef ZDT_Motor_MoveWheelProfile(
     const int32_t wheel_pulses[ZDT_MOTOR_WHEEL_COUNT],
     const uint16_t speed_rpm[ZDT_MOTOR_WHEEL_COUNT], uint8_t acceleration);
 /** AA + four Emm F6 velocity commands, simultaneous update; zero RPM allowed. */
 HAL_StatusTypeDef ZDT_Motor_SetWheelSpeeds(const int16_t rpm[4], uint8_t acceleration);
+/** Four acknowledged F6 commands followed by one FF synchronous trigger. */
+HAL_StatusTypeDef ZDT_Motor_SetWheelSpeedsSynchronous(const int16_t rpm[4], uint8_t acceleration);
 
-/** 读取 3A 状态：bit0 使能，bit1 到位，bit2 堵转，bit3 堵转保护。 */
+/** 读取 3A 状态：bit0 使能，bit1 到位，bit2 堵转，bit3 堵转保护。
+ * 接收失败最多重读一次；合法故障状态直接返回，不重读掩盖。 */
 HAL_StatusTypeDef ZDT_Motor_ReadStatus(uint8_t id, uint8_t *flags);
 /* Failure notification; id 0 means the combined chassis command, not a known wheel. */
 void ZDT_Motor_Fault(uint8_t id, const char *operation);
 /** Emm 36 actual encoder position, 65536 counts/revolution, normalized to
- * the same signed wheel convention as SetWheelSpeeds (not microstep pulses). */
+ * the same signed wheel convention as SetWheelSpeeds (not microstep pulses).
+ * One RX-failure retry is allowed; two receive deadlines plus TX time maximum. */
 HAL_StatusTypeDef ZDT_Motor_ReadWheelPosition(uint8_t id, int64_t *counts);
 
 /** @brief 以电机内部减速度停止。 */

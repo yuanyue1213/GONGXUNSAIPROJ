@@ -8,6 +8,7 @@ typedef struct { int instance; uint32_t RxState; uint32_t ErrorCode; } UART_Hand
 typedef enum { HAL_OK, HAL_ERROR, HAL_BUSY, HAL_TIMEOUT } HAL_StatusTypeDef;
 #define HAL_MAX_DELAY UINT32_MAX
 #define USART3_IRQn 0
+#define USART1_IRQn 3
 #define UART4_IRQn 1
 #define UART7_IRQn 2
 #define __HAL_UART_CLEAR_OREFLAG(x) ((void)(x))
