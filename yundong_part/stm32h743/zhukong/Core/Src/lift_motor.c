@@ -1,5 +1,6 @@
 #include "lift_motor.h"
 #include "zdt_motor.h"
+#include <string.h>
 
 #define LIFT_MOTOR_ID          1U
 #define FORE_AFT_MOTOR_ID      2U
@@ -26,9 +27,7 @@ static uint8_t ArmMotor_DetectFirmware(uint8_t id)
 {
     uint8_t request[] = {id, 0x42U, 0x6CU, ZDT_MOTOR_FRAME_TAIL};
     uint8_t response[37];
-    uint8_t previous = 0U;
-    uint8_t byte;
-    uint8_t length;
+    unsigned count=0U, scanned=0U;
     uint32_t start;
 
     if ((id < LIFT_MOTOR_ID) || (id > FORE_AFT_MOTOR_ID))
@@ -48,40 +47,41 @@ static uint8_t ArmMotor_DetectFirmware(uint8_t id)
     }
 
     start = HAL_GetTick();
-    while ((uint32_t)(HAL_GetTick() - start) < 40U)
+    /* Scan a complete candidate before accepting it. Query echoes and stale
+     * partial frames must not hide the valid configuration reply behind them. */
+    while ((uint32_t)(HAL_GetTick() - start) < 70U && scanned++<128U)
     {
-        uint32_t remaining = 40U - (uint32_t)(HAL_GetTick() - start);
-        if (HAL_UART_Receive(s_uart, &byte, 1U, remaining) != HAL_OK)
-            return ARM_FIRMWARE_UNKNOWN;
-        if ((previous == id) && (byte == 0x42U)) break;
-        previous = byte;
+        uint32_t elapsed=HAL_GetTick()-start;
+        if(elapsed>=70U) break;
+        if (HAL_UART_Receive(s_uart, &response[count], 1U, 70U-elapsed) != HAL_OK) break;
+        ++count;
+        while(count) {
+            if(response[0]!=id || (count>=2U&&response[1]!=0x42U)) {
+                memmove(response,response+1,--count); continue;
+            }
+            if(count<3U) break;
+            unsigned length=response[2];
+            if(length!=0x21U&&length!=0x25U) {
+                s_last_error[id-1U]="BAD_REPLY";
+                memmove(response,response+1,--count); continue;
+            }
+            if(count<length) break;
+            if(response[length-1U]==ZDT_MOTOR_FRAME_TAIL &&
+               response[3]==(length==0x21U?0x15U:0x18U)) {
+                s_firmware[id-1U]=length==0x21U?ARM_FIRMWARE_EMM:ARM_FIRMWARE_X;
+                s_last_error[id-1U]="NONE";
+                return s_firmware[id-1U];
+            }
+            s_last_error[id-1U]="BAD_REPLY";
+            memmove(response,response+1,--count);
+        }
     }
-    if ((previous != id) || (byte != 0x42U))
-        return ARM_FIRMWARE_UNKNOWN;
-    if (HAL_UART_Receive(s_uart, &length, 1U, 10U) != HAL_OK)
-        return ARM_FIRMWARE_UNKNOWN;
-    if ((length != 0x21U) && (length != 0x25U))
-    {
-        s_last_error[id - 1U] = "BAD_REPLY";
-        return ARM_FIRMWARE_UNKNOWN;
-    }
-    response[0] = id;
-    response[1] = 0x42U;
-    response[2] = length;
-    if (HAL_UART_Receive(s_uart, &response[3], length - 3U, 20U) != HAL_OK)
-        return ARM_FIRMWARE_UNKNOWN;
-    if (response[length - 1U] != ZDT_MOTOR_FRAME_TAIL)
-    {
-        s_last_error[id - 1U] = "BAD_REPLY";
-        return ARM_FIRMWARE_UNKNOWN;
-    }
-    s_firmware[id - 1U] =
-        (length == 0x21U) ? ARM_FIRMWARE_EMM : ARM_FIRMWARE_X;
-    s_last_error[id - 1U] = "NONE";
-    return s_firmware[id - 1U];
+    return ARM_FIRMWARE_UNKNOWN;
 }
 
-static HAL_StatusTypeDef LiftMotor_Send(const uint8_t *frame, uint16_t length,
+__attribute__((weak)) void LiftMotor_Fault(uint8_t id, const char *operation)
+{ (void)id; (void)operation; }
+static HAL_StatusTypeDef send_command(const uint8_t *frame, uint16_t length,
                                         uint8_t id, uint8_t function)
 {
     uint8_t response[4];
@@ -143,6 +143,14 @@ static HAL_StatusTypeDef LiftMotor_Send(const uint8_t *frame, uint16_t length,
     return HAL_TIMEOUT;
 }
 
+static HAL_StatusTypeDef LiftMotor_Send(const uint8_t *frame, uint16_t length,
+                                        uint8_t id, uint8_t function)
+{
+    HAL_StatusTypeDef result=send_command(frame,length,id,function);
+    if(result!=HAL_OK) LiftMotor_Fault(id,function==0xFEU?"STOP":function==0xF3U?"ENABLE":"COMMAND");
+    return result;
+}
+
 /* USART2 独立连接升降 ID1、伸缩 ID2，与底盘 USART1 的相同 ID 不冲突。
  * 初始化仅清空使能、固件识别及错误状态，不让机械臂运动。 */
 void LiftMotor_Init(UART_HandleTypeDef *uart)
@@ -175,7 +183,7 @@ static HAL_StatusTypeDef ArmMotor_Move(uint8_t id, bool *enabled,
          0x00U, ZDT_MOTOR_FRAME_TAIL};
     uint8_t firmware = ArmMotor_DetectFirmware(id);
 
-    if (firmware == ARM_FIRMWARE_UNKNOWN) return HAL_ERROR;
+    if (firmware == ARM_FIRMWARE_UNKNOWN) { LiftMotor_Fault(id,"FIRMWARE_READ"); return HAL_ERROR; }
 
     if (!*enabled)
     {
@@ -228,7 +236,7 @@ static HAL_StatusTypeDef ArmMotor_MoveAngleById(uint8_t id, ZDT_Direction direct
         (!absolute && angle_tenths > 36000U) || speed_rpm < 1U || speed_rpm > 600U ||
         pulses_per_rev < 200U || pulses_per_rev > 51200U) return HAL_ERROR;
     uint8_t firmware = ArmMotor_DetectFirmware(id);
-    if (firmware == ARM_FIRMWARE_UNKNOWN) return HAL_ERROR;
+    if (firmware == ARM_FIRMWARE_UNKNOWN) { LiftMotor_Fault(id,"FIRMWARE_READ"); return HAL_ERROR; }
     uint64_t pulse_value = ((uint64_t)angle_tenths * pulses_per_rev + 1800U) / 3600U;
     if (firmware == ARM_FIRMWARE_EMM && (pulse_value > UINT32_MAX || (!absolute && pulse_value == 0U))) return HAL_ERROR;
     uint32_t pulses = (uint32_t)pulse_value;
@@ -277,14 +285,17 @@ HAL_StatusTypeDef ArmMotor_MoveAbsolute(uint8_t id, int64_t angle_tenths,
         (uint32_t)(angle_tenths < 0 ? -angle_tenths : angle_tenths), rpm, pulses_per_rev, true);
 }
 
-bool ArmMotor_ReadPosition(uint8_t id, int64_t *angle_tenths)
+static bool read_position(uint8_t id, int64_t *angle_tenths)
 {
     if (angle_tenths == NULL || (id != 1U && id != 2U)) return false;
     uint8_t firmware = ArmMotor_DetectFirmware(id);
     if (firmware == ARM_FIRMWARE_UNKNOWN) return false;
     uint8_t request[] = {id, 0x36U, ZDT_MOTOR_FRAME_TAIL};
     uint8_t response[8], byte, count = 0U;
-    if (HAL_UART_Transmit(s_uart, request, sizeof(request), 20U) != HAL_OK) return false;
+    s_last_error[id-1U]="NO_REPLY";
+    if (HAL_UART_Transmit(s_uart, request, sizeof(request), 20U) != HAL_OK) {
+        s_last_error[id-1U]="TX"; return false;
+    }
     uint32_t start = HAL_GetTick();
     while ((uint32_t)(HAL_GetTick() - start) < 20U) {
         uint32_t remaining = 20U - (uint32_t)(HAL_GetTick() - start);
@@ -297,12 +308,22 @@ bool ArmMotor_ReadPosition(uint8_t id, int64_t *angle_tenths)
             int64_t angle = firmware == ARM_FIRMWARE_X ? raw :
                 (int64_t)(((uint64_t)raw * 3600U + 32768U) / 65536U);
             *angle_tenths = response[2] ? -angle : angle;
+            s_last_error[id-1U]="NONE";
             return true;
         }
+        s_last_error[id-1U]="BAD_REPLY";
         for (unsigned i = 0; i < 7U; ++i) response[i] = response[i+1];
         count = 7U;
     }
     return false;
+}
+
+bool ArmMotor_ReadPosition(uint8_t id, int64_t *angle_tenths)
+{
+    bool ok=read_position(id,angle_tenths);
+    if(!ok&&id>=1U&&id<=2U)
+        LiftMotor_Fault(id,s_firmware[id-1U]==ARM_FIRMWARE_UNKNOWN?"FIRMWARE_READ":"POSITION_READ");
+    return ok;
 }
 
 HAL_StatusTypeDef ArmMotor_StopForeAft(void)
@@ -337,7 +358,7 @@ const char *LiftMotor_LastError(uint8_t id)
     return s_last_error[id - 1U];
 }
 
-bool LiftMotor_ReadStatus(uint8_t id, uint8_t *status)
+static bool read_status(uint8_t id, uint8_t *status)
 {
     uint8_t request[] = {id, 0x3AU, ZDT_MOTOR_FRAME_TAIL};
     uint8_t response[4];
@@ -369,4 +390,11 @@ bool LiftMotor_ReadStatus(uint8_t id, uint8_t *status)
         count = 3U;
     }
     return false;
+}
+
+bool LiftMotor_ReadStatus(uint8_t id, uint8_t *status)
+{
+    bool ok=read_status(id,status);
+    if(!ok) LiftMotor_Fault(id,"STATUS_READ");
+    return ok;
 }

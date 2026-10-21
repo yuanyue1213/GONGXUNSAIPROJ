@@ -96,6 +96,8 @@ HAL_StatusTypeDef ZDT_Motor_SetWheelSpeeds(const int16_t rpm[4], uint8_t acceler
 
 /** 读取 3A 状态：bit0 使能，bit1 到位，bit2 堵转，bit3 堵转保护。 */
 HAL_StatusTypeDef ZDT_Motor_ReadStatus(uint8_t id, uint8_t *flags);
+/* Failure notification; id 0 means the combined chassis command, not a known wheel. */
+void ZDT_Motor_Fault(uint8_t id, const char *operation);
 /** Emm 36 actual encoder position, 65536 counts/revolution, normalized to
  * the same signed wheel convention as SetWheelSpeeds (not microstep pulses). */
 HAL_StatusTypeDef ZDT_Motor_ReadWheelPosition(uint8_t id, int64_t *counts);

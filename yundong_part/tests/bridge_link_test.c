@@ -22,6 +22,8 @@ int main(void)
     assert(BridgeLink_Feedback("STATUS,4,IDLE,0,0"));
     assert(BridgeLink_Feedback("ACTION,5,DONE,0"));
     assert(BridgeLink_Feedback("IMU,6,NOT_READY,INIT_SEARCH"));
+    assert(BridgeLink_Feedback("MOTOR_DIAG,CHASSIS,3,POSITION_READ"));
+    assert(BridgeLink_Feedback("MOTOR_DIAG,ARM,1,ORIGIN_READ"));
     assert(!BridgeLink_Feedback("CMD,0,S"));
     puts("PASS: manual QUERY/PING/IMU forwarding, EXEC wheel and gyro validation, feedback whitelist");
 }

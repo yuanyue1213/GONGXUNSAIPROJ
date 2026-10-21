@@ -4,8 +4,9 @@
 /* User mounting: X forward, Y right, Z down; controller uses clockwise positive.
  * Euler yaw and body GZ can have different signs when mounted upside down.
  * Verify each independently with a hand rotation before enabling motor turns. */
-#define IMU_YAW_SIGN 1.0f
-#define IMU_RATE_SIGN 1.0f
+/* Reverse both feedback quantities for the current chassis installation. */
+#define IMU_YAW_SIGN -1.0f
+#define IMU_RATE_SIGN -1.0f
 #define IMU_QUEUE 512U
 static UART_HandleTypeDef *s_uart;
 static uint8_t s_byte,s_data[IMU_QUEUE],s_frame[11];

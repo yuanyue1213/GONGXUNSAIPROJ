@@ -32,6 +32,33 @@ static bool s_exec_active, s_exec_failed, s_exec_sequence_done;
 static void RobotControl_Dispatch(const char *frame);
 static void RobotControl_TickReport(void);
 static void RobotControl_ResetReports(void);
+static void RobotControl_SendLine(const char *line);
+typedef struct { const char *operation; uint32_t sent; bool pending, reported; } MotorFault;
+/* CHASSIS slots 0..4 (0=combined command), ARM slots 5..6. Main-loop only. */
+static MotorFault s_motor_faults[7];
+static void record_motor_fault(unsigned slot, const char *operation)
+{
+    if(slot>=7U || s_motor_faults[slot].pending) return;
+    MotorFault *fault=&s_motor_faults[slot];
+    if(fault->reported && strcmp(fault->operation,operation)==0 &&
+       (uint32_t)(HAL_GetTick()-fault->sent)<2000U) return;
+    fault->operation=operation; fault->pending=true;
+}
+void ZDT_Motor_Fault(uint8_t id, const char *operation)
+{ if(id<=4U) record_motor_fault(id,operation); }
+void LiftMotor_Fault(uint8_t id, const char *operation)
+{ if(id>=1U&&id<=2U) record_motor_fault(4U+id,operation); }
+static void report_motor_faults(void)
+{
+    for(unsigned i=0;i<7U;++i) {
+        MotorFault *fault=&s_motor_faults[i];
+        if(!fault->pending) continue;
+        char line[80];
+        snprintf(line,sizeof(line),"MOTOR_DIAG,%s,%u,%s\n",i<5U?"CHASSIS":"ARM",i<5U?i:i-4U,fault->operation);
+        RobotControl_SendLine(line);
+        fault->pending=false; fault->reported=true; fault->sent=HAL_GetTick();
+    }
+}
 static uint16_t s_base_angle;
 static uint16_t s_turn_angle;
 static uint16_t s_gripper_angle;
@@ -152,7 +179,7 @@ static void RobotControl_TickArmMove(void)
     if (s_arm_move_stop_pending) { RobotControl_StopArmMove(); return; }
     uint32_t now = HAL_GetTick();
     if ((uint32_t)(now - s_arm_move_start_tick) >= ROBOT_ARM_MOVE_MAX_MS)
-    { RobotControl_StopArmMove(); return; }
+    { LiftMotor_Fault(2U,"MOVE_TIMEOUT"); RobotControl_StopArmMove(); return; }
     if ((uint32_t)(now - s_arm_move_status_tick) < 50U) return;
     s_arm_move_status_tick = now;
     uint8_t flags;
@@ -164,7 +191,7 @@ static void RobotControl_TickArmMove(void)
     }
     s_arm_move_last_status_tick = HAL_GetTick();
     if (MotorStatusGuard_Fault(&s_arm_status_guard, flags, HAL_GetTick()))
-    { RobotControl_StopArmMove(); return; }
+    { LiftMotor_Fault(2U,"DRIVER_FAULT"); RobotControl_StopArmMove(); return; }
     if ((flags & 0x02U) != 0U) {
         s_arm_move_reached = true;
         s_arm_move_active = false;
@@ -217,7 +244,7 @@ static void RobotControl_TickLiftAngle(void)
     if (s_lift_angle_stop_pending) { RobotControl_StopLiftAngle(); return; }
     uint32_t now = HAL_GetTick();
     if ((uint32_t)(now - s_lift_angle_start_tick) >= ROBOT_ARM_MOVE_MAX_MS)
-    { RobotControl_StopLiftAngle(); return; }
+    { LiftMotor_Fault(1U,"MOVE_TIMEOUT"); RobotControl_StopLiftAngle(); return; }
     if ((uint32_t)(now - s_lift_angle_status_tick) < ROBOT_STATUS_INTERVAL_MS) return;
     s_lift_angle_status_tick = now;
     uint8_t flags;
@@ -228,7 +255,7 @@ static void RobotControl_TickLiftAngle(void)
     }
     s_lift_angle_last_status_tick = HAL_GetTick();
     if (MotorStatusGuard_Fault(&s_lift_status_guard, flags, HAL_GetTick()))
-    { RobotControl_StopLiftAngle(); return; }
+    { LiftMotor_Fault(1U,"DRIVER_FAULT"); RobotControl_StopLiftAngle(); return; }
     if ((flags & 0x02U) != 0U) {
         s_lift_angle_reached = true;
         s_lift_angle_active = false;
@@ -254,7 +281,11 @@ static void RobotControl_CaptureOrigin(void)
 {
     int64_t arm, lift;
     /* Commit both zeros together; a partial read never enables axis movement. */
-    if (ArmMotor_ReadPosition(2U, &arm) && ArmMotor_ReadPosition(1U, &lift)) {
+    bool arm_ok=ArmMotor_ReadPosition(2U, &arm);
+    bool lift_ok=ArmMotor_ReadPosition(1U, &lift);
+    /* The driver reports the actual failing stage once (firmware/position).
+     * Do not overwrite it with a second generic origin error on retry. */
+    if (arm_ok && lift_ok) {
         s_arm_origin = arm; s_lift_origin = lift;
         s_arm_origin_valid = s_lift_origin_valid = true;
         s_origin_initializing = false;
@@ -901,6 +932,7 @@ void RobotControl_Init(UART_HandleTypeDef *command_uart, bool wheel_uart_ready)
     s_pose_active = false; s_last_pose_sequence = 0U;
     s_arm_origin_valid = s_lift_origin_valid = false;
     s_origin_initializing = false; s_last_origin_sequence = 0U; s_origin_base = 248U;
+    memset(s_motor_faults,0,sizeof(s_motor_faults));
     s_plan_active = false; s_plan_count = 0U; s_plan_mask = 0U;
     s_plan_sequence = s_last_plan_sequence = 0U;
 
@@ -1033,9 +1065,11 @@ void RobotControl_Tick(void)
         s_status_tick = HAL_GetTick();
         /* 每隔至少 50 ms 查询一个轮子，一轮四个轮子约 200 ms。
          * 3A 状态：bit0 使能，bit1 到位，bit2 堵转，bit3 堵转保护。 */
-        if ((ZDT_Motor_ReadStatus((uint8_t)(s_status_wheel + 1U), &flags) != HAL_OK) ||
+        HAL_StatusTypeDef status_result=ZDT_Motor_ReadStatus((uint8_t)(s_status_wheel+1U), &flags);
+        if ((status_result != HAL_OK) ||
             MotorStatusGuard_Fault(&s_wheel_status_guard[s_status_wheel], flags, HAL_GetTick()))
         {
+            if(status_result==HAL_OK) ZDT_Motor_Fault((uint8_t)(s_status_wheel+1U),"DRIVER_FAULT");
             s_stop_pending = (RobotControl_StopMotors() != HAL_OK);
             if (!s_stop_pending) s_motion = 'S';
         }
@@ -1055,6 +1089,7 @@ void RobotControl_Tick(void)
     }
     RobotControl_TickAlignment();
     RobotControl_TickReport();
+    report_motor_faults();
     if (!s_lift_angle_active && (s_lift_motion != 'H') &&
         ((uint32_t)(HAL_GetTick() - s_last_lift_tick) >=
          ROBOT_COMMAND_TIMEOUT_MS))

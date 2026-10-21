@@ -53,7 +53,9 @@ static const ZDT_WheelConfig s_wheel_config[ZDT_MOTOR_WHEEL_COUNT] =
 };
 
 static HAL_StatusTypeDef ZDT_Motor_WaitAck(uint8_t id, uint8_t function,ZDT_RawTransaction *record);
-HAL_StatusTypeDef ZDT_Motor_ReadWheelPosition(uint8_t id, int64_t *counts)
+__attribute__((weak)) void ZDT_Motor_Fault(uint8_t id, const char *operation)
+{ (void)id; (void)operation; }
+static HAL_StatusTypeDef read_wheel_position(uint8_t id, int64_t *counts)
 {
     if(id<1U||id>4U||counts==NULL) return HAL_ERROR;
     const uint8_t request[]={id,0x36U,ZDT_MOTOR_FRAME_TAIL};
@@ -76,6 +78,13 @@ HAL_StatusTypeDef ZDT_Motor_ReadWheelPosition(uint8_t id, int64_t *counts)
         length=7U;
     }
     return HAL_TIMEOUT;
+}
+
+HAL_StatusTypeDef ZDT_Motor_ReadWheelPosition(uint8_t id, int64_t *counts)
+{
+    HAL_StatusTypeDef result=read_wheel_position(id,counts);
+    if(result!=HAL_OK) ZDT_Motor_Fault(id,"POSITION_READ");
+    return result;
 }
 
 static HAL_StatusTypeDef ZDT_Motor_SendControl(const uint8_t *frame,
@@ -179,9 +188,10 @@ HAL_StatusTypeDef ZDT_Motor_MoveWheelProfile(
     }
     frame[index] = ZDT_MOTOR_FRAME_TAIL;
     result = ZDT_Motor_SendRaw(frame, sizeof(frame));
-    if ((result != HAL_OK) || !s_wait_for_ack) return result;
     /* AA 位置命令只等待 ID1 的 FD 接收确认，不代表四轮均到位。 */
-    return ZDT_Motor_WaitAck(1U, 0xFDU,NULL);
+    if(result==HAL_OK&&s_wait_for_ack) result=ZDT_Motor_WaitAck(1U,0xFDU,NULL);
+    if(result!=HAL_OK) ZDT_Motor_Fault(0U,"POSITION_COMMAND");
+    return result;
 }
 
 HAL_StatusTypeDef ZDT_Motor_SetWheelSpeeds(const int16_t rpm[4], uint8_t acceleration)
@@ -199,12 +209,14 @@ HAL_StatusTypeDef ZDT_Motor_SetWheelSpeeds(const int16_t rpm[4], uint8_t acceler
     }
     frame[index]=ZDT_MOTOR_FRAME_TAIL;
     HAL_StatusTypeDef status=ZDT_Motor_SendRaw(frame,sizeof(frame));
-    return status==HAL_OK&&s_wait_for_ack?ZDT_Motor_WaitAck(1U,0xF6,NULL):status;
+    if(status==HAL_OK&&s_wait_for_ack) status=ZDT_Motor_WaitAck(1U,0xF6,NULL);
+    if(status!=HAL_OK) ZDT_Motor_Fault(0U,"SPEED_COMMAND");
+    return status;
 }
 
 /* 发送 ID 3A 6B，匹配 ID 3A flags 6B；滑动窗口跳过不匹配字节。
  * flags 位含义由 robot_control.c 判断；总接收时间受配置的超时限制。 */
-HAL_StatusTypeDef ZDT_Motor_ReadStatus(uint8_t id, uint8_t *flags)
+static HAL_StatusTypeDef read_status(uint8_t id, uint8_t *flags)
 {
     const uint8_t request[] = {id, 0x3AU, ZDT_MOTOR_FRAME_TAIL};
     uint8_t response[4U];
@@ -241,6 +253,13 @@ HAL_StatusTypeDef ZDT_Motor_ReadStatus(uint8_t id, uint8_t *flags)
     return HAL_TIMEOUT;
 }
 
+HAL_StatusTypeDef ZDT_Motor_ReadStatus(uint8_t id, uint8_t *flags)
+{
+    HAL_StatusTypeDef result=read_status(id,flags);
+    if(result!=HAL_OK) ZDT_Motor_Fault(id,"STATUS_READ");
+    return result;
+}
+
 static HAL_StatusTypeDef ZDT_Motor_SendControl(const uint8_t *frame,
                                                uint16_t length,
                                                uint8_t id, uint8_t function)
@@ -254,11 +273,13 @@ static HAL_StatusTypeDef ZDT_Motor_SendControl(const uint8_t *frame,
     if ((status != HAL_OK) || !s_wait_for_ack || (id == ZDT_MOTOR_BROADCAST_ID))
     {
         if(capture) diagnostic_publish(id,true,&record,status);
+        if(status!=HAL_OK) ZDT_Motor_Fault(id,function==0xFEU?"STOP":function==0xF3U?"ENABLE":"COMMAND");
         return status;
     }
 
     status=ZDT_Motor_WaitAck(id,function,capture?&record:NULL);
     if(capture) diagnostic_publish(id,true,&record,status);
+    if(status!=HAL_OK) ZDT_Motor_Fault(id,function==0xFEU?"STOP":function==0xF3U?"ENABLE":"COMMAND");
     return status;
 }
 

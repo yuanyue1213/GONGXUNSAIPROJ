@@ -20,6 +20,7 @@ bool LiftMotor_Probe(uint8_t id);
 char LiftMotor_FirmwareCode(uint8_t id);
 const char *LiftMotor_LastError(uint8_t id);
 bool LiftMotor_ReadStatus(uint8_t id, uint8_t *status);
+void LiftMotor_Fault(uint8_t id, const char *operation);
 /* Signed real motor position in 0.1 degrees, converted for Emm/X firmware. */
 bool ArmMotor_ReadPosition(uint8_t id, int64_t *angle_tenths);
 /* FD mode 01: signed absolute target in the driver's coordinate system.

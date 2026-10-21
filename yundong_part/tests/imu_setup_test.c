@@ -114,9 +114,9 @@ static void test_wire_frames(void)
     bytes(angle_positive,5); ImuLink_Process();
     assert(ImuLink_Read(&sample)&&sample.yaw==0.0f); // Incomplete frame must wait.
     bytes(angle_positive+5,6); bytes(gyro_positive,sizeof(gyro_positive)); ImuLink_Process();
-    assert(ImuLink_Read(&sample)&&sample.yaw==90.0f&&sample.rate==1000.0f);
-    bytes(angle_negative,sizeof(angle_negative)); bytes(gyro_negative,sizeof(gyro_negative)); ImuLink_Process();
     assert(ImuLink_Read(&sample)&&sample.yaw==-90.0f&&sample.rate==-1000.0f);
+    bytes(angle_negative,sizeof(angle_negative)); bytes(gyro_negative,sizeof(gyro_negative)); ImuLink_Process();
+    assert(ImuLink_Read(&sample)&&sample.yaw==90.0f&&sample.rate==1000.0f);
     ImuLink_Diagnostics(&after);
     assert(after.rx_bytes-before.rx_bytes==sizeof(noise)+44U);
     assert(after.valid_frames-before.valid_frames==4U);
@@ -124,7 +124,7 @@ static void test_wire_frames(void)
     uint8_t corrupt[11]; memcpy(corrupt,angle_positive,sizeof(corrupt));
     corrupt[4]=0x55; // Embedded header exercises resynchronization after bad SUM.
     bytes(corrupt,sizeof(corrupt)); bytes(angle_positive,sizeof(angle_positive)); ImuLink_Process();
-    assert(ImuLink_Read(&sample)&&sample.yaw==90.0f);
+    assert(ImuLink_Read(&sample)&&sample.yaw==-90.0f);
     ImuLink_Diagnostics(&after); assert(after.bad_checksums>before.bad_checksums);
 
     UART_HandleTypeDef other={4,HAL_UART_STATE_READY};

@@ -48,6 +48,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -65,6 +66,7 @@ import com.example.app.ui.theme.AppTheme
 
 class MainActivity : ComponentActivity() {
     private var moveStatus by mutableStateOf("等待定距移动")
+    private var motorFaults by mutableStateOf<Map<String, String>>(emptyMap())
     private var moveRunning by mutableStateOf(false)
     private var manualMoveId = 0L
     private var manualMoveAccepted = false
@@ -106,6 +108,9 @@ class MainActivity : ComponentActivity() {
                 }
                 if (line.startsWith("IMU,")) {
                     moveStatus = ImuFeedback.text(line)
+                }
+                MotorFeedback.text(line)?.let { (key, message) ->
+                    motorFaults = motorFaults + (key to message)
                 }
                 if (line.startsWith("ACTION,")) {
                     val action = line.split(',')
@@ -164,6 +169,8 @@ class MainActivity : ComponentActivity() {
                     onDisconnect = { robotClient.sendMotion('Z'); stopMotion(); stopLift(); stopForeAft(); robotClient.disconnect() },
                     moveRunning = moveRunning,
                     moveStatus = moveStatus,
+                    motorFaultText = motorFaults.values.joinToString("\n"),
+                    onClearMotorFaults = { motorFaults = emptyMap() },
                     onMove = ::startDistanceMove,
                     onAlign = { forward, lateral, settings ->
                         robotClient.sendConfiguredAlignment(0, forward, lateral, settings)
@@ -305,6 +312,8 @@ private fun RemoteControlScreen(
     feedbackLog: String = "",
     onCheckLink: () -> Unit = {},
     onRequestStatus: () -> Unit = {},
+    motorFaultText: String = "",
+    onClearMotorFaults: () -> Unit = {},
 ) {
     var host by rememberSaveable { mutableStateOf("192.168.4.1") }
     var portText by rememberSaveable { mutableStateOf("3333") }
@@ -363,6 +372,11 @@ private fun RemoteControlScreen(
                     .verticalScroll(scroll).padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                if (motorFaultText.isNotEmpty()) {
+                    Text("最近电机异常（历史记录）\n$motorFaultText",
+                        modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = onClearMotorFaults) { Text("清除异常记录") }
+                }
                 when (page) {
                     5 -> AutonomousPanel(connected, autoRunning, autoStatus, autoCode, onAutoStart, onAutoStop)
                     0 -> {

@@ -7,6 +7,7 @@
 #include <signal.h>
 #include "stm32h7xx_hal.h"
 #include "zdt_motor.h"
+#include "lift_motor.h"
 #include "robot_control.h"
 #include "camera_link.h"
 #include "../shared/robot_distance_protocol.h"
@@ -173,7 +174,7 @@ bool LiftMotor_ReadStatus(uint8_t id, uint8_t *status) {
 }
 bool ArmMotor_ReadPosition(uint8_t id, int64_t *angle) {
     ++origin_reads;
-    if (fail_origin_read) return false;
+    if (fail_origin_read) { LiftMotor_Fault(id,"POSITION_READ"); return false; }
     *angle = origin_position[id - 1U]; return true;
 }
 HAL_StatusTypeDef ArmMotor_MoveAbsolute(uint8_t id, int64_t angle, uint16_t rpm, uint32_t ppr) {
@@ -1442,7 +1443,8 @@ static void imu_sample(float yaw,float rate)
 {
     while(yaw>=180) yaw-=360;
     while(yaw< -180) yaw+=360;
-    imu_packet(0x52,rate,true); imu_packet(0x53,yaw,true);
+    /* Simulated controller coordinates; installed sensor wire signs are reversed. */
+    imu_packet(0x52,-rate,true); imu_packet(0x53,-yaw,true);
 }
 static void imu_ready(float yaw)
 {
@@ -1473,12 +1475,16 @@ static void test_gyro_link_and_controller(void)
     static const uint8_t angle_negative[]={0x55,0x53,0,0,0,0,0,0xC0,0,0,0x68};
     static const uint8_t rate_negative[]={0x55,0x52,0,0,0,0,0,0xC0,0,0,0x67};
     imu_bytes(rate_positive,11); imu_bytes(angle_positive,11); ImuLink_Process();
-    assert(ImuLink_Read(&sample)&&fabsf(sample.yaw-90)<0.001f&&fabsf(sample.rate-1000)<0.001f);
+    assert(ImuLink_Read(&sample)&&fabsf(sample.yaw+90)<0.001f&&fabsf(sample.rate+1000)<0.001f);
     reset(); imu_ready(0);
     imu_bytes(rate_negative,11); imu_bytes(angle_negative,11); ImuLink_Process();
-    assert(ImuLink_Read(&sample)&&fabsf(sample.yaw+90)<0.001f&&fabsf(sample.rate+1000)<0.001f);
+    assert(ImuLink_Read(&sample)&&fabsf(sample.yaw-90)<0.001f&&fabsf(sample.rate-1000)<0.001f);
     reset(); imu_ready(0); feed("EXEC,4001,IMU_ZERO\n"); assert(strstr(application_reply,"ACTION,4001,DONE,0"));
-    feed("QUERY_IMU,4001\n"); assert(strstr(application_reply,"IMU,4001,READY,0.0,0.0"));
+    feed("QUERY_IMU,4001\n");
+    const char *zero_reply=strstr(application_reply,"IMU,4001,READY,");
+    float zero_yaw=1,zero_rate=1;
+    assert(zero_reply&&sscanf(zero_reply,"IMU,4001,READY,%f,%f",&zero_yaw,&zero_rate)==2);
+    assert(zero_yaw==0&&zero_rate==0);
     feed("EXEC,4002,TURN,W,90.0,20\n"); assert(GyroTurn_State()==GYRO_RUNNING);
     unsigned start_commands=velocity_frames;
     /* A simple velocity plant verifies convergence, slew limit and closed-loop
@@ -1605,9 +1611,41 @@ static void test_startup_stop_busy_reason(void)
     feed("QUERY,4901\n");
     assert(strstr(application_reply,"STATUS,4901,IDLE,1,0\n"));
 }
+static void test_motor_fault_feedback(void)
+{
+    /* Real chassis driver failures must identify each queried address. */
+    reset(); fail_encoder=1;
+    int64_t position;
+    for(uint8_t id=1;id<=4;++id) assert(ZDT_Motor_ReadWheelPosition(id,&position)!=HAL_OK);
+    RobotControl_Tick();
+    for(unsigned id=1;id<=4;++id) {
+        char expected[64]; snprintf(expected,sizeof(expected),"MOTOR_DIAG,CHASSIS,%u,POSITION_READ",id);
+        assert(strstr(application_reply,expected));
+    }
+    /* A combined command must not falsely accuse wheel 1. */
+    reset(); fail_position_ack=1;
+    int16_t speeds[4]={10,10,10,10};
+    assert(ZDT_Motor_SetWheelSpeeds(speeds,10)!=HAL_OK); RobotControl_Tick();
+    assert(strstr(application_reply,"MOTOR_DIAG,CHASSIS,0,SPEED_COMMAND"));
+    /* Both arm axes are checked even when the first origin read fails. */
+    reset(); RobotControl_Init(&command_uart,true); fail_origin_read=1; origin_reads=0;
+    feed("CMD,123,I\n"); assert(origin_reads==2); RobotControl_Tick();
+    assert(strstr(application_reply,"MOTOR_DIAG,ARM,1,POSITION_READ"));
+    assert(strstr(application_reply,"MOTOR_DIAG,ARM,2,POSITION_READ"));
+    assert(!strstr(application_reply,"ORIGIN_READ"));
+    application_reply[0]=0; tick+=500; RobotControl_Tick();
+    assert(!strstr(application_reply,"MOTOR_DIAG,")); // repeated failures throttled
+    tick+=2000; RobotControl_Tick();
+    assert(strstr(application_reply,"MOTOR_DIAG,ARM,1,POSITION_READ"));
+    /* Motor namespaces remain distinct even with identical numeric addresses. */
+    reset(); LiftMotor_Fault(1,"STOP"); ZDT_Motor_Fault(1,"STATUS_READ"); RobotControl_Tick();
+    assert(strstr(application_reply,"MOTOR_DIAG,ARM,1,STOP"));
+    assert(strstr(application_reply,"MOTOR_DIAG,CHASSIS,1,STATUS_READ"));
+}
 int main(void)
 {
     test_startup_stop_busy_reason();
+    test_motor_fault_feedback();
     test_gyro_straight();
     test_gyro_link_and_controller();
 #ifdef _WIN32

@@ -15,7 +15,8 @@ static inline BridgeQuery BridgeLink_Query(const char *line,uint32_t *id)
 static inline bool BridgeLink_Feedback(const char *line)
 {
     return strncmp(line,"ACTION,",7U)==0||strncmp(line,"STATUS,",7U)==0||
-        strncmp(line,"IMU,",4U)==0||strncmp(line,"PONG,",5U)==0;
+        strncmp(line,"IMU,",4U)==0||strncmp(line,"PONG,",5U)==0||
+        strncmp(line,"MOTOR_DIAG,",11U)==0;
 }
 /* The manual App can use EXEC for both gyro motion and legacy wheel-distance
  * moves. Do not silently discard the latter at the ESP32 bridge. */

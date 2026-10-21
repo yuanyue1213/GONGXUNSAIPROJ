@@ -8,12 +8,17 @@
 static UART_HandleTypeDef uart = {2, HAL_UART_STATE_READY};
 static uint32_t tick;
 static unsigned firmware_length, response_length, response_index, position_count;
-static uint8_t response[37], position[16];
+static uint8_t response[128], position[16];
 static unsigned position_length;
 static int fail_enable, fail_position;
 static uint32_t real_position;
 static uint8_t real_sign;
 static int fail_read;
+static bool echo_query, bad_parameter_count;
+static uint8_t fault_id;
+static const char *fault_operation;
+void LiftMotor_Fault(uint8_t id, const char *operation)
+{ fault_id=id; fault_operation=operation; }
 uint32_t HAL_GetTick(void) { return tick; }
 HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *u, uint8_t *data, uint16_t len, uint32_t timeout)
 {
@@ -23,7 +28,12 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *u, uint8_t *data, uint16
     if (data[1] == 0x42) {
         assert(len == 4); response_length = firmware_length;
         response[2] = (uint8_t)firmware_length;
+        response[3] = bad_parameter_count?0U:firmware_length==0x21?0x15:0x18;
         response[firmware_length - 1] = 0x6B;
+        if(echo_query) {
+            memmove(response+len,response,response_length);
+            memcpy(response,data,len); response_length+=len;
+        }
     } else if (data[1] == 0x36) {
         assert(len == 3); response_length = fail_read ? 0 : 8;
         response[2] = real_sign;
@@ -51,6 +61,8 @@ static void reset(unsigned length)
     tick = position_count = 0; firmware_length = length;
     fail_enable = fail_position = 0; LiftMotor_Init(&uart);
     fail_read = 0; real_position = 0; real_sign = 0;
+    fault_id=0; fault_operation=NULL;
+    echo_query=bad_parameter_count=false;
 }
 int main(void)
 {
@@ -59,6 +71,20 @@ int main(void)
     signal(SIGABRT, exit);
 #endif
     int64_t angle;
+    reset(0x25); echo_query=true;
+    assert(ArmMotor_ReadPosition(1,&angle)&&LiftMotor_FirmwareCode(1)=='X');
+    reset(0x21); echo_query=true;
+    assert(ArmMotor_ReadPosition(2,&angle)&&LiftMotor_FirmwareCode(2)=='E');
+    reset(0x25); bad_parameter_count=true;
+    assert(!ArmMotor_ReadPosition(1,&angle));
+    assert(strcmp(LiftMotor_LastError(1),"BAD_REPLY")==0);
+    reset(0x21); fail_read=1;
+    assert(!ArmMotor_ReadPosition(2,&angle));
+    assert(fault_id==2&&strcmp(fault_operation,"POSITION_READ")==0);
+    assert(strcmp(LiftMotor_LastError(2),"NO_REPLY")==0);
+    reset(0x21); fail_enable=1;
+    assert(LiftMotor_MoveAngle('U',900,10,3200)!=HAL_OK);
+    assert(fault_id==1&&strcmp(fault_operation,"ENABLE")==0);
     reset(0x21); real_position = 131072;
     assert(ArmMotor_ReadPosition(2, &angle) && angle == 7200);
     real_sign = 1; assert(ArmMotor_ReadPosition(1, &angle) && angle == -7200);

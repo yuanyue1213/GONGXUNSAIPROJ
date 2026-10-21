@@ -105,8 +105,12 @@ void GyroTurn_Tick(void)
     if((uint32_t)(now-g.started)>(g.driving?1800000U:60000U)) { fail(g.driving?"DRIVE_TIMEOUT":"TURN_TIMEOUT"); return; }
     if((uint32_t)(now-g.status_tick)>=50U) {
         uint8_t flags=0; g.status_tick=now;
-        if(ZDT_Motor_ReadStatus((uint8_t)(g.wheel+1U),&flags)!=HAL_OK||
-            MotorStatusGuard_Fault(&g.guards[g.wheel],flags,now)) { fail("MOTOR_FAULT"); return; }
+        HAL_StatusTypeDef status_result=ZDT_Motor_ReadStatus((uint8_t)(g.wheel+1U),&flags);
+        if(status_result!=HAL_OK||
+            MotorStatusGuard_Fault(&g.guards[g.wheel],flags,now)) {
+            if(status_result==HAL_OK) ZDT_Motor_Fault((uint8_t)(g.wheel+1U),"DRIVER_FAULT");
+            fail("MOTOR_FAULT"); return;
+        }
         g.wheel=(g.wheel+1U)%4U;
     }
     if(s.sequence==g.sample_sequence) return;
