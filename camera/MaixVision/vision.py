@@ -2,9 +2,15 @@
 
 只上传本文件即可；运行时只依赖设备已有的 maix、cv2、numpy。
 串口 /dev/ttyS2，115200；等待STM32的CAM请求后执行对应任务。
+空闲时本地预览156（红/黑/浅蓝）圆台识别，不通过串口回传；长按1.5秒标定。
 CAM,101,QR -> VISION,101,QR,156+123+516+231
 CAM,102,MAT,5,256.0,160.0 -> VISION,102,MAT,5,113.2,160.7
 CAM,103,RING,2 -> VISION,103,RING,2,256.4,160.3
+CAM,104,TABLE,156,256.0,160.0 -> VISION,104,TABLE,156,256.0,160.0
+CAM,105,OCCUPIED,156,256.0,160.0 -> VISION,105,OCCUPIED,156,256.0,160.0
+OCCUPIED将三件物料按画面X排序，取中间物料底座中心；三帧稳定后输出。
+TABLE联合三色候选估计椭圆轨迹，五帧稳定后输出整体中心；NEAR使用椭圆下端等待取料。
+LAB标定与识别/main.py共用~/lab_thresholds.json；空闲时长按屏幕1.5秒可标定六色。
 漏检/未稳定：VISION,请求编号,NONE；圆环目标1/2/3为画面左/中/右。
 同一请求持续识别；换请求重置稳定窗口。保留亚像素拟合及一位小数输出。
 """
@@ -12,7 +18,7 @@ CAM,103,RING,2 -> VISION,103,RING,2,256.4,160.3
 # ===== 六色物料检测 =====
 import cv2
 import numpy as np
-from itertools import combinations
+from itertools import combinations, product
 import time
 
 WIDTH, HEIGHT = 512, 320
@@ -640,6 +646,682 @@ class ring_StableCenters:
             return None
         return tuple(float(value) for value in np.mean(self.samples, axis=0).reshape(-1))
 
+# ===== 三物块圆台中心与持久化 LAB 标定（来自识别目录） =====
+# -*- coding: utf-8 -*-
+"""MaixCAM2 圆台识别模块（本文件不读取相机，也不控制串口/触摸屏）。
+
+用法：
+    centers, tolerances, calibrated = load_lab_thresholds()
+    detector = TurntableCenterDetector(centers, tolerances,
+                                       colors=("red", "yellow", "blue"))
+    stable_center = detector.detect(cv_bgr_image, draw=True)
+
+三色阈值共用统一的 JSON 文件；主程序只需标定并保存一次。
+"""
+
+import json
+import math
+import os
+from collections import deque
+
+import cv2
+import numpy as np
+
+# 将配置文件放在设备用户主目录，切换脚本路径/导入不同模块时仍共用一份。
+DEFAULT_CONFIG_PATH = os.path.join(os.path.expanduser("~"), "lab_thresholds.json")
+
+# 与用户原始代码完全一致的浮点 LAB 预设值；不是已经标定成功的值。
+DEFAULT_LAB_CENTER = {
+    "light_blue": (77, -14, -29),
+    "blue": (42, 21, -60),
+    "yellow": (81, 6, 75),
+    "green": (80, -78, 59),
+    "black": (21, 2, 0),
+    "red": (47, 65, 35),
+}
+DEFAULT_LAB_TOL = {
+    "light_blue": (8, 8, 8),
+    "blue": (8, 8, 8),
+    "yellow": (15, 12, 12),
+    "green": (10, 10, 10),
+    "black": (12, 10, 10),
+    "red": (15, 12, 12),
+}
+
+DRAW_COLORS_BGR = {
+    "light_blue": (255, 255, 0),
+    "blue": (255, 0, 0),
+    "yellow": (0, 255, 255),
+    "green": (0, 255, 0),
+    "black": (180, 180, 180),
+    "red": (0, 0, 255),
+}
+
+
+def _valid_triplet(obj, positive=False):
+    try:
+        a = np.asarray(obj, dtype=np.float32)
+        if a.shape != (3,) or not bool(np.all(np.isfinite(a))):
+            return None
+        if positive and not bool(np.all(a >= 1.0)):
+            return None
+        return a
+    except (TypeError, ValueError):
+        return None
+
+
+def load_lab_thresholds(path=DEFAULT_CONFIG_PATH):
+    """返回 LAB_CENTER, LAB_TOL, calibrated_colors。
+
+    没有文件时返回原始预设值，但 calibrated_colors 为空：不会误判为已标定。
+    """
+    centers = {k: np.array(v, dtype=np.float32)
+               for k, v in DEFAULT_LAB_CENTER.items()}
+    tolerances = {k: np.array(v, dtype=np.float32)
+                  for k, v in DEFAULT_LAB_TOL.items()}
+    calibrated = set()
+
+    if not os.path.isfile(path):
+        print("未找到 LAB 标定文件：", path)
+        return centers, tolerances, calibrated
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("version") != 1:
+            raise ValueError("不支持的标定文件版本")
+        saved_centers = data["lab_center"]
+        saved_tols = data["lab_tol"]
+        saved_calibrated = data.get("calibrated_colors", [])
+        if not isinstance(saved_calibrated, list):
+            raise ValueError("calibrated_colors 格式错误")
+
+        valid = set()
+        for name in centers:
+            c = _valid_triplet(saved_centers.get(name))
+            t = _valid_triplet(saved_tols.get(name), positive=True)
+            if c is not None and t is not None:
+                # 防止损坏的标定文件生成非法 LAB 范围。
+                if (0 <= c[0] <= 100 and -128 <= c[1] <= 127
+                        and -128 <= c[2] <= 127):
+                    centers[name] = c
+                    tolerances[name] = t
+                    valid.add(name)
+
+        calibrated = set(saved_calibrated) & valid
+        print("已读取 LAB 标定文件：", path)
+        print("已完成标定的颜色：", sorted(calibrated))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        print("读取 LAB 标定文件失败，使用原始预设值：", exc)
+        centers = {k: np.array(v, dtype=np.float32)
+                   for k, v in DEFAULT_LAB_CENTER.items()}
+        tolerances = {k: np.array(v, dtype=np.float32)
+                      for k, v in DEFAULT_LAB_TOL.items()}
+        calibrated.clear()
+    return centers, tolerances, calibrated
+
+
+def save_lab_thresholds(centers, tolerances, calibrated, path=DEFAULT_CONFIG_PATH):
+    """原子写入 JSON，避免程序中止导致旧标定文件被写坏。"""
+    payload = {
+        "version": 1,
+        "lab_center": {k: [float(x) for x in v] for k, v in centers.items()},
+        "lab_tol": {k: [float(x) for x in v] for k, v in tolerances.items()},
+        "calibrated_colors": sorted(calibrated),
+    }
+    temp_path = path + ".tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+        print("标定结果已保存：", path)
+        return True
+    except OSError as exc:
+        print("保存 LAB 标定结果失败：", exc)
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        return False
+
+
+def turntable_geometry(vertices, min_edge=15., min_axis_ratio=.4):
+    """Affine ellipse of three equal-spaced positions (120 degrees apart).
+
+    For p=c+A*cos(t)+B*sin(t), three equally spaced samples give
+    M=A*A.T+B*B.T=2*mean((p-c)*(p-c).T). No equal IMAGE edges are required.
+    This is an affine projection model, not a full perspective calibration.
+    """
+    vertices = np.asarray(vertices, dtype=float)
+    if vertices.shape != (3, 2) or not np.all(np.isfinite(vertices)):
+        return None
+    if any(np.linalg.norm(vertices[i] - vertices[j]) < min_edge
+           for i, j in ((0, 1), (1, 2), (2, 0))):
+        return None
+    center = np.mean(vertices, axis=0)
+    centered = vertices - center
+    matrix = 2. * centered.T.dot(centered) / 3.
+    values = np.linalg.eigvalsh(matrix)
+    if values[0] <= 1.e-6 or values[1] <= 1.e-6:
+        return None
+    minor, major = np.sqrt(values)
+    if minor / major < min_axis_ratio or major > 320.:
+        return None
+    # Lowest image point of an arbitrarily rotated ellipse. It need not be
+    # vertically below its center when the ellipse's axes are tilted.
+    vertical_radius = math.sqrt(float(matrix[1, 1]))
+    bottom = center + (matrix[0, 1] / vertical_radius, vertical_radius)
+    return dict(center=center, matrix=matrix, inverse=np.linalg.inv(matrix),
+                minor=float(minor), major=float(major), bottom=bottom)
+
+
+def on_turntable_track(point, geometry, tolerance=.3):
+    delta = np.asarray(point, dtype=float) - geometry['center']
+    if delta.shape != (2,) or not np.all(np.isfinite(delta)):
+        return False
+    radius2 = float(delta.dot(geometry['inverse']).dot(delta))
+    return (1. - tolerance)**2 <= radius2 <= (1. + tolerance)**2
+
+
+class TurntableCenterDetector:
+    """使用三个彩色圆柱求旋转圆台中心，仅对最终中心做稳定判断。"""
+
+    def __init__(self, lab_center, lab_tol, colors=("red", "yellow", "blue"),
+                 min_area=80, min_circularity=0.45,
+                 triangle_tol=0.25, min_edge=15.0,
+                 stable_count=5, stable_err=1.0, min_axis_ratio=.4, max_area_ratio=3.):
+        if len(colors) != 3 or len(set(colors)) != 3:
+            raise ValueError("圆台必须配置三种不同颜色")
+        if not all(c in lab_center and c in lab_tol for c in colors):
+            raise ValueError("圆台颜色必须全部定义在 LAB 阈值字典中")
+        self.colors = tuple(colors)
+        # 引用外部字典；主程序标定后更新字典，识别模块会自动使用新阈值。
+        self.lab_center = lab_center
+        self.lab_tol = lab_tol
+        self.min_area = float(min_area)
+        self.min_circularity = float(min_circularity)
+        # triangle_tol retained for source compatibility; image-edge equality is no longer used.
+        self.min_axis_ratio = float(min_axis_ratio)
+        self.max_area_ratio = float(max_area_ratio)
+        self.min_edge = float(min_edge)
+        self.stable_count = int(stable_count)
+        self.stable_err = float(stable_err)
+        if self.stable_count < 1 or self.stable_err < 0:
+            raise ValueError("无效的稳定判断参数")
+        self.history = deque(maxlen=self.stable_count)
+        self.geometry_history = deque(maxlen=self.stable_count)
+        self.locked_geometry = self.last_geometry = None
+        self.lost_frames = 0
+        self.selected_candidates = {}
+        self.kernel = np.ones((3, 3), np.uint8)
+        self.last_points = {}
+        self.last_center = None
+        self.last_state = "init"
+
+    def reset(self):
+        self.history.clear()
+        self.geometry_history.clear()
+        self.locked_geometry = self.last_geometry = None
+        self.lost_frames = 0
+        self.selected_candidates = {}
+        self.last_center = None
+        self.last_points = {}
+        self.last_state = "reset"
+
+    def _candidates_for_color(self, lab_image, color):
+        center, tol = self.lab_center[color], self.lab_tol[color]
+        lower = np.maximum(center - tol, [0, -128, -128]).astype(np.float32)
+        upper = np.minimum(center + tol, [100, 127, 127]).astype(np.float32)
+        mask = cv2.inRange(lab_image, lower, upper)
+        mask = cv2.erode(mask, self.kernel, iterations=2)
+        mask = cv2.dilate(mask, self.kernel, iterations=2)
+        contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[-2]
+        candidates = []
+        h, w = mask.shape
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.min_area or area > h*w*.15:
+                continue
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter <= 0:
+                continue
+            circularity = 4.*math.pi*area/(perimeter*perimeter)
+            if circularity < self.min_circularity:
+                continue
+            x, y, bw, bh = cv2.boundingRect(contour)
+            if x <= 0 or y <= 0 or x+bw >= w or y+bh >= h:
+                continue  # A clipped blob's centroid is not a complete material location.
+            m = cv2.moments(contour)
+            if m['m00'] > 0:
+                candidates.append(dict(center=(float(m['m10']/m['m00']), float(m['m01']/m['m00'])),
+                                       area=float(area), circularity=float(circularity)))
+        return candidates
+
+    def _center_for_color(self, lab_image, color):
+        # Legacy single-color callers must not silently choose a larger distractor.
+        candidates = self._candidates_for_color(lab_image, color)
+        return candidates[0]['center'] if len(candidates) == 1 else None
+
+    def _reject(self, state):
+        self.history.clear()
+        self.geometry_history.clear()
+        self.last_state = state
+        self.lost_frames += 1
+        if self.lost_frames >= self.stable_count*3:
+            # A manually moved camera must be able to reacquire in idle preview.
+            # Fresh samples must still pass the full stability window.
+            self.locked_geometry = None
+        return None
+
+    def _select_group(self, candidates):
+        groups = []
+        for group in product(*(candidates[c] for c in self.colors)):
+            areas = np.array([obj['area'] for obj in group])
+            if np.max(areas)/np.min(areas) > self.max_area_ratio:
+                continue
+            geometry = turntable_geometry([obj['center'] for obj in group], self.min_edge, self.min_axis_ratio)
+            if geometry is None:
+                continue
+            if self.locked_geometry is not None:
+                old = self.locked_geometry
+                if np.linalg.norm(geometry['center'] - old['center']) > max(6., old['minor']*.12):
+                    continue
+                if any(not on_turntable_track(obj['center'], old) for obj in group):
+                    continue
+            score = float(np.std(np.log(areas)))
+            score += .2*(1.-min(obj['circularity'] for obj in group))
+            score += .1*(1.-geometry['minor']/geometry['major'])
+            groups.append((score, group, geometry))
+        groups.sort(key=lambda item: item[0])
+        if not groups:
+            return None, 'invalid_triangle'
+        if len(groups)>1 and groups[1][0]-groups[0][0] < .12:
+            return None, 'ambiguous_colors'
+        return groups[0], None
+
+    def detect(self, bgr_image, draw=False):
+        """输入每帧 OpenCV BGR 图像，5 帧中心稳定时返回 (x, y)，否则 None。"""
+        if bgr_image is None:
+            self.reset()
+            return None
+
+        # 注意必须 float32/255 再转 LAB，兼容原来标定的 0~100、-128~127 值。
+        blur = cv2.GaussianBlur(bgr_image, (5, 5), 0)
+        lab = cv2.cvtColor(blur.astype(np.float32) / 255.0,
+                           cv2.COLOR_BGR2LAB)
+
+        candidates = {name: self._candidates_for_color(lab, name) for name in self.colors}
+        self.last_points = {c: objects[0]['center'] for c, objects in candidates.items() if len(objects)==1}
+        self.last_center = self.last_geometry = None
+        self.selected_candidates = {}
+        if any(not objects for objects in candidates.values()):
+            return self._reject('colors_missing')
+        if any(len(objects)>6 for objects in candidates.values()):
+            return self._reject('ambiguous_colors')
+        selected, error = self._select_group(candidates)
+        if selected is None:
+            return self._reject(error)
+        _, group, geometry = selected
+        self.lost_frames = 0
+        self.selected_candidates = dict(zip(self.colors, group))
+        self.last_points = {c: obj['center'] for c, obj in self.selected_candidates.items()}
+        origin = geometry['center']
+        self.last_center = tuple(float(v) for v in origin)
+        self.last_geometry = geometry
+        if draw:
+            for name, point in self.last_points.items():
+                p = tuple(int(round(v)) for v in point)
+                color = DRAW_COLORS_BGR.get(name, (0, 255, 255))
+                cv2.circle(bgr_image, p, 4, color, -1)
+                cv2.putText(bgr_image, name, (p[0]+6, p[1]-6), cv2.FONT_HERSHEY_SIMPLEX, .45, color, 1)
+        if draw:
+            o = tuple(int(round(float(v))) for v in origin)
+            cv2.drawMarker(bgr_image, o, (0, 255, 255),
+                           cv2.MARKER_CROSS, 14, 1)
+
+        self.history.append(self.last_center)
+        self.geometry_history.append(geometry)
+        self.last_state = "collecting"
+        if len(self.history) < self.stable_count:
+            return None
+
+        samples = np.array(self.history, dtype=np.float32)
+        reference = np.median(samples, axis=0)
+        distances = np.linalg.norm(samples - reference, axis=1)
+        if not np.all(distances <= self.stable_err):
+            # 保留最近五帧滑动窗口，下一帧继续检测。
+            self.last_state = "unstable"
+            return None
+
+        bottoms = np.asarray([g['bottom'] for g in self.geometry_history])
+        if np.max(np.linalg.norm(bottoms - np.median(bottoms, axis=0), axis=1)) > max(2., self.stable_err*2.):
+            self.last_state = 'unstable_geometry'
+            return None
+        # Lock a five-frame ellipse, not a single noisy set of rotating points.
+        mean_matrix = np.mean([g['matrix'] for g in self.geometry_history], axis=0)
+        mean_center = np.mean(samples, axis=0)
+        values = np.linalg.eigvalsh(mean_matrix)
+        vy = math.sqrt(float(mean_matrix[1, 1]))
+        self.locked_geometry = dict(center=mean_center, matrix=mean_matrix, inverse=np.linalg.inv(mean_matrix),
+                                    minor=float(math.sqrt(values[0])), major=float(math.sqrt(values[1])),
+                                    bottom=mean_center + (mean_matrix[0, 1]/vy, vy))
+        self.last_geometry = self.locked_geometry
+        # 五帧全在中位中心 1 像素半径内，才输出一组整数坐标。
+        output = np.mean(samples, axis=0)
+        stable_point = (int(round(float(output[0]))),
+                        int(round(float(output[1]))))
+        self.history.clear()
+        self.geometry_history.clear()
+        self.last_state = "stable"
+        if draw:
+            cv2.drawMarker(bgr_image, stable_point, (0, 0, 255),
+                           cv2.MARKER_CROSS, 22, 2)
+        return stable_point
+
+
+def table_colors(target):
+    digits = str(target)
+    if len(digits) != 3 or len(set(digits)) != 3 or any(d not in "123456" for d in digits):
+        return None
+    names = {value: name for name, value in COLORS.items()}
+    return tuple(names[int(d)] for d in digits)
+
+
+class TurntableTaskDetector:
+    """A batch-specific five-frame center; never fall back to a single block."""
+    def __init__(self, path=DEFAULT_CONFIG_PATH):
+        self.path = path
+        self.centers, self.tolerances, self.calibrated = load_lab_thresholds(path)
+        self.reset()
+
+    def reset(self):
+        self.target = None
+        self.detector = None
+        self.state = "waiting"
+
+    def detect(self, frame, target, draw=False):
+        colors = table_colors(target)
+        if colors is None:
+            self.reset()
+            self.state = "invalid_colors"
+            return None
+        if self.target != target:
+            self.reset()
+            self.target = target
+        if not all(color in self.calibrated for color in colors):
+            self.detector = None
+            self.state = "NEED LAB: " + "/".join(c for c in colors if c not in self.calibrated)
+            return None
+        if self.detector is None:
+            self.detector = TurntableCenterDetector(self.centers, self.tolerances, colors=colors)
+        result = self.detector.detect(frame, draw=draw)
+        self.state = self.detector.last_state
+        if self.state == "colors_missing":
+            self.state = "MISSING: " + "/".join(c for c in colors if c not in self.detector.last_points)
+        return result
+
+
+class IdleTablePreview:
+    """Local-only preview. Its samples/geometry never authorize a task response."""
+    def __init__(self, table, target=156):
+        self.table = table
+        self.target = target
+        self.reset()
+
+    def reset(self):
+        self.detector = None
+        self.center = None
+        self.state = "waiting"
+
+    def draw(self, img):
+        colors = table_colors(self.target)
+        self.center = None
+        missing_lab = [c for c in colors if c not in self.table.calibrated]
+        if missing_lab:
+            self.detector = None
+            self.state = "NEED LAB: " + "/".join(missing_lab)
+        else:
+            if self.detector is None:
+                self.detector = TurntableCenterDetector(self.table.centers, self.table.tolerances, colors=colors)
+            self.center = self.detector.detect(img, draw=True)
+            self.state = self.detector.last_state
+            if self.state == "colors_missing":
+                self.state = "MISSING: " + "/".join(c for c in colors if c not in self.detector.last_points)
+        cv2.putText(img, "PREVIEW TABLE %d / WAIT CAM" % self.target, (5, 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, .45, (0, 255, 0), 1)
+        cv2.putText(img, self.state, (5, 40), cv2.FONT_HERSHEY_SIMPLEX, .45, (0, 255, 255), 1)
+        count = len(self.detector.last_points) if self.detector is not None else 0
+        label = "COLORS %d/3 / HOLD 1.5s: LAB" % count
+        if self.center is not None:
+            label = "CENTER %d,%d / PREVIEW ONLY" % self.center
+            near = NearPickup()
+            if near.bind(self.detector.last_points, self.target, geometry=self.detector.last_geometry):
+                cv2.circle(img, tuple(int(round(v)) for v in near.point), 8, (0, 255, 255), 1)
+        cv2.putText(img, label, (5, 60), cv2.FONT_HERSHEY_SIMPLEX, .45, (0, 255, 255), 1)
+        return self.center
+
+
+def calibrate_table_colors(cam, dis, ts, table, colors):
+    """Original touch LAB workflow, available only while no task is active."""
+    from maix import app, image, time
+    LAB_CENTER, LAB_TOL, CALIBRATED_COLORS = table.centers, table.tolerances, table.calibrated
+    detector = table
+    DOUBLE_CLICK_MS, TOL_STEP, SAMPLE_HALF, SAMPLE_BOX_HALF = 500, 1, 6, 10
+    SKIP_RECT = (390, 5, 510, 55)
+    L_PLUS_RECT, L_MINUS_RECT = (10, 50, 246, 105), (266, 50, 502, 105)
+    A_PLUS_RECT, A_MINUS_RECT = (10, 115, 246, 170), (266, 115, 502, 170)
+    B_PLUS_RECT, B_MINUS_RECT = (10, 180, 246, 235), (266, 180, 502, 235)
+    NEXT_RECT = (150, 250, 362, 315)
+
+    def read_touch():
+        x, y, pressed = ts.read()
+        if not pressed:
+            return 0, 0, False
+        x, y = image.resize_map_pos_reverse(
+            WIDTH, HEIGHT, dis.width(), dis.height(),
+            image.Fit.FIT_CONTAIN, x, y
+        )
+        return int(x), int(y), True
+
+    def point_in_rect(x, y, rect):
+        x1, y1, x2, y2 = rect
+        return x1 <= x <= x2 and y1 <= y <= y2
+
+    def wait_release():
+        while not app.need_exit():
+            _, _, pressed = read_touch()
+            if not pressed:
+                return
+
+    def draw_button(img, rect, text, color=(0, 255, 0)):
+        x1, y1, x2, y2 = rect
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        text_size = cv2.getTextSize(
+            text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2
+        )[0]
+        tx = x1 + (x2 - x1 - text_size[0]) // 2
+        ty = y1 + (y2 - y1 + text_size[1]) // 2
+        cv2.putText(img, text, (tx, ty),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+
+    def show(cv_img):
+        dis.show(image.cv2image(cv_img, bgr=True, copy=True))
+
+    def get_lab_range(color):
+        center = LAB_CENTER[color]
+        tol = LAB_TOL[color]
+        lower = center - tol
+        upper = center + tol
+        lower[0] = max(0, lower[0])
+        upper[0] = min(100, upper[0])
+        lower[1] = max(-128, lower[1])
+        upper[1] = min(127, upper[1])
+        lower[2] = max(-128, lower[2])
+        upper[2] = min(127, upper[2])
+        return lower.astype(np.float32), upper.astype(np.float32)
+
+    def make_mask(bgr_image, color):
+        # 与原代码一致：高斯 -> BGR float LAB -> 阈值 -> 腐蚀/膨胀。
+        gs_img = cv2.GaussianBlur(bgr_image, (5, 5), 0)
+        img_float = gs_img.astype(np.float32) / 255.0
+        lab_img = cv2.cvtColor(img_float, cv2.COLOR_BGR2LAB)
+        lower, upper = get_lab_range(color)
+        mask = cv2.inRange(lab_img, lower, upper)
+        kernel = np.ones((3, 3), np.uint8)
+        mask = cv2.erode(mask, kernel, iterations=2)
+        mask = cv2.dilate(mask, kernel, iterations=2)
+        return mask
+
+    def sample_lab_center(color):
+        """双击进入确认模式，在画面中心对颜色取样；SKIP 不覆盖旧值。"""
+        last_click_time = 0
+        click_count = 0
+        pressed_last = False
+        sample_ready = False
+
+        while not app.need_exit():
+            img = cam.read()
+            raw_cv_img = image.image2cv(img, ensure_bgr=True, copy=True)
+            cv_img = raw_cv_img.copy()
+            h, w = cv_img.shape[:2]
+            cx, cy = w // 2, h // 2
+
+            cv2.rectangle(cv_img, (0, 0), (300, 40), (0, 0, 0), -1)
+            cv2.putText(cv_img, "COLOR: " + color, (10, 28),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
+            draw_button(cv_img, SKIP_RECT, "SKIP", (0, 0, 255))
+            cv2.drawMarker(cv_img, (cx, cy), (0, 0, 255),
+                           cv2.MARKER_CROSS, 14, 2)
+            cv2.circle(cv_img, (cx, cy), 2, (0, 0, 255), -1)
+
+            if not sample_ready:
+                cv2.putText(cv_img, "DOUBLE CLICK", (170, 300),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+            else:
+                cv2.rectangle(cv_img,
+                              (cx - SAMPLE_BOX_HALF, cy - SAMPLE_BOX_HALF),
+                              (cx + SAMPLE_BOX_HALF, cy + SAMPLE_BOX_HALF),
+                              (0, 255, 0), 2)
+                cv2.putText(cv_img, "PRESS TO CONFIRM", (145, 300),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+            show(cv_img)
+            x, y, pressed = read_touch()
+            if pressed and not pressed_last:
+                if point_in_rect(x, y, SKIP_RECT):
+                    print("跳过颜色：", color)
+                    wait_release()
+                    return False
+                now = time.ticks_ms()
+                if not sample_ready:
+                    if now - last_click_time <= DOUBLE_CLICK_MS:
+                        click_count += 1
+                    else:
+                        click_count = 1
+                    last_click_time = now
+                    if click_count >= 2:
+                        sample_ready = True
+                        click_count = 0
+                else:
+                    roi = raw_cv_img[
+                        cy - SAMPLE_HALF: cy + SAMPLE_HALF,
+                        cx - SAMPLE_HALF: cx + SAMPLE_HALF
+                    ]
+                    roi_float = roi.astype(np.float32) / 255.0
+                    roi_lab = cv2.cvtColor(roi_float, cv2.COLOR_BGR2LAB)
+                    LAB_CENTER[color] = np.mean(roi_lab, axis=(0, 1)).astype(np.float32)
+                    print(color, "LAB_CENTER =", LAB_CENTER[color])
+                    wait_release()
+                    return True
+            pressed_last = pressed
+        return False
+
+    def draw_adjust_ui(show_img, color):
+        draw_button(show_img, L_PLUS_RECT, "L+")
+        draw_button(show_img, L_MINUS_RECT, "L-")
+        draw_button(show_img, A_PLUS_RECT, "A+")
+        draw_button(show_img, A_MINUS_RECT, "A-")
+        draw_button(show_img, B_PLUS_RECT, "B+")
+        draw_button(show_img, B_MINUS_RECT, "B-")
+        draw_button(show_img, NEXT_RECT, "NEXT", (0, 255, 255))
+        text = "L:{} A:{} B:{}".format(*[int(x) for x in LAB_TOL[color]])
+        cv2.putText(show_img, text, (20, 45),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+    def adjust_lab_tol(color):
+        """显示二值图，用原 L±、A±、B± 微调阈值；NEXT 时提交。"""
+        pressed_last = False
+        while not app.need_exit():
+            img = cam.read()
+            cv_img = image.image2cv(img, ensure_bgr=True, copy=True)
+            mask = make_mask(cv_img, color)
+            show_img = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            draw_adjust_ui(show_img, color)
+            show(show_img)
+
+            x, y, pressed = read_touch()
+            if pressed and not pressed_last:
+                if point_in_rect(x, y, NEXT_RECT):
+                    print(color, "最终 LAB_CENTER =", LAB_CENTER[color])
+                    print(color, "最终 LAB_TOL =", LAB_TOL[color])
+                    wait_release()
+                    return True
+                elif point_in_rect(x, y, L_PLUS_RECT):
+                    LAB_TOL[color][0] += TOL_STEP
+                elif point_in_rect(x, y, L_MINUS_RECT):
+                    LAB_TOL[color][0] -= TOL_STEP
+                elif point_in_rect(x, y, A_PLUS_RECT):
+                    LAB_TOL[color][1] += TOL_STEP
+                elif point_in_rect(x, y, A_MINUS_RECT):
+                    LAB_TOL[color][1] -= TOL_STEP
+                elif point_in_rect(x, y, B_PLUS_RECT):
+                    LAB_TOL[color][2] += TOL_STEP
+                elif point_in_rect(x, y, B_MINUS_RECT):
+                    LAB_TOL[color][2] -= TOL_STEP
+
+                LAB_TOL[color][:] = np.maximum(LAB_TOL[color], 1)
+                print(color, "LAB_TOL =", LAB_TOL[color])
+            pressed_last = pressed
+        return False
+
+    def calibrate_colors(colors):
+        """一次标定流程，NEXT 时把结果保存到磁盘；未完成的颜色不标记。"""
+        detector.reset()
+        print("进入 LAB 颜色标定：", list(colors))
+        for color in colors:
+            if app.need_exit():
+                break
+            print("------ 当前颜色：", color, "------")
+            # 备份这一个颜色，避免在标定中断时把内存值留成半成品。
+            old_center = LAB_CENTER[color].copy()
+            old_tol = LAB_TOL[color].copy()
+            old_was_calibrated = color in CALIBRATED_COLORS
+            if not sample_lab_center(color):
+                continue
+            if not adjust_lab_tol(color):
+                LAB_CENTER[color] = old_center
+                LAB_TOL[color] = old_tol
+                break
+
+            # 对每个颜色分别保存：意外掉电也不必重新标定已完成的颜色。
+            CALIBRATED_COLORS.add(color)
+            if not save_lab_thresholds(
+                    LAB_CENTER, LAB_TOL, CALIBRATED_COLORS, table.path):
+                # 保存失败就恢复此颜色之前的状态，避免误认为下次能复用。
+                LAB_CENTER[color] = old_center
+                LAB_TOL[color] = old_tol
+                if not old_was_calibrated:
+                    CALIBRATED_COLORS.discard(color)
+                print("该颜色标定未保存，请检查设备磁盘权限：", color)
+        detector.reset()
+        print("标定过程结束，已完成：", sorted(CALIBRATED_COLORS))
+
+    calibrate_colors(colors)
+
+
 # ===== STM32协议分发、二维码及主循环 =====
 COLORS = {"red": 1, "yellow": 2, "blue": 3, "green": 4, "black": 5, "light_blue": 6}
 
@@ -664,11 +1346,12 @@ def parse_request(line):
         return int(fields[1]), fields[2], 0
     if len(fields) in (4, 6) and fields[3].isdigit():
         target = int(fields[3])
-        if fields[2] in ("MAT", "RING") and 1 <= target <= (6 if fields[2] == "MAT" else 3):
+        if ((fields[2] in ("MAT", "RING", "PICK", "NEAR") and 1 <= target <= (6 if fields[2] in ("MAT", "PICK", "NEAR") else 3))
+                or (fields[2] in ("TABLE", "OCCUPIED") and table_colors(target) is not None)):
             result = int(fields[1]), fields[2], target
             if len(fields) == 4:
                 return result
-            if fields[2] != "MAT":
+            if fields[2] not in ("MAT", "TABLE", "OCCUPIED"):
                 return None
             for value in fields[4:]:
                 parts = value.split(".")
@@ -699,6 +1382,188 @@ def material_center(objects, target, anchor=None):
     return None
 
 
+def occupied_middle_center(objects, target):
+    """Middle of three occupied ring positions, independent of pickup order/color.
+
+    Never re-label two remaining objects as a new middle; calibrate before pickup.
+    Ambiguous same-color candidates or an implausible row produce no coordinate.
+    """
+    colors = table_colors(target)
+    if colors is None:
+        return None
+    points = []
+    for color in colors:
+        matches = [obj for obj in objects if obj.get("color") == color]
+        if len(matches) != 1:
+            return None
+        p = np.asarray(matches[0]["center"], dtype=float)
+        if p.shape != (2,) or not np.all(np.isfinite(p)) or not (0 <= p[0] < 512 and 0 <= p[1] < 320):
+            return None
+        points.append(p)
+    points.sort(key=lambda p: p[0])
+    left, middle, right = points
+    gaps = (middle[0] - left[0], right[0] - middle[0])
+    if min(gaps) < 8 or max(gaps) > min(gaps) * 1.8:
+        return None
+    # Three ring positions lie along one projected row; permit a tilted row.
+    ratio = (middle[0] - left[0]) / (right[0] - left[0])
+    row_y = left[1] + ratio * (right[1] - left[1])
+    if abs(middle[1] - row_y) > max(8., (right[0] - left[0]) * .12):
+        return None
+    return tuple(float(value) for value in middle)
+
+
+class NearPickup:
+    """One fixed pickup point at the image-bottom side of the turntable.
+
+    Retain its geometry after removal. A new color requires fresh, stationary
+    observations at that point, rather than choosing one of three block poses.
+    """
+    def __init__(self):
+        self.colors = None
+        self.center = self.point = None
+        self.radius = None
+        self.geometry = None
+        self.areas = {}
+        self.reset()
+
+    def reset(self):
+        self.history = deque(maxlen=5)
+        self.target = None
+
+    def bind(self, points, target, geometry=None, areas=None):
+        self.geometry = None
+        self.areas = {}
+        self.colors = table_colors(target)
+        self.center = self.point = None
+        self.reset()
+        if self.colors is None or any(c not in points for c in self.colors):
+            return False
+        vertices = np.asarray([points[c] for c in self.colors], dtype=float)
+        if vertices.shape != (3, 2) or not np.all(np.isfinite(vertices)):
+            return False
+        geometry = geometry if geometry is not None else turntable_geometry(vertices)
+        if geometry is None:
+            return False
+        point = geometry['bottom']
+        if geometry['minor'] < 10 or not (0 <= point[0] < 512 and 0 <= point[1] < 320):
+            return False
+        self.geometry = geometry
+        self.center, self.point, self.radius = geometry['center'].copy(), point.copy(), geometry['minor']
+        self.areas = dict(areas or {})
+        return True
+
+    def update(self, points, target):
+        if target != self.target:
+            self.reset()
+            self.target = target
+        names = {value: name for name, value in COLORS.items()}
+        name = names.get(target)
+        point = points.get(name)
+        valid = self.point is not None and name in (self.colors or ()) and point is not None
+        if valid:
+            point = np.asarray(point, dtype=float)
+            valid = point.shape == (2,) and np.all(np.isfinite(point))
+        if valid:
+            # The fixed bottom ROI remains fixed as other blocks disappear.
+            window = min(8., max(3., self.radius * .12))
+            valid = np.linalg.norm(point - self.point) <= window
+            valid = valid and all(float(p[1]) <= float(point[1]) + 2.
+                                  for c, p in points.items() if c != name)
+        if not valid:
+            self.history.clear()
+            return None
+        self.history.append(point.copy())
+        if len(self.history) < 5:
+            return None
+        samples = np.asarray(self.history)
+        if np.max(np.linalg.norm(samples - np.median(samples, axis=0), axis=1)) > 2.:
+            return None
+        return "2"  # Dedicated near pose, stored in the R middle profile.
+
+    def detect(self, img, target, table):
+        if self.point is None or not all(c in table.calibrated for c in self.colors):
+            self.reset()
+            return None
+        blur = cv2.GaussianBlur(img, (5, 5), 0)
+        lab = cv2.cvtColor(blur.astype(np.float32) / 255., cv2.COLOR_BGR2LAB)
+        detector = TurntableCenterDetector(table.centers, table.tolerances, colors=self.colors)
+        points = {}
+        for color in self.colors:
+            candidates = [obj for obj in detector._candidates_for_color(lab, color)
+                          if on_turntable_track(obj['center'], self.geometry)]
+            if color in self.areas:
+                candidates = [obj for obj in candidates if 1./3. <= obj['area']/self.areas[color] <= 3.]
+            if len(candidates) > 1:
+                self.history.clear()
+                return None  # Never guess which same-color blob is the real target.
+            if candidates:
+                points[color] = candidates[0]['center']
+        return self.update(points, target)
+
+
+class PhysicalPositions:
+    """Fixed image L/M/R references, captured before any block is removed.
+
+    Never sort the remaining one/two blocks into newly numbered positions.
+    A moving target must return close to a reference before selecting its pose.
+    """
+    def __init__(self):
+        self.points = None
+        self.colors = None
+        self.raw = False
+
+    def bind(self, points, target, raw=False):
+        self.points = None
+        self.colors = table_colors(target)
+        self.raw = raw
+        if self.colors is None or any(c not in points for c in self.colors):
+            return False
+        samples = np.array([points[c] for c in self.colors], dtype=float)
+        if (samples.shape != (3, 2) or not np.all(np.isfinite(samples))
+                or np.any(samples < 0) or np.any(samples[:, 0] >= 512)
+                or np.any(samples[:, 1] >= 320)):
+            return False
+        samples = samples[np.argsort(samples[:, 0])]
+        if np.min(np.diff(samples[:, 0])) < 8:
+            return False  # Left/middle/right is ambiguous at this view.
+        self.points = samples
+        return True
+
+    def position(self, point):
+        if self.points is None or point is None:
+            return None
+        point = np.asarray(point, dtype=float)
+        if point.shape != (2,) or not np.all(np.isfinite(point)):
+            return None
+        distances = np.linalg.norm(self.points - point, axis=1)
+        selected = int(np.argmin(distances))
+        spacing = min(np.linalg.norm(self.points[selected] - p)
+                      for i, p in enumerate(self.points) if i != selected)
+        # Leave gaps between poses: never guess a pose between two references.
+        if distances[selected] > spacing * .30:
+            return None
+        return str(selected + 1)
+
+    def detect(self, img, target, table):
+        if self.points is None or self.colors is None:
+            return None
+        names = {value: name for name, value in COLORS.items()}
+        color = names.get(target)
+        if color not in self.colors:
+            return None
+        if self.raw:
+            if color not in table.calibrated:
+                return None
+            blur = cv2.GaussianBlur(img, (5, 5), 0)
+            lab = cv2.cvtColor(blur.astype(np.float32) / 255., cv2.COLOR_BGR2LAB)
+            detector = TurntableCenterDetector(table.centers, table.tolerances, colors=self.colors)
+            point = detector._center_for_color(lab, color)
+        else:
+            point = material_center(detect_materials(img, False, select_three=False), target)
+        return self.position(point)
+
+
 class StableTarget:
     def __init__(self):
         self.samples = []
@@ -727,6 +1592,17 @@ def main():
     cam = camera.Camera(512, 320)
     disp = display.Display()
     serial = uart.UART("/dev/ttyS2", 115200)
+    table = TurntableTaskDetector()
+    preview = IdleTablePreview(table)
+    positions = PhysicalPositions()
+    near = NearPickup()
+    try:
+        from maix import touchscreen
+        touch = touchscreen.TouchScreen()
+    except Exception as exc:
+        touch = None
+        print("LAB touch calibration unavailable:", exc)
+    press_start = None
     request = None
     stable = StableTarget()
     pending = bytearray()
@@ -743,6 +1619,13 @@ def main():
                     if parsed is not None and parsed != request:
                         request = parsed
                         stable = StableTarget()
+                        table.reset()
+                        preview.reset()
+                        if parsed[1] in ("TABLE", "OCCUPIED", "QR"):
+                            positions = PhysicalPositions()
+                            near = NearPickup()
+                        if parsed[1] == "NEAR":
+                            near.reset()
                 pending.clear()
                 dropping = False
             elif not dropping:
@@ -761,17 +1644,40 @@ def main():
                 codes = [code for code in codes if valid_code(code)]
                 if len(codes) == 1:
                     found = codes[0]
+            elif mode == "NEAR":
+                found = near.detect(img, target, table)
+                if near.point is not None:
+                    cv2.circle(img, tuple(int(round(x)) for x in near.point), 8, (0, 255, 255), 1)
+            elif mode == "PICK":
+                found = None if positions.raw else positions.detect(img, target, table)
             elif mode == "MAT":
                 # All candidates, including the two/one remaining after pickup.
                 objects = detect_materials(img, False, select_three=False)
                 found = material_center(objects, target, request[3:] if len(request) == 5 else None)
+            elif mode == "TABLE":
+                found = table.detect(img, target, draw=True)
+                cv2.putText(img, table.state, (5, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+            elif mode == "OCCUPIED":
+                objects = detect_materials(img, False, select_three=False)
+                found = occupied_middle_center(objects, target)
             else:
                 centers = ring_color_circle_position(img)
                 if centers is not None:
                     found = centers[2 * (target - 1):2 * target]
-            result = stable.update(found)
+            # TABLE already requires five stable frame centers, not three extra batches.
+            result = found if mode in ("TABLE", "NEAR") else stable.update(found)
+            if result is not None and mode in ("TABLE", "OCCUPIED"):
+                points = (table.detector.last_points if mode == "TABLE" else
+                          {obj["color"]: obj["center"] for obj in objects})
+                # Capture only at the aligned station, before the first pickup.
+                if not (near.bind(points, target, geometry=table.detector.last_geometry,
+                                  areas={c: obj['area'] for c, obj in table.detector.selected_candidates.items()})
+                        if mode == "TABLE" else positions.bind(points, target)):
+                    result = None
             if result is None:
                 serial.write(("VISION,%d,NONE\n" % req).encode())
+            elif mode in ("PICK", "NEAR"):
+                serial.write(("VISION,%d,%s,%d,%s\n" % (req, mode, target, result)).encode())
             elif mode == "QR":
                 serial.write(("VISION,%d,QR,%s\n" % (req, result)).encode())
                 print(result)
@@ -782,7 +1688,22 @@ def main():
             cv2.putText(img, "%s target=%d" % (mode, target), (5, 18),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
         else:
-            cv2.putText(img, "WAIT CAM REQUEST", (5, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+            preview.draw(img)
+        if touch is not None and (request is None or request[1] == "IDLE"):
+            _, _, pressed = touch.read()
+            if not pressed:
+                press_start = None
+            elif press_start is None:
+                press_start = time.monotonic()
+            elif time.monotonic() - press_start >= 1.5:
+                calibrate_table_colors(cam, disp, touch, table,
+                    ("light_blue", "blue", "yellow", "green", "black", "red"))
+                table.reset()
+                preview.reset()
+                stable = StableTarget()
+                press_start = None
+        else:
+            press_start = None
         disp.show(image.cv2image(img, bgr=True, copy=True))
 
 

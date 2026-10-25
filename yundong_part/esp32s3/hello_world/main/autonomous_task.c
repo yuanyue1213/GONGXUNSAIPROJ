@@ -5,7 +5,7 @@
 #include <math.h>
 #define AUTO_SETTLE_MS 100U
 
-/* BODY_V1: distances in mm, C=left / W=right relative 90-degree turns.
+/* BODY_NEAR_V3: distances in mm, C=left / W=right relative 90-degree turns.
  * Start with the vehicle's tail facing the other start/stop area. */
 typedef struct { char direction; uint16_t amount; char dock; } BodyStep;
 static const BodyStep route[]={
@@ -14,11 +14,11 @@ static const BodyStep route[]={
     {'B',900,'T'},{'B',900,0},{'W',90,0},{'B',900,'R'},{'C',90,0},
     {'F',1900,0},{'C',90,'P'},{'B',900,0},{'W',90,0},{'B',900,'K'},
     {'C',90,0},{'F',1900,0},{'W',90,0},{'F',1000,0},{'L',100,0}};
-typedef enum { OFF, READY, REFERENCE, STOW, NAV, ARRIVE, QR, PREPARE, SLOT, OBSERVE, CORRECT, RESTORE, CARD, HOLD } Phase;
+typedef enum { OFF, READY, REFERENCE, STOW, NAV, ARRIVE, QR, PREPARE, SLOT, OBSERVE, CORRECT, RESTORE, CARD, HOLD, SELECT, RAW_PREPARE, RAW_WAIT } Phase;
 static struct {
     AutoOutput stm,event;
     Phase phase,next;
-    bool running,waiting,have_code,vision_enabled,arm_enabled,options_loaded,config_error,drive_loaded,body_loaded;
+    bool running,waiting,have_code,vision_enabled,arm_enabled,options_loaded,config_error,drive_loaded,body_loaded,station_aligned,position_ready,default_code_mode;
     uint32_t run,id,pending,since,last_query,settle_until,config_id,last_run;
     uint32_t forward,lateral,rpm,fine,mask,corrections,turn_rpm,correction_pulses,wheel_ppr;
     float target_x,target_y;
@@ -26,13 +26,25 @@ static struct {
     uint16_t slots[3];
     uint16_t turn_angle;
     char camera_line[64];
-    RobotSequenceCommand profiles[5][3]; /* R,G,P,T,K */
+    RobotSequenceCommand profiles[5][3]; /* R,G,P,T,K; physical image left/middle/right, NOT onboard slot */
     char manual_code[16];
     TaskCode code;
-    unsigned node,group,item;
+    unsigned node,group,item,external;
     unsigned grabs,puts;
     char correction_direction;
 } a;
+static const char *stage(void)
+{
+    switch(a.phase) {
+    case READY: return "READY"; case REFERENCE: return "REFERENCE";
+    case STOW: return "STOW"; case NAV: if(a.node>=sizeof(route)/sizeof(route[0])) return "DRIVE"; return route[a.node].direction=='C'||route[a.node].direction=='W'?"TURN":"DRIVE";
+    case QR: return "QR"; case OBSERVE: return "ALIGN"; case CORRECT: return "CORRECT";
+    case SELECT: return "SELECT"; case SLOT: return "SLOT";
+    case RAW_PREPARE: return "RAW_READY"; case RAW_WAIT: return "RAW_WAIT";
+    case CARD: return "ARM"; case PREPARE: return "ARM_BASE";
+    default: return "FLOW";
+    }
+}
 static int role_index(char c) { const char *p=strchr("RGPTK",c); return p&&c?p-"RGPTK":-1; }
 static void emit(const char *state,const char *reason)
 {
@@ -57,7 +69,9 @@ void AutoTask_Stop(const char *reason)
         if(a.arm_enabled) { a.stm("CMD,0,Z\n"); a.stm("CMD,0,H\n"); a.stm("CMD,0,Q\n"); }
         a.stm("CMD,0,S\n"); camera_idle();
     }
-    a.running=a.waiting=false; a.phase=OFF; emit("STOPPED",reason);
+    char detail[96];
+    snprintf(detail,sizeof(detail),"%s:%s",stage(),reason);
+    a.running=a.waiting=false; a.phase=OFF; emit("STOPPED",detail);
 }
 static uint32_t next_id(void)
 {
@@ -71,6 +85,8 @@ static void action(const char *body,Phase next,uint32_t now)
     if(n<0||(size_t)n>=sizeof(line)) { AutoTask_Stop("FRAME_LENGTH"); return; }
     a.pending=id; a.waiting=true; a.since=a.last_query=now; a.next=next;
     a.stm(line);
+    char detail[64]; snprintf(detail,sizeof(detail),"%s:WAIT_ACTION",stage());
+    emit(a.phase==NAV?(strcmp(stage(),"TURN")==0?"TURNING":"RUNNING"):"WORK",detail);
 }
 static bool work_node(void)
 {
@@ -113,7 +129,7 @@ bool AutoTask_Command(const char *line,uint32_t now)
         a.config_id=id; a.forward=forward; a.lateral=lateral; a.rpm=rpm; a.fine=fine;
         a.target_x=tx; a.target_y=ty; memcpy(a.map_p,mp,4U); memcpy(a.map_t,mt,4U);
         for(unsigned i=0;i<3U;++i) a.slots[i]=(uint16_t)slots[i];
-        a.mask=0U; a.body_loaded=false; a.run=id; a.vision_enabled=a.arm_enabled=true;
+        a.mask=0U; a.body_loaded=a.default_code_mode=false; a.run=id; a.vision_enabled=a.arm_enabled=true;
         a.options_loaded=a.config_error=a.drive_loaded=false; a.manual_code[0]=0;
         emit("CONFIGURED","0"); return true;
     }
@@ -135,7 +151,7 @@ bool AutoTask_Command(const char *line,uint32_t now)
             !RobotProtocol_U32(&p,&arm,',')||arm>1U) { emit("ERROR","OPTIONS"); return true; }
         TaskCode code;
         if(strcmp(p,"-")!=0&&!TaskProtocol_Code(p,&code)) { emit("ERROR","TASK_CODE"); return true; }
-        if(!vision&&arm&&strcmp(p,"-")==0) { emit("ERROR","TASK_CODE_REQUIRED"); return true; }
+        if(!vision&&arm&&strcmp(p,TASK_DEFAULT_CODE)!=0) { emit("ERROR","DEFAULT_TASK_CODE_REQUIRED"); return true; }
         if(strcmp(p,"-")!=0) { memcpy(a.manual_code,p,16U); a.code=code; }
         else a.manual_code[0]=0;
         a.vision_enabled=vision!=0U; a.arm_enabled=arm!=0U; a.options_loaded=true;
@@ -144,8 +160,8 @@ bool AutoTask_Command(const char *line,uint32_t now)
     if(strncmp(line,"AUTO_PATH,",10U)==0) {
         p=line+10U; uint32_t config;
         if(!RobotProtocol_U32(&p,&config,',')||config!=a.config_id||!config||
-            strcmp(p,"BODY_V1")!=0) { emit("ERROR","ROUTE"); return true; }
-        a.body_loaded=true;
+            (strcmp(p,"BODY_NEAR_V3")!=0&&strcmp(p,"BODY_NEAR_DEFAULT_V1")!=0)) { emit("ERROR","ROUTE"); return true; }
+        a.body_loaded=true; a.default_code_mode=strcmp(p,"BODY_NEAR_DEFAULT_V1")==0;
         a.config_error=prior_error; emit("ROUTE","0"); return true;
     }
     if(strncmp(line,"AUTO_PROFILE,",13U)==0||strncmp(line,"AUTO_ARM,",9U)==0) {
@@ -160,6 +176,9 @@ bool AutoTask_Command(const char *line,uint32_t now)
         a.config_error=prior_error; emit("PARAMETERS","0"); return true;
     }
     if(strncmp(line,"AUTO_START,",11U)==0) {
+        if(a.default_code_mode&&strcmp(a.manual_code,TASK_DEFAULT_CODE)!=0) {
+            emit("ERROR","DEFAULT_TASK_CODE_REQUIRED"); return true;
+        }
         p=line+11U;
         if(!RobotProtocol_U32(&p,&id,',')||!id||id==a.last_run||
             !RobotProtocol_U32(&p,&a.run,'\0')||a.run!=a.config_id||a.config_error||!a.drive_loaded||
@@ -171,7 +190,7 @@ bool AutoTask_Command(const char *line,uint32_t now)
         camera_idle();
         a.pending=next_id(); if(!a.pending) return true;
         a.running=true; a.waiting=false; a.phase=READY;
-        a.since=a.last_query=now; a.have_code=!a.vision_enabled&&a.manual_code[0]!=0;
+        a.since=a.last_query=now; a.have_code=a.default_code_mode||(!a.vision_enabled&&a.arm_enabled);
         a.node=a.group=a.item=a.grabs=a.puts=0U;
         char query[40]; snprintf(query,sizeof(query),"QUERY,%lu\n",(unsigned long)a.pending); a.stm(query);
         emit("STARTING","TAIL_TO_OTHER_START"); return true;
@@ -182,10 +201,17 @@ static void request_camera(TaskVisionKind kind,unsigned target,uint32_t now)
 {
     a.pending=next_id(); if(!a.pending) return;
     if(kind==TASK_QR) snprintf(a.camera_line,sizeof(a.camera_line),"CAM,%lu,QR\n",(unsigned long)a.pending);
+    else if(kind==TASK_NEAR) snprintf(a.camera_line,sizeof(a.camera_line),"CAM,%lu,NEAR,%u\n",(unsigned long)a.pending,target);
+    else if(kind==TASK_PICK) snprintf(a.camera_line,sizeof(a.camera_line),"CAM,%lu,PICK,%u\n",(unsigned long)a.pending,target);
     else if(kind==TASK_MAT) snprintf(a.camera_line,sizeof(a.camera_line),"CAM,%lu,MAT,%u,%.1f,%.1f\n",
+        (unsigned long)a.pending,target,(double)a.target_x,(double)a.target_y);
+    else if(kind==TASK_TABLE) snprintf(a.camera_line,sizeof(a.camera_line),"CAM,%lu,TABLE,%u,%.1f,%.1f\n",
+        (unsigned long)a.pending,target,(double)a.target_x,(double)a.target_y);
+    else if(kind==TASK_OCCUPIED) snprintf(a.camera_line,sizeof(a.camera_line),"CAM,%lu,OCCUPIED,%u,%.1f,%.1f\n",
         (unsigned long)a.pending,target,(double)a.target_x,(double)a.target_y);
     else snprintf(a.camera_line,sizeof(a.camera_line),"CAM,%lu,RING,%u\n",(unsigned long)a.pending,target);
     a.since=a.last_query=now; a.stm(a.camera_line);
+    char detail[64]; snprintf(detail,sizeof(detail),"%s:WAIT_VISION",stage()); emit("WORK",detail);
 }
 static unsigned batch(void) { return a.group>=4U?1U:0U; }
 static unsigned role(void)
@@ -203,10 +229,16 @@ static unsigned ring_id(void)
 }
 static unsigned visual_target(TaskVisionKind *kind)
 {
-    if(role()==0U||(a.arm_enabled&&(role()==1U||role()==4U))) { *kind=TASK_MAT; return color(); }
-    *kind=TASK_RING; unsigned id=ring_id(); const char *map=(role()==1U||role()==2U)?a.map_p:a.map_t;
-    for(unsigned i=0;i<3U;++i) if(map[i]==(char)('0'+id)) return i+1U;
-    return 0U;
+    if(role()==0U) {
+        *kind=TASK_TABLE; unsigned b=batch();
+        return a.code.colors[b][0]*100U+a.code.colors[b][1]*10U+a.code.colors[b][2];
+    }
+    if(role()==1U||role()==4U) {
+        *kind=TASK_OCCUPIED; unsigned b=batch();
+        return a.code.colors[b][0]*100U+a.code.colors[b][1]*10U+a.code.colors[b][2];
+    }
+    *kind=TASK_RING;
+    return 2U; /* Align the station's middle once; fixed arm profiles reach L/M/R. */
 }
 static void begin_observation(uint32_t now)
 {
@@ -214,11 +246,16 @@ static void begin_observation(uint32_t now)
     if(!target) { AutoTask_Stop("TARGET_MAPPING"); return; }
     a.phase=OBSERVE; request_camera(kind,target,now);
 }
+static bool needs_observation(void)
+{
+    return a.vision_enabled&&!a.station_aligned;
+}
 static void enter_node(uint32_t now)
 {
-    if(route[a.node].dock=='Q'&&a.vision_enabled) { a.phase=QR; request_camera(TASK_QR,0U,now); emit("SCANNING","0"); return; }
+    if(route[a.node].dock=='Q'&&a.vision_enabled&&!a.have_code) { a.phase=QR; request_camera(TASK_QR,0U,now); emit("SCANNING","0"); return; }
     if(work_node()) {
         if(a.vision_enabled||a.arm_enabled) {
+            a.station_aligned=a.position_ready=false;
             a.phase=PREPARE; a.item=0U; a.corrections=0U; emit(a.arm_enabled?"WORK":"CALIBRATING","0"); return;
         }
     }
@@ -256,11 +293,12 @@ void AutoTask_Input(const char *line,uint32_t now)
         if(!RobotProtocol_U32(&p,&id,',')||id!=a.pending||!a.waiting) return;
         if(strcmp(p,"DONE,0")==0) {
             a.waiting=false;
+            if(a.phase==STOW) a.turn_angle=0U; /* ARM_POSE stow also homes T. */
             if(a.phase==CARD) {
                 ++a.grabs; ++a.puts; emit("WORK","CARD_DONE");
             }
             a.phase=a.next; a.settle_until=now+AUTO_SETTLE_MS;
-            if(a.phase==OBSERVE) a.pending=0U;
+            if(a.phase==OBSERVE||a.phase==RAW_WAIT) a.pending=0U;
         } else if(strncmp(p,"ERROR,",6U)==0||strncmp(p,"CANCELLED,",10U)==0||strncmp(p,"BUSY,",5U)==0) {
             AutoTask_Stop(strncmp(p,"ERROR,",6U)==0?p+6U:"STM_ACTION_FAILED");
         }
@@ -273,11 +311,27 @@ void AutoTask_Input(const char *line,uint32_t now)
         char event[64]; snprintf(event,sizeof(event),"TASK,%lu,%s\n",(unsigned long)a.run,v.text); a.event(event);
         ++a.node; a.phase=NAV; a.settle_until=now; return;
     }
+    if(a.phase==RAW_WAIT) {
+        if(v.kind!=TASK_NEAR||v.target!=color()||v.position!=2U) return;
+        camera_idle(); a.phase=CARD; a.settle_until=now;
+        emit("WORK","RAW_TARGET_AT_NEAR"); return;
+    }
+    if(a.phase==SELECT) {
+        if(v.kind!=TASK_PICK||v.target!=color()) return;
+        a.external=v.position-1U; a.position_ready=true;
+        camera_idle(); a.phase=PREPARE; a.settle_until=now;
+        char reason[48]; snprintf(reason,sizeof(reason),"COLOR_%u_POSITION_%lu",color(),(unsigned long)v.position);
+        emit("WORK",reason); return;
+    }
     if(a.phase!=OBSERVE) return;
     TaskVisionKind kind; unsigned target=visual_target(&kind);
     if(v.kind!=kind||v.target!=target) return;
     float ex=v.center.x-a.target_x, ey=v.center.y-a.target_y;
-    if(fabsf(ex)<=1.0f&&fabsf(ey)<=1.0f) { a.phase=a.arm_enabled?CARD:HOLD; a.settle_until=now; return; }
+    if(fabsf(ex)<=1.0f&&fabsf(ey)<=1.0f) {
+        camera_idle(); /* Stop sending table coordinates before the first block is removed. */
+        a.station_aligned=true;
+        a.phase=a.arm_enabled?PREPARE:HOLD; a.settle_until=now; return;
+    }
     if(fabsf(ex)*1.090819f>200.0f||fabsf(ey)*1.090819f>200.0f||++a.corrections>20U) {
         AutoTask_Stop("VISION_OUT_OF_APPROACH_RANGE"); return;
     }
@@ -296,10 +350,11 @@ void AutoTask_Input(const char *line,uint32_t now)
 }
 static void advance_card(void)
 {
-    a.corrections=0U;
+    a.corrections=0U; a.position_ready=false;
     if(++a.item<3U) { a.phase=PREPARE; return; }
     a.item=0U;
     ++a.group;
+    a.station_aligned=false;
     /* Process placement -> retrieval at the same dock, all three first. */
     if(a.group==2U||a.group==6U) { a.phase=PREPARE; return; }
     ++a.node; a.phase=a.arm_enabled?STOW:NAV;
@@ -343,30 +398,58 @@ void AutoTask_Tick(uint32_t now)
         action(body,RESTORE,now); break;
     case RESTORE:
         begin_observation(now); break;
-    case QR: case OBSERVE:
+    case QR: case OBSERVE: case SELECT: case RAW_WAIT:
         if(a.phase==OBSERVE&&a.pending==0U) { begin_observation(now); break; }
-        if((uint32_t)(now-a.since)>60000U) { AutoTask_Stop("VISION_TIMEOUT"); break; }
+        if(a.phase==RAW_WAIT&&a.pending==0U) {
+            request_camera(TASK_NEAR,color(),now); emit("WORK","WAIT_RAW_TARGET"); break;
+        }
+        if((uint32_t)(now-a.since)>60000U) { AutoTask_Stop(a.phase==RAW_WAIT?"RAW_TARGET_TIMEOUT":"VISION_TIMEOUT"); break; }
         /* Camera keeps streaming the requested mode. A fresh request after a
          * correction invalidates the previous frame and restarts stability. */
         if((uint32_t)(now-a.last_query)>2000U) { a.stm(a.camera_line); a.last_query=now; }
         break;
     case PREPARE: {
-        if(!a.arm_enabled) { begin_observation(now); break; }
-        RobotSequenceCommand *profile=&a.profiles[role()][a.item];
-        snprintf(body,sizeof(body),"BASE,%lu,60",(unsigned long)profile->base_home);
-        action(body,SLOT,now); break;
+        if(!a.arm_enabled) {
+            if(!needs_observation()) a.phase=HOLD;
+            else begin_observation(now);
+            break;
+        }
+        if(needs_observation()) {
+            /* Camera calibration uses the common middle reference pose. */
+            snprintf(body,sizeof(body),"BASE,%lu,60",(unsigned long)a.profiles[role()][1].base_home);
+            action(body,OBSERVE,now); break;
+        }
+        if(!a.position_ready) {
+            if(a.vision_enabled&&(role()==1U||role()==4U)) {
+                /* A fresh color observation selects a fixed external position. */
+                a.phase=SELECT; request_camera(TASK_PICK,color(),now); break;
+            }
+            if(role()==0U) { a.external=1U; a.position_ready=true; }
+            else {
+            const char *map=(role()==1U||role()==2U)?a.map_p:a.map_t;
+            unsigned id=ring_id(); a.external=3U;
+            for(unsigned i=0;i<3U;++i) if(map[i]==(char)('0'+id)) a.external=i;
+            if(a.external>=3U) { AutoTask_Stop("TARGET_MAPPING"); break; }
+            a.position_ready=true;
+            }
+        }
+        /* The STM32 waypoint now moves base and radial axis together at flight height. */
+        a.phase=SLOT; break;
     }
     case SLOT:
         snprintf(body,sizeof(body),"STATE,T,%u,%u,60",a.turn_angle,a.slots[a.item]);
         a.turn_angle=a.slots[a.item];
-        action(body,a.vision_enabled?OBSERVE:CARD,now); break;
+        action(body,role()==0U&&a.vision_enabled?RAW_PREPARE:CARD,now); break;
+    case RAW_PREPARE:
     case CARD: {
-        RobotSequenceCommand *s=&a.profiles[role()][a.item];
-        snprintf(body,sizeof(body),"STATE_V2,%c,%ld,%ld,%ld,%ld,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
-            s->mode,(long)s->r1,(long)s->z1,(long)s->r2,(long)s->z2,(unsigned long)s->combined_rpm,
+        RobotSequenceCommand *s=&a.profiles[role()][a.external];
+        if(a.phase==CARD&&role()==0U&&a.vision_enabled) { action("RAW_TAKE",HOLD,now); break; }
+        bool raw=a.phase==RAW_PREPARE;
+        snprintf(body,sizeof(body),"%s,%c,%ld,%ld,%ld,%ld,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+            raw?"RAW_READY":"STATE_V2",s->mode,(long)s->r1,(long)s->z1,(long)s->r2,(long)s->z2,(unsigned long)s->combined_rpm,
             (unsigned long)s->gripper_dps,(unsigned long)s->theta,(unsigned long)s->open_angle,
             (unsigned long)s->close_angle,(unsigned long)s->base_home,(unsigned long)s->base_tilt);
-        action(body,HOLD,now); break;
+        action(body,raw?RAW_WAIT:HOLD,now); break;
     }
     case HOLD: advance_card(); break;
     default: break;

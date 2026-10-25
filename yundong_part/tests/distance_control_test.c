@@ -1,3 +1,4 @@
+#include "../shared/servo_motion.h"
 #include <assert.h>
 #include "imu_link.h"
 #include "gyro_turn.h"
@@ -47,6 +48,7 @@ static int fail_origin_read;
 static int64_t origin_position[2], absolute_target[2];
 static unsigned absolute_commands[2];
 static unsigned origin_reads;
+static uint16_t last_servo_angle(char channel);
 static char application_reply[2048], camera_request[128];
 static UART_HandleTypeDef imu_uart={7,HAL_UART_STATE_READY};
 static uint8_t *imu_rx_byte;
@@ -935,13 +937,14 @@ static void test_initial_base_angle_updates(void)
     feed("ORIGIN,1203,100\n"); assert(servo_commands == servos+1); // Duplicate cannot change angle.
     feed("CMD,1204,O\n"); assert(absolute_target[1] == 7200);
     finish_grab_axes(); assert(absolute_target[0] == -3600 && servo_angle == 200);
-    feed("CMD,1205,A\nORIGIN,1206,180\n"); assert(arm_stops == 0 && servo_angle == 180);
-    assert(origin_reads == 2); // Updating during a sequence cancels it without recapturing zero.
+    feed("CMD,1205,A\n"); unsigned reads_before_update=origin_reads;
+    feed("ORIGIN,1206,180\n"); assert(arm_stops > 0 && servo_angle == 180);
+    assert(origin_reads == reads_before_update); // Updating during a sequence cancels it without recapturing zero.
     tick += 10000; RobotControl_Tick();
     feed("CMD,1207,O\n"); finish_grab_axes(); assert(servo_angle == 180 && absolute_target[1] == 7200);
     fail_servo = 1; feed("ORIGIN,1208,100\n"); fail_servo = 0;
     feed("CMD,1209,O\n"); finish_grab_axes(); assert(servo_angle == 180); // Failed PWM update must not replace home angle.
-    feed("ORIGIN,1208,100\n"); assert(servo_angle == 100 && origin_reads == 2);
+    feed("ORIGIN,1208,100\n"); assert(servo_angle == 100 && origin_reads == reads_before_update);
     reset(); RobotControl_Init(&command_uart, true); fail_origin_read = 1;
     feed("ORIGIN,1210,240\n");
     unsigned reads = origin_reads;
@@ -968,7 +971,8 @@ static void test_turn_cards(void)
     tick += 500; RobotControl_Tick(); assert(servo_angle == 60);
     feed("CMD,1401,Z\n"); unsigned servos = servo_commands;
     tick += 5000; RobotControl_Tick(); assert(servo_commands == servos);
-    feed("STATE,1402,T,20,20,1\n"); RobotControl_Tick(); assert(servo_angle == 20);
+    feed("STATE,1402,T,20,20,40\n"); RobotControl_Tick(); assert(servo_angle == 60);
+    tick+=1000; RobotControl_Tick(); assert(servo_angle==20);
     feed("STATE,1403,T,20,80,60\n"); tick += 1000; RobotControl_Tick(); assert(servo_angle == 80);
     feed("STATE,1404,P,0,0,0,0,20,20,50\n");
     unsigned start = servo_commands;
@@ -1036,24 +1040,25 @@ static void test_fractional_center_mean(void)
 static void test_grab_initial_base_ramp(void)
 {
     reset(); feed("SERVO,2100,B,140\n");
-    unsigned r = absolute_commands[1], z = absolute_commands[0];
-    feed("STATE,2101,A,1100,-50,200,-40,20,20,50,60,0,60,0,248,140\n");
-    assert(servo_angle == 140 && absolute_commands[1] == r);
-    tick += 200; RobotControl_Tick(); assert(servo_angle == 142);
-    assert(absolute_commands[1] == r && absolute_commands[0] == z);
-    tick += 800; RobotControl_Tick(); assert(servo_angle == 194);
-    assert(absolute_commands[1] == r && absolute_commands[0] == z);
-    tick += 800; RobotControl_Tick(); assert(servo_angle == 246);
-    assert(absolute_commands[1] == r && absolute_commands[0] == z);
-    tick += 200; RobotControl_Tick(); assert(servo_angle == 248);
-    assert(absolute_commands[1] == r + 1);
-    feed("CMD,2102,Z\nSERVO,2103,B,300\nSTATE,2104,A,1100,-50,200,-40,20,20,50,60,0,60,0,200,140\n");
-    assert(servo_angle == 300);
-    tick += 200; RobotControl_Tick(); assert(servo_angle == 298);
-    tick += 800; RobotControl_Tick(); assert(servo_angle == 250);
-    feed("CMD,2105,Z\n"); unsigned servos = servo_commands;
-    tick += 3000; RobotControl_Tick(); assert(servo_commands == servos);
+    unsigned r=absolute_commands[1];
+    feed("STATE_V2,2101,A,1100,-50,200,-40,20,60,0,60,0,248,140\n");
+    assert(absolute_commands[1]==r+1); /* Radial motion starts with the base. */
+    tick+=400; RobotControl_Tick();
+    assert(last_servo_angle('B')>140&&last_servo_angle('B')<170);
+    assert(absolute_commands[1]==r+1); /* Base progresses while R is still unfinished. */
+    tick+=4000; RobotControl_Tick(); assert(last_servo_angle('B')==248);
+    feed("CMD,2102,Z\n"); unsigned servos=servo_commands;
+    tick+=3000; RobotControl_Tick(); assert(servo_commands==servos);
+    /* Starting below flight height defers rotation until lifting is confirmed. */
+    reset(); origin_position[0]=9000; feed("SERVO,2103,B,140\n");
+    feed("STATE_V2,2104,A,1100,-50,200,-40,20,60,0,60,0,248,140\n");
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('B')==140);
+    arm_flags=lift_flags=3;
+    for(unsigned i=0;i<4;++i) { tick+=50; RobotControl_Tick(); }
+    tick+=400; RobotControl_Tick(); assert(last_servo_angle('B')>140);
+    feed("CMD,2105,Z\n");
 }
+
 static void test_decimal_camera_chain(void)
 {
     CameraCenter rings[3]; int32_t pulses[4]; uint16_t speeds[4]; bool aligned;
@@ -1196,19 +1201,12 @@ static void test_base_acceleration(void)
     tick += 200; RobotControl_Tick(); assert(servo_angle == 98);
     tick += 3000; RobotControl_Tick(); assert(servo_angle == 0);
     feed("BASE,2104,360,360\n"); tick += 4000; RobotControl_Tick(); assert(servo_angle == 360);
-    // Automatic 108-degree move accelerates, cruises, then decelerates in 2 s.
-    reset(); feed("CMD,2105,P\n"); finish_grab_axes(); advance_grab_hold();
-    tick += 200; RobotControl_Tick(); assert(servo_angle == 246);
-    tick += 800; RobotControl_Tick(); assert(servo_angle == 194);
-    tick += 800; RobotControl_Tick(); assert(servo_angle == 142);
-    tick += 200; RobotControl_Tick(); assert(servo_angle == 140);
-    // Large automatic move extends beyond 2 s rather than increasing acceleration.
+    // Automatic base interpolation can progress concurrently with radial motion.
     reset(); feed("SERVO,2106,B,0\nCMD,2107,A\n");
-    unsigned arm_commands = absolute_commands[1];
-    tick += 2000; RobotControl_Tick();
-    assert(servo_angle > 0 && servo_angle < 248 && absolute_commands[1] == arm_commands);
-    tick += 1000; RobotControl_Tick();
-    assert(servo_angle == 248 && absolute_commands[1] == arm_commands + 1);
+    unsigned arm_commands=absolute_commands[1];
+    tick+=1000; RobotControl_Tick(); assert(last_servo_angle('B')>0&&last_servo_angle('B')<248);
+    assert(absolute_commands[1]==arm_commands);
+    tick+=4000; RobotControl_Tick(); assert(last_servo_angle('B')==248);
     // Cancel during acceleration holds the last PWM target.
     reset(); feed("BASE,2108,308,60\n"); tick += 200; RobotControl_Tick();
     uint16_t held = servo_angle; feed("CMD,2109,Z\n");
@@ -1253,84 +1251,82 @@ static void test_vector_protocol_and_speeds(void)
 static void test_vector_grab(void)
 {
     reset(); feed("STATE_V2,2200,A,1100,-50,200,-40,600,60,0,60,0,248,140\n");
-    assert(absolute_target[1]==312 && last_arm_angle.speed_rpm==600 && absolute_commands[0]==0);
-    finish_vector_position(); advance_grab_hold(); // Step 2: both axes already started.
-    assert(absolute_target[1]==3118 && absolute_target[0]==3600);
-    assert(last_arm_angle.speed_rpm>300 && last_lift_angle.rpm>300 && last_lift_angle.rpm<600);
-    unsigned rc=absolute_commands[1], zc=absolute_commands[0];
-    arm_flags=3; tick+=50; RobotControl_Tick(); assert(absolute_commands[0]==zc); // R early does not start Z tail.
-    lift_flags=3; tick+=50; RobotControl_Tick();
-    assert(absolute_commands[1]==rc && absolute_target[0]==4500 && last_lift_angle.rpm==300);
-    lift_flags=1; tick+=50; RobotControl_Tick(); assert(last_servo_angle('G')==60);
-    finish_vector_position(); advance_grab_hold(); assert(last_servo_angle('G')==0); // Step 3.
-    rc=absolute_commands[1]; tick+=999; RobotControl_Tick(); assert(absolute_commands[1]==rc);
-    tick+=1; RobotControl_Tick(); // Step 4: upward pair starts together.
-    assert(absolute_target[1]==312 && absolute_target[0]==0 && absolute_commands[1]==rc+1);
-    finish_vector_position(); advance_grab_hold(); finish_base_rotation(); assert(servo_angle==140); // Step 5.
-    advance_grab_hold(); assert(absolute_target[1]==567 && absolute_target[0]==2700); // Step 6 staged descent.
-    finish_vector_position(); assert(absolute_target[0]==3600 && last_lift_angle.rpm==300);
-    advance_grab_hold(); rc=absolute_commands[1]; zc=absolute_commands[0]; // Step 7 opens before returning.
-    tick+=500; RobotControl_Tick(); assert(last_servo_angle('G')==30 && absolute_commands[1]==rc && absolute_commands[0]==zc);
-    tick+=500; RobotControl_Tick(); assert(absolute_target[1]==312 && absolute_target[0]==0);
-    finish_vector_position(); advance_grab_hold(); assert(servo_angle==140); // Step 8 retains storage angle.
-    unsigned servos=servo_commands; advance_grab_hold(); assert(servo_commands==servos);
-    feed("STATE_V2,2200,A,1100,-50,200,-40,600,60,0,60,0,248,140\n"); assert(servo_commands==servos); // Duplicate.
-    feed("BASE,2201,150,30\n"); tick+=1000; RobotControl_Tick(); assert(servo_angle==150); // Completed/idle.
+    assert(absolute_target[1]==312&&last_arm_angle.speed_rpm==600);
+    finish_vector_position(); advance_grab_hold();
+    assert(absolute_target[1]==3118&&absolute_target[0]==3600);
+    arm_flags=3; tick+=50; RobotControl_Tick();
+    lift_flags=3; tick+=50; RobotControl_Tick(); assert(absolute_target[0]==4500);
+    finish_vector_position(); advance_grab_hold();
+    unsigned rc=absolute_commands[1];
+    assert(last_servo_angle('G')==60); /* Closing starts from current PWM value. */
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('G')==30);
+    assert(absolute_commands[1]==rc);
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('G')==0);
+    assert(absolute_target[1]==3118&&absolute_target[0]==0); /* Lift before retract/sweep. */
+    finish_vector_position(); advance_grab_hold();
+    assert(absolute_target[1]==312); rc=absolute_commands[1];
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('B')<248&&last_servo_angle('B')>140);
+    assert(absolute_commands[1]==rc&&absolute_target[0]==0);
+    finish_vector_position(); assert(absolute_target[0]==0); finish_base_rotation(); advance_grab_hold();
+    assert(last_servo_angle('B')==140&&absolute_target[1]==567&&absolute_target[0]==2700);
+    finish_vector_position(); advance_grab_hold();
+    rc=absolute_commands[1]; unsigned zc=absolute_commands[0];
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('G')==30);
+    assert(absolute_commands[1]==rc&&absolute_commands[0]==zc);
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('G')==60);
+    finish_vector_position(); advance_grab_hold(); advance_grab_hold();
+    unsigned servos=servo_commands;
+    feed("STATE_V2,2200,A,1100,-50,200,-40,600,60,0,60,0,248,140\n"); assert(servo_commands==servos);
+    feed("BASE,2201,150,30\n"); tick+=1000; RobotControl_Tick(); assert(last_servo_angle('B')==150);
 }
+
 static void test_vector_release(void)
 {
     reset(); feed("STATE_V2,2300,P,200,-40,1300,-110,200,60,0,60,0,248,140\n");
-    finish_vector_position(); advance_grab_hold(); finish_base_rotation(); assert(servo_angle==140);
-    advance_grab_hold(); // Step 3: keep open until both axes and the descent tail arrive.
-    assert(absolute_target[1]==567 && absolute_target[0]==2700 && servo_angle==60);
-    arm_flags=lift_flags=3; tick+=50; RobotControl_Tick(); assert(absolute_target[0]==3600 && servo_angle==60);
-    lift_flags=1; tick+=50; RobotControl_Tick(); assert(servo_angle==60);
-    finish_vector_position(); assert(servo_angle==0);
-    tick+=500; RobotControl_Tick(); // 60 degrees at 60 deg/s needs a full second.
-    advance_grab_hold(); assert(absolute_target[1]==312 && absolute_target[0]==0); // Step 4 parallel up.
-    finish_vector_position(); advance_grab_hold(); finish_base_rotation(); assert(servo_angle==248);
-    advance_grab_hold(); assert(absolute_target[1]==3685 && absolute_target[0]==9000); // Step 6.
-    finish_vector_position(); assert(absolute_target[0]==9900 && last_lift_angle.rpm==300);
-    advance_grab_hold(); tick+=1000; RobotControl_Tick(); assert(servo_angle==60); // Step 7 open.
-    advance_grab_hold(); assert(absolute_target[1]==312 && absolute_target[0]==0); // Step 8 return pair.
+    finish_vector_position(); advance_grab_hold(); finish_base_rotation(); advance_grab_hold();
+    assert(last_servo_angle('B')==140&&absolute_target[1]==567&&absolute_target[0]==2700);
+    finish_vector_position();
+    assert(last_servo_angle('G')>0&&last_servo_angle('G')<=60);
+    advance_grab_hold(); assert(last_servo_angle('G')==0&&absolute_target[0]==0);
+    assert(absolute_target[1]==567); /* Lift vertically before turning outward. */
     finish_vector_position(); advance_grab_hold();
-    feed("BASE,2301,250,30\n"); tick+=1000; RobotControl_Tick(); assert(servo_angle==250);
+    assert(absolute_target[1]==3685&&absolute_target[0]==0); /* R and base overlap at height. */
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('B')>140&&last_servo_angle('B')<248);
+    finish_vector_position(); assert(absolute_target[0]==0); finish_base_rotation(); advance_grab_hold();
+    assert(absolute_target[0]==9000&&last_servo_angle('B')==248);
+    finish_vector_position(); advance_grab_hold();
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('G')==30);
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('G')==60);
+    finish_vector_position(); advance_grab_hold();
+    feed("BASE,2301,250,30\n"); tick+=1000; RobotControl_Tick(); assert(last_servo_angle('B')==250);
 }
+
 static void test_sequence_optimized_timing(void)
 {
-    /* Ordinary positioning settles for 200 ms, not the old fixed 500 ms.
-     * Slow closing still reserves its full 60/6 = 10 seconds before retracting. */
+    /* Servo interpolation runs while motors are unfinished. A waypoint waits
+     * for the slowest job; a 6 deg/s closure really takes ten seconds. */
     reset(); feed("SERVO,2600,G,60\nSTATE_V2,2601,A,1100,-50,200,-40,20,6,0,60,0,248,140\n");
-    finish_vector_position();
-    unsigned rc=absolute_commands[1];
-    tick+=49; RobotControl_Tick(); assert(absolute_commands[1]==rc);
-    tick+=1; RobotControl_Tick(); assert(absolute_commands[1]==rc+1);
-    finish_vector_position();
-    tick+=99; RobotControl_Tick(); assert(last_servo_angle('G')==60);
-    tick+=1; RobotControl_Tick(); assert(last_servo_angle('G')==0);
-    rc=absolute_commands[1];
-    tick+=9999; RobotControl_Tick(); assert(absolute_commands[1]==rc);
-    tick+=1; RobotControl_Tick(); assert(absolute_commands[1]==rc+1);
+    finish_vector_position(); advance_grab_hold(); finish_vector_position();
+    tick+=200; RobotControl_Tick(); unsigned rc=absolute_commands[1], zc=absolute_commands[0];
+    tick+=5000; RobotControl_Tick(); assert(last_servo_angle('G')==30);
+    assert(absolute_commands[1]==rc&&absolute_commands[0]==zc);
+    tick+=4999; RobotControl_Tick(); assert(absolute_commands[0]==zc);
+    tick+=1; RobotControl_Tick(); assert(last_servo_angle('G')==0&&absolute_commands[0]==zc+1);
     feed("CMD,2602,Z\n");
-
-    /* Initial opening overlaps positioning, but the next descent must wait
-     * for 45/60 = 750 ms from the opening command, even if R arrives early. */
     reset(); feed("STATE_V2,2603,A,1100,-50,200,-40,20,60,0,60,0,248,140\n");
-    finish_vector_position(); rc=absolute_commands[1];
-    tick=749; RobotControl_Tick(); assert(absolute_commands[1]==rc);
-    tick=750; RobotControl_Tick(); assert(absolute_commands[1]==rc+1);
+    rc=absolute_commands[1]; tick+=375; RobotControl_Tick();
+    assert(last_servo_angle('G')>15&&last_servo_angle('G')<60&&absolute_commands[1]==rc);
+    tick+=375; RobotControl_Tick(); assert(last_servo_angle('G')==60&&absolute_commands[1]==rc);
+    finish_vector_position(); tick+=200; RobotControl_Tick(); assert(absolute_commands[1]==rc+1);
     feed("CMD,2604,Z\n");
-
-    /* Release opens only at the origin; its opening budget starts there,
-     * rather than when the positioning command was sent. */
-    reset(); feed("STATE_V2,2605,P,200,-40,1100,-50,20,60,0,60,0,248,140\n");
-    finish_vector_position();
-    unsigned servos=servo_commands;
-    tick=799; RobotControl_Tick(); assert(servo_commands==servos);
-    tick+=20; RobotControl_Tick();
-    tick=850; RobotControl_Tick(); tick+=100; RobotControl_Tick();
-    assert(last_servo_angle('B')<248);
+    reset(); feed("SERVO,2607,G,15\nSTATE_V2,2605,P,200,-40,1100,-50,20,60,0,60,0,248,140\n");
+    tick+=1000; RobotControl_Tick(); assert(last_servo_angle('G')==15); /* No opening while unsafe. */
+    finish_vector_position(); tick+=375; RobotControl_Tick();
+    assert(last_servo_angle('G')>15&&last_servo_angle('G')<60);
+    feed("CMD,2606,Z\n"); unsigned servos=servo_commands;
+    tick+=3000; RobotControl_Tick(); assert(servo_commands==servos);
 }
+
 static void test_vector_edge_cases_and_faults(void)
 {
     // User example from 0,0 to 110,-110: first reach 110,-100, then descend 10 mm.
@@ -1783,8 +1779,88 @@ static void test_route_position_moves(void)
     for(unsigned i=0;i<4U;++i) poll_without_keep(50);
     assert(strstr(application_reply,"ACTION,911,DONE,0"));
 }
+static void test_reference_servo_curve_and_parallel_fault(void)
+{
+    assert(ServoMotion_Angle(0,100,0,1000)==0);
+    assert(ServoMotion_Angle(0,100,250,1000)==10);
+    assert(ServoMotion_Angle(0,100,500,1000)==50);
+    assert(ServoMotion_Angle(0,100,750,1000)==90);
+    assert(ServoMotion_Angle(100,0,250,1000)==90);
+    assert(ServoMotion_Angle(0,100,99999,1000)==100);
+    assert(ServoMotion_Angle(100,10,0,0)==10);
+    reset(); feed("STATE,3900,T,0,120,60\n");
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('T')==12);
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('T')==60);
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('T')==108);
+    tick+=500; RobotControl_Tick(); assert(last_servo_angle('T')==120);
+    reset(); feed("SERVO,3901,B,140\nSTATE_V2,3902,A,1100,-50,200,-40,20,60,0,60,0,248,140\n");
+    tick+=400; RobotControl_Tick(); assert(last_servo_angle('B')>140);
+    fail_servo=1; tick+=20; RobotControl_Tick();
+    assert(arm_stops>0); unsigned commands=servo_commands;
+    fail_servo=0; tick+=4000; RobotControl_Tick(); assert(servo_commands==commands);
+}
+static void prepare_raw_pick(void)
+{
+    feed("EXEC,4000,RAW_READY,A,1100,-50,200,-40,600,60,0,60,0,248,140\n");
+    assert(strstr(application_reply,"ACTION,4000,ACCEPTED"));
+    arm_flags=lift_flags=3;
+    for(unsigned i=0;i<100U&&!strstr(application_reply,"ACTION,4000,DONE");++i) poll_without_keep(200);
+    assert(strstr(application_reply,"ACTION,4000,DONE,0"));
+    assert(last_servo_angle('G')==60);
+}
+static void test_raw_prepare_wait_take(void)
+{
+    reset(); feed("EXEC,3999,RAW_TAKE\n");
+    assert(strstr(application_reply,"ERROR,INVALID_OR_NOT_READY"));
+    reset(); prepare_raw_pick();
+    unsigned servos=servo_commands,arm=absolute_commands[1],lift=absolute_commands[0];
+    for(unsigned i=0;i<30U;++i) poll_without_keep(200);
+    assert(last_servo_angle('G')==60&&servo_commands==servos);
+    assert(absolute_commands[1]==arm&&absolute_commands[0]==lift);
+    feed("EXEC,4000,RAW_TAKE\n"); assert(strstr(application_reply,"ERROR,REUSED"));
+    feed("EXEC,4001,RAW_TAKE\n");
+    tick+=200; RobotControl_Tick(); assert(last_servo_angle('G')<60&&last_servo_angle('G')>0);
+    assert(absolute_commands[1]==arm&&absolute_commands[0]==lift); /* No retraction/re-extension before closure. */
+    servos=servo_commands; feed("EXEC,4001,RAW_TAKE\n"); assert(servo_commands==servos);
+    for(unsigned i=0;i<150U&&!strstr(application_reply,"ACTION,4001,DONE");++i) poll_without_keep(200);
+    assert(strstr(application_reply,"ACTION,4001,DONE,0"));
+    servos=servo_commands; feed("EXEC,4001,RAW_TAKE\n"); assert(servo_commands==servos);
+    feed("EXEC,4002,RAW_TAKE\n"); assert(strstr(application_reply,"ERROR,INVALID_OR_NOT_READY"));
+    reset(); prepare_raw_pick(); feed("CMD,0,Z\nEXEC,4003,RAW_TAKE\n");
+    assert(strstr(application_reply,"ERROR,INVALID_OR_NOT_READY")&&last_servo_angle('G')==60);
+    reset(); prepare_raw_pick(); feed("EXEC,4004,IMU_ZERO\n");
+    feed("EXEC,4005,RAW_TAKE\n"); assert(last_servo_angle('G')==60);
+}
+static void test_turntable_camera_relay(void)
+{
+    reset(); camera_ready();
+    feed("CAM,990,TABLE,156,256.0,160.0\n");
+    assert(strcmp(camera_request,"CAM,990,TABLE,156,256.0,160.0\n")==0);
+    camera_feed("VISION,990,TABLE,156,255.0,160.0\n"); RobotControl_Tick();
+    assert(strstr(application_reply,"VISION,990,TABLE,156,255.0,160.0\n"));
+    application_reply[0]=0;
+    camera_feed("VISION,990,TABLE,111,255.0,160.0\n"); RobotControl_Tick();
+    assert(!strstr(application_reply,"VISION,"));
+    feed("CAM,991,OCCUPIED,156,256.0,160.0\n");
+    assert(strcmp(camera_request,"CAM,991,OCCUPIED,156,256.0,160.0\n")==0);
+    camera_feed("VISION,991,OCCUPIED,156,230.0,160.0\n"); RobotControl_Tick();
+    assert(strstr(application_reply,"VISION,991,OCCUPIED,156,230.0,160.0\n"));
+    feed("CAM,992,PICK,5\n");
+    assert(strcmp(camera_request,"CAM,992,PICK,5\n")==0);
+    camera_feed("VISION,992,PICK,5,3\n"); RobotControl_Tick();
+    assert(strstr(application_reply,"VISION,992,PICK,5,3\n"));
+    feed("CAM,993,NEAR,5\n"); assert(strcmp(camera_request,"CAM,993,NEAR,5\n")==0);
+    camera_feed("VISION,993,NEAR,5,2\n"); RobotControl_Tick();
+    assert(strstr(application_reply,"VISION,993,NEAR,5,2\n"));
+    application_reply[0]=0;
+    camera_feed("VISION,992,PICK,5,4\n"); RobotControl_Tick();
+    assert(!strstr(application_reply,"VISION,"));
+}
 int main(void)
 {
+    test_reference_servo_curve_and_parallel_fault();
+    test_raw_prepare_wait_take();
+    test_turntable_camera_relay();
     test_route_position_moves();
     test_startup_stop_busy_reason();
     test_motor_fault_feedback();

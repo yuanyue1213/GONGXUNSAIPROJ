@@ -1,3 +1,5 @@
+#include "../../../../shared/raw_pick_protocol.h"
+#include "../../../../shared/servo_motion.h"
 /**
  ******************************************************************************
  * @file    robot_control.c
@@ -370,7 +372,7 @@ static void RobotControl_TickPose(void)
     }
 }
 
-/* Eight grab states. r/z are absolute offsets from the startup origin.
+/* Eight reference-style waypoints. r/z are absolute offsets from startup.
  * Position/rotation settling and gripper travel use separate timing budgets. */
 typedef struct {
     uint16_t gripper, base;
@@ -405,13 +407,15 @@ static int64_t s_sequence_final_z;
 #define ROBOT_GRAB_ARM_PULSES     3200U
 #define ROBOT_GRAB_HOLD_MS        500U
 #define ROBOT_SEQUENCE_SETTLE_MS  200U
-#define ROBOT_BASE_ROTATE_MS     2000U
 #define ROBOT_BASE_UPDATE_MS       20U
-static uint32_t s_gripper_open_ms, s_sequence_gripper_dps;
+static uint32_t s_sequence_gripper_dps;
 static uint32_t s_sequence_hold_ms;
 static uint32_t s_sequence_grip_tick, s_sequence_grip_ms;
 static int32_t s_sequence_gripper_start, s_sequence_gripper_end;
 static bool s_grab_active;
+static bool s_raw_preparing, s_raw_prepared;
+static bool s_sequence_grip_active, s_sequence_base_pending;
+static uint32_t s_sequence_base_tick;
 static bool s_release_mode;
 static bool s_turn_card_active, s_release_origin_pending;
 static uint32_t s_turn_card_tick, s_turn_card_update, s_turn_card_ms;
@@ -441,13 +445,13 @@ static uint32_t RobotControl_GripTravelMs(uint16_t from, uint16_t to)
 }
 static bool RobotControl_SequenceGrip(uint16_t target)
 {
-    uint32_t travel = s_gripper_angle_known ? RobotControl_GripTravelMs(s_gripper_angle, target) :
-        RobotControl_GripTravelMs(0U, 270U);
-    if (!RobotControl_SetServoAngle('G', target)) return false;
-    if (travel != 0U) {
-        s_sequence_grip_tick = HAL_GetTick(); s_sequence_grip_ms = travel;
-    }
-    return true;
+    uint16_t start=s_gripper_angle_known?s_gripper_angle:target;
+    uint32_t travel=RobotControl_GripTravelMs(start,target);
+    s_sequence_gripper_start=start; s_sequence_gripper_end=target;
+    s_sequence_grip_tick=s_gripper_update_tick=HAL_GetTick(); s_sequence_grip_ms=travel;
+    s_sequence_grip_active=travel!=0U;
+    return travel==0U||RobotControl_SetServoAngle('G',start);
+
 }
 static void RobotControl_FinishSequencePosition(void)
 {
@@ -476,6 +480,8 @@ static void RobotControl_CancelGrab(void)
     if(s_exec_active) s_exec_failed=true;
     s_plan_active = false; s_plan_count = 0U; s_plan_mask = 0U;
     s_grab_active = false; s_turn_card_active = false; s_release_origin_pending = false;
+    s_raw_preparing = s_raw_prepared = false;
+    s_sequence_grip_active = s_sequence_base_pending = false;
     if (s_grab_arm_wait && s_arm_move_active) RobotControl_StopArmMove();
     if (s_grab_lift_wait && s_lift_angle_active) RobotControl_StopLiftAngle();
     s_grab_arm_wait = s_grab_lift_wait = false;
@@ -548,38 +554,32 @@ static void RobotControl_TickManualGripper(void)
 
 static bool RobotControl_ApplyGrabStep(void)
 {
-    const GrabStep *steps = s_sequence_steps;
-    const GrabStep *step = &steps[s_grab_step];
-    s_sequence_hold_ms = ROBOT_SEQUENCE_SETTLE_MS;
-    if (!s_release_mode && s_grab_step == 2U) s_sequence_hold_ms = ROBOT_GRAB_HOLD_MS;
-    /* Start every ramp from the last commanded angle, including a new grab card. */
-    s_grab_base_rotating = s_release_mode ? (s_grab_step == 1U || s_grab_step == 4U) :
-        (s_grab_step == 4U || (s_grab_step == 0U && s_base_angle != step->base));
-    s_sequence_base_start = (int32_t)s_base_angle;
-    if (s_grab_base_rotating) {
-        uint32_t distance = (uint32_t)abs((int)step->base - s_sequence_base_start);
-        /* Retain the nominal 2 s automatic move when fixed acceleration allows
-         * it; larger moves use the shortest symmetric triangular profile. */
-        float duration = ROBOT_BASE_ROTATE_MS * 0.001f;
-        float discriminant = duration * duration - 4.0f * distance / ROBOT_BASE_ACCEL_DPS2;
-        float peak = discriminant >= 0.0f ? 2.0f * distance / (duration + sqrtf(discriminant)) :
-            sqrtf(distance * ROBOT_BASE_ACCEL_DPS2);
-        s_sequence_base_ramp = RobotControl_BaseRamp(distance, peak);
+    const GrabStep *step=&s_sequence_steps[s_grab_step];
+    uint32_t now=HAL_GetTick();
+    s_sequence_hold_ms=(!s_release_mode&&s_grab_step==2U)?ROBOT_GRAB_HOLD_MS:ROBOT_SEQUENCE_SETTLE_MS;
+    s_grab_tick=s_base_update_tick=s_sequence_base_tick=now;
+    s_sequence_base_start=s_base_angle;
+    s_grab_base_rotating=s_base_angle!=step->base;
+    s_sequence_base_pending=false;
+    if(s_grab_base_rotating) {
+        int64_t actual_z;
+        if(!ArmMotor_ReadPosition(1U,&actual_z)) return false;
+        /* Never start a sweep while the object is still below flight height.
+         * Once raised, radial positioning and base rotation share a waypoint. */
+        s_sequence_base_pending=actual_z>s_lift_origin+90;
+        uint32_t distance=(uint32_t)abs((int)step->base-(int)s_base_angle);
+        s_sequence_base_ramp=RobotControl_BaseRamp(distance,120.0f);
+        /* Quintic maximum acceleration is 5.774 * distance / T^2. */
+        uint32_t smooth_ms=(uint32_t)ceilf(1000.0f*sqrtf(5.774f*distance/ROBOT_BASE_ACCEL_DPS2));
+        if(s_sequence_base_ramp.duration_ms<smooth_ms) s_sequence_base_ramp.duration_ms=smooth_ms;
+        uint32_t speed_ms=(uint32_t)ceilf(1875.0f*distance/120.0f);
+        if(s_sequence_base_ramp.duration_ms<speed_ms) s_sequence_base_ramp.duration_ms=speed_ms;
     }
-    uint16_t base = s_grab_base_rotating ? s_base_angle : step->base;
-    uint16_t gripper = s_release_mode && s_grab_step == 2U ? steps[1].gripper : step->gripper;
-    s_grab_gripper_opening = s_grab_step == 6U && steps[5].gripper != gripper;
-    if (s_grab_gripper_opening) {
-        s_sequence_gripper_start = steps[5].gripper; s_sequence_gripper_end = gripper;
-        s_gripper_open_ms = RobotControl_GripTravelMs((uint16_t)s_sequence_gripper_start,
-            (uint16_t)s_sequence_gripper_end);
-        gripper = (uint16_t)s_sequence_gripper_start;
-    }
-    s_grab_tick = s_base_update_tick = s_gripper_update_tick = HAL_GetTick();
-    if (!RobotControl_SequenceGrip(gripper) ||
-        (!s_release_mode && !RobotControl_SetServoAngle('B', base))) return false;
-    /* Finish releasing before moving away from the object. */
-    return s_grab_gripper_opening || s_grab_base_rotating || RobotControl_StartSequencePosition();
+    uint16_t gripper=s_release_mode&&s_grab_step==2U?s_sequence_steps[1].gripper:step->gripper;
+    s_grab_gripper_opening=s_grab_step==6U&&step->position&&s_gripper_angle!=gripper;
+    if(!RobotControl_SequenceGrip(gripper)) return false;
+    /* Opening may overlap a safe approach, but not the departure after release. */
+    return s_grab_gripper_opening||RobotControl_StartSequencePosition();
 }
 
 static void RobotControl_CompleteSequence(void)
@@ -594,81 +594,78 @@ static void RobotControl_CompleteSequence(void)
 }
 static void RobotControl_TickGrab(void)
 {
-    if (!s_grab_active) return;
-    if (s_turn_card_active) {
-        uint32_t now = HAL_GetTick(), elapsed = now - s_turn_card_tick;
-        if (elapsed < s_turn_card_ms && now - s_turn_card_update < 20U) return;
-        uint32_t progress = elapsed < s_turn_card_ms ? elapsed : s_turn_card_ms;
-        uint16_t angle = s_turn_card_ms == 0U ? (uint16_t)s_turn_card_end :
-            (uint16_t)(s_turn_card_start + (s_turn_card_end - s_turn_card_start) *
-                (int32_t)progress / (int32_t)s_turn_card_ms);
-        if (!RobotControl_SetServoAngle('T', angle)) { RobotControl_CancelGrab(); return; }
-        s_turn_card_update = now;
-        if (elapsed >= s_turn_card_ms) { s_turn_card_active = false; RobotControl_CompleteSequence(); }
-        return;
-    }
-    if (s_grab_step >= 8U) {
-        /* Keep ownership during the inter-card hold, including the grab's final
-         * turntable command; a new card must not immediately overwrite it. */
-        if ((uint32_t)(HAL_GetTick() - s_grab_tick) < ROBOT_GRAB_HOLD_MS) return;
-        s_grab_active = false;
-        const RobotSequenceCommand *next = &s_plan_items[s_plan_index];
-        if (!RobotControl_StartSequence(next, next->mode)) RobotControl_CancelGrab();
-        return;
-    }
-    if (s_grab_gripper_opening) {
-        uint32_t now = HAL_GetTick(), elapsed = (uint32_t)(now - s_grab_tick);
-        if (elapsed < s_gripper_open_ms &&
-            (uint32_t)(now - s_gripper_update_tick) < ROBOT_BASE_UPDATE_MS) return;
-        uint32_t progress = elapsed < s_gripper_open_ms ? elapsed : s_gripper_open_ms;
-        int32_t delta = s_sequence_gripper_end - s_sequence_gripper_start;
-        uint16_t angle = (uint16_t)(s_sequence_gripper_start + delta * (int32_t)progress / (int32_t)s_gripper_open_ms);
-        if (!RobotControl_SetServoAngle('G', angle)) { RobotControl_CancelGrab(); return; }
-        s_gripper_update_tick = now;
-        if (elapsed >= s_gripper_open_ms) {
-            s_grab_gripper_opening = false; s_grab_tick = now;
-            if (!RobotControl_StartSequencePosition()) RobotControl_CancelGrab();
-        }
-        return;
-    }
-    if (s_sequence_position_active) {
-        if ((s_grab_arm_wait && (s_arm_move_stop_pending || (!s_arm_move_active && !s_arm_move_reached))) ||
-            (s_grab_lift_wait && (s_lift_angle_stop_pending || (!s_lift_angle_active && !s_lift_angle_reached)))) {
+    if(!s_grab_active) return;
+    uint32_t now=HAL_GetTick();
+    if(s_turn_card_active) {
+        uint32_t elapsed=now-s_turn_card_tick;
+        if(elapsed<s_turn_card_ms&&now-s_turn_card_update<20U) return;
+        if(!RobotControl_SetServoAngle('T',ServoMotion_Angle(s_turn_card_start,s_turn_card_end,elapsed,s_turn_card_ms))) {
             RobotControl_CancelGrab(); return;
         }
-        if ((s_grab_arm_wait && s_arm_move_active) || (s_grab_lift_wait && s_lift_angle_active)) return;
-        s_grab_arm_wait = s_grab_lift_wait = false;
-        if (s_sequence_descent_tail) {
-            s_sequence_descent_tail = false;
-            if (!RobotControl_StartSequenceAxis(1U, s_sequence_final_z, 300U)) RobotControl_CancelGrab();
+        s_turn_card_update=now;
+        if(elapsed>=s_turn_card_ms) { s_turn_card_active=false; RobotControl_CompleteSequence(); }
+        return;
+    }
+    if(s_grab_step>=8U) {
+        if(now-s_grab_tick<ROBOT_GRAB_HOLD_MS) return;
+        s_grab_active=false;
+        const RobotSequenceCommand *next=&s_plan_items[s_plan_index];
+        if(!RobotControl_StartSequence(next,next->mode)) RobotControl_CancelGrab();
+        return;
+    }
+    /* Independent servo jobs keep ticking while either motor is still moving. */
+    if(s_sequence_grip_active&&(now-s_gripper_update_tick>=20U||now-s_sequence_grip_tick>=s_sequence_grip_ms)) {
+        uint32_t elapsed=now-s_sequence_grip_tick;
+        if(!RobotControl_SetServoAngle('G',ServoMotion_Angle(s_sequence_gripper_start,
+                s_sequence_gripper_end,elapsed,s_sequence_grip_ms))) { RobotControl_CancelGrab(); return; }
+        s_gripper_update_tick=now;
+        if(elapsed>=s_sequence_grip_ms) s_sequence_grip_active=false;
+    }
+    if(s_grab_gripper_opening) {
+        if(s_sequence_grip_active) return;
+        s_grab_gripper_opening=false; s_grab_tick=now;
+        if(!RobotControl_StartSequencePosition()) { RobotControl_CancelGrab(); return; }
+    }
+    if(s_grab_base_rotating&&s_sequence_base_pending&&!s_sequence_position_active) {
+        s_sequence_base_pending=false; s_sequence_base_tick=s_base_update_tick=now;
+    }
+    if(s_grab_base_rotating&&!s_sequence_base_pending) {
+        uint32_t elapsed=now-s_sequence_base_tick;
+        if(now-s_base_update_tick>=20U||elapsed>=s_sequence_base_ramp.duration_ms) {
+            if(!RobotControl_SetServoAngle('B',ServoMotion_Angle(s_sequence_base_start,
+                    s_sequence_steps[s_grab_step].base,elapsed,s_sequence_base_ramp.duration_ms))) {
+                RobotControl_CancelGrab(); return;
+            }
+            s_base_update_tick=now;
+            if(elapsed>=s_sequence_base_ramp.duration_ms) { s_grab_base_rotating=false; s_grab_tick=now; }
+        }
+    }
+    if(s_sequence_position_active) {
+        if((s_grab_arm_wait&&(s_arm_move_stop_pending||(!s_arm_move_active&&!s_arm_move_reached)))||
+           (s_grab_lift_wait&&(s_lift_angle_stop_pending||(!s_lift_angle_active&&!s_lift_angle_reached)))) {
+            RobotControl_CancelGrab(); return;
+        }
+        if((s_grab_arm_wait&&s_arm_move_active)||(s_grab_lift_wait&&s_lift_angle_active)) return;
+        s_grab_arm_wait=s_grab_lift_wait=false;
+        if(s_sequence_descent_tail) {
+            s_sequence_descent_tail=false;
+            if(!RobotControl_StartSequenceAxis(1U,s_sequence_final_z,300U)) RobotControl_CancelGrab();
             return;
         }
-        s_sequence_position_active = false;
+        s_sequence_position_active=false;
         RobotControl_FinishSequencePosition();
         return;
     }
-    uint32_t now = HAL_GetTick(), elapsed = (uint32_t)(now - s_grab_tick);
-    if (s_grab_base_rotating) {
-        if (elapsed < s_sequence_base_ramp.duration_ms && (uint32_t)(now - s_base_update_tick) < ROBOT_BASE_UPDATE_MS) return;
-        const GrabStep *steps = s_sequence_steps;
-        int32_t start = s_sequence_base_start;
-        if (!RobotControl_SetServoAngle('B', RobotControl_BaseRampAngle(&s_sequence_base_ramp,
-            start, steps[s_grab_step].base, elapsed)))
-        { RobotControl_CancelGrab(); return; }
-        s_base_update_tick = now;
-        if (elapsed >= s_sequence_base_ramp.duration_ms) {
-            s_grab_base_rotating = false; s_grab_tick = now;
-            if (!RobotControl_StartSequencePosition()) RobotControl_CancelGrab();
-        }
+    /* Waypoint barrier = every motor arrived AND both servo jobs completed.
+     * No sum of separate estimates and no blocking delay in the control loop. */
+    if(s_grab_base_rotating||s_sequence_grip_active||now-s_grab_tick<s_sequence_hold_ms) return;
+    if(s_raw_preparing&&s_grab_step==1U) {
+        s_raw_preparing=false; s_raw_prepared=true; s_grab_active=false;
+        if(s_exec_active) s_exec_sequence_done=true;
         return;
     }
-    if (elapsed < s_sequence_hold_ms) return;
-    /* Servo targets have no encoder feedback: reserve their configured travel
-     * time independently of motor positioning, so useful motion can overlap it. */
-    if ((uint32_t)(now - s_sequence_grip_tick) < s_sequence_grip_ms) return;
-    if (++s_grab_step >= sizeof(s_grab_steps)/sizeof(s_grab_steps[0])) {
-        RobotControl_CompleteSequence();
-    } else if (!RobotControl_ApplyGrabStep()) RobotControl_CancelGrab();
+    if(++s_grab_step>=8U) RobotControl_CompleteSequence();
+    else if(!RobotControl_ApplyGrabStep()) RobotControl_CancelGrab();
 }
 
 /* 中心修正取1个有效新坐标后分X/Y两段移动；平行/联合姿态修正仍循环重采样。 */
@@ -916,6 +913,8 @@ void RobotControl_Init(UART_HandleTypeDef *command_uart, bool wheel_uart_ready)
     s_lift_angle_reached = false;
     s_last_lift_angle_sequence = 0U;
     s_grab_active = false; s_turn_card_active = false; s_release_origin_pending = false;
+    s_raw_preparing = s_raw_prepared = false;
+    s_sequence_grip_active = s_sequence_base_pending = false;
     s_manual_gripper_active = false; s_manual_gripper_sequence = 0U;
     s_manual_base_active = false; s_manual_base_sequence = 0U; s_base_angle_known = false;
     s_gripper_angle_known = false;
@@ -1342,14 +1341,16 @@ static bool RobotControl_StartSequence(const RobotSequenceCommand *settings, cha
 {
     if (!RobotControl_SequenceIdle()) return false;
     if (direction == 'T' && settings != NULL) {
-        if (!RobotControl_SetServoAngle('T', (uint16_t)settings->theta)) return false;
-        s_turn_card_start = (int32_t)settings->theta; s_turn_card_end = (int32_t)settings->open_angle;
+        /* A stale wire start angle must not cause an instantaneous jump. */
+        if (!RobotControl_SetServoAngle('T', s_turn_angle)) return false;
+        s_turn_card_start = (int32_t)s_turn_angle; s_turn_card_end = (int32_t)settings->open_angle;
         uint32_t distance = (uint32_t)(s_turn_card_end > s_turn_card_start ?
             s_turn_card_end - s_turn_card_start : s_turn_card_start - s_turn_card_end);
         s_turn_card_ms = (distance * 1000U + settings->gripper_dps - 1U) / settings->gripper_dps;
         s_turn_card_tick = s_turn_card_update = HAL_GetTick();
         s_turn_card_active = s_grab_active = true; return true;
     }
+    s_raw_prepared=false; s_raw_preparing=direction=='N';
     s_release_mode = direction == 'P';
     memcpy(s_sequence_steps, s_release_mode ? s_release_steps : s_grab_steps, sizeof(s_sequence_steps));
     s_sequence_combined_rpm = ROBOT_GRAB_ARM_RPM;
@@ -1370,6 +1371,9 @@ static bool RobotControl_StartSequence(const RobotSequenceCommand *settings, cha
             s_sequence_steps[i].base = (uint16_t)(s_sequence_steps[i].base == 248U ? settings->base_home : settings->base_tilt);
         }
     }
+    s_sequence_steps[3].r_tenths_mm=s_sequence_steps[s_release_mode?2U:1U].r_tenths_mm;
+    s_sequence_steps[4].position=true;
+    if(s_release_mode) s_sequence_steps[4].r_tenths_mm=s_sequence_steps[5].r_tenths_mm;
     if (!s_release_mode) s_sequence_steps[7].base = s_sequence_steps[5].base; /* Keep storage angle at grab end. */
     s_grab_step = 0U;
     s_release_origin_pending = s_release_mode;
@@ -1386,6 +1390,21 @@ static void RobotControl_HandleFrame(const char *frame)
     uint32_t sequence;
     char direction;
     uint16_t angle;
+    if(RawPick_Take(frame)) {
+        if(!s_raw_prepared||!RobotControl_SequenceIdle()) return;
+        s_raw_prepared=false; s_grab_step=2U;
+        s_grab_active=RobotControl_ApplyGrabStep();
+        if(!s_grab_active) RobotControl_CancelGrab();
+        return;
+    }
+    /* Any intervening motor/servo/manual command invalidates the held pose.
+     * CAM and QUERY are handled by Dispatch and never enter this function. */
+    s_raw_prepared=false;
+    RobotSequenceCommand raw;
+    if(RawPick_Ready(frame,&raw)) {
+        if(!RobotControl_StartSequence(&raw,'N')) RobotControl_CancelGrab();
+        return;
+    }
     if (strncmp(frame, "PLAN_BEGIN,", 11U) == 0 || strncmp(frame, "PLAN_RUN,", 9U) == 0) {
         RobotPlanCommand cmd;
         if (!RobotProtocol_ParsePlan(frame, &cmd) || s_plan_active || !RobotControl_SequenceIdle()) return;
@@ -1800,17 +1819,19 @@ static void RobotControl_Dispatch(const char *frame)
     const char *busy=RobotControl_BusyReason();
     if(busy) { RobotControl_Report(id,"BUSY",busy); return; }
     const char *comma=strchr(p,',');
-    if(comma==NULL&&strcmp(p,"IMU_ZERO")!=0) { RobotControl_Report(id,"ERROR","FORMAT"); return; }
+    if(comma==NULL&&strcmp(p,"IMU_ZERO")!=0&&strcmp(p,"RAW_TAKE")!=0) { RobotControl_Report(id,"ERROR","FORMAT"); return; }
     if(comma&&comma-p>16) { RobotControl_Report(id,"ERROR","FORMAT"); return; }
     char command[ROBOT_COMMAND_MAX_LENGTH+1U];
     int length=comma?snprintf(command,sizeof(command),"%.*s,%lu,%s",(int)(comma-p),p,(unsigned long)id,comma+1):
-        snprintf(command,sizeof(command),"IMU_ZERO,%lu",(unsigned long)id);
+        snprintf(command,sizeof(command),"%s,%lu",p,(unsigned long)id);
     if(length<0||(size_t)length>=sizeof(command)) { RobotControl_Report(id,"ERROR","FORMAT"); return; }
     RobotDistanceCommand move; RobotSequenceCommand settings; RobotBaseCommand base; RobotArmPoseCommand pose;
     GyroCommand gyro;
     RouteMove route;
     uint32_t pulses=0,rpm=0; char direction=0;
-    if(RouteMove_Parse(command,&route)&&s_wheel_uart_ready) s_exec_kind=EXEC_ROUTE;
+    if(RawPick_Ready(command,&settings)&&RobotControl_SequenceIdle()) s_exec_kind=EXEC_SEQUENCE;
+    else if(RawPick_Take(command)&&s_raw_prepared&&RobotControl_SequenceIdle()) s_exec_kind=EXEC_SEQUENCE;
+    else if(RouteMove_Parse(command,&route)&&s_wheel_uart_ready) s_exec_kind=EXEC_ROUTE;
     else if(GyroProtocol_Parse(command,&gyro)&&s_wheel_uart_ready) s_exec_kind=EXEC_GYRO;
     else if(RobotProtocol_ParseMove(command,&move)&&RobotProtocol_MovePulses(&move)>0U&&s_wheel_uart_ready) s_exec_kind=EXEC_MOVE;
     else if(strncmp(command,"STATE_V2,",9U)==0&&RobotProtocol_ParseSequence(command,&settings)&&
@@ -1829,6 +1850,7 @@ static void RobotControl_Dispatch(const char *frame)
         }
         s_exec_kind=EXEC_PULSE;
     } else { RobotControl_Report(id,"ERROR","INVALID_OR_NOT_READY"); return; }
+    if(!RawPick_Take(command)) s_raw_prepared=false;
     s_exec_id=id; s_exec_hash=hash; s_exec_tick=HAL_GetTick();
     s_exec_active=true; s_exec_failed=s_exec_sequence_done=false;
     if(s_exec_kind==EXEC_ROUTE) {

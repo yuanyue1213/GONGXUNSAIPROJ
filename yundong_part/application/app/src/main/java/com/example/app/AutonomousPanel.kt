@@ -12,10 +12,7 @@ private val armFieldLabels = linkedMapOf("r1" to "第一定位点 R（mm，一�
     "r2" to "第二定位点 R（mm，一位小数）", "z2" to "第二定位点 Z（mm）", "rpm" to "合成速度 RPM（5–600）",
     "gripper" to "夹爪速度（°/s）", "open" to "夹爪张开角度（°）", "close" to "夹爪闭合角度（°）",
     "home" to "工位基座角度（°）", "tilt" to "车载存放基座角度（°）")
-private fun armDefaults(role: Char) = mapOf("r1" to if (role in "RG") "110.0" else "20.0",
-    "z1" to if (role in "RG") "-50" else "-40", "r2" to if (role in "RG") "20.0" else "110.0",
-    "z2" to if (role == 'K') "10" else if (role in "RG") "-40" else "-50", "rpm" to "20",
-    "gripper" to "60", "open" to "60", "close" to "0", "home" to "248", "tilt" to "140")
+
 
 @Composable
 internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: String, taskCode: String,
@@ -64,6 +61,7 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
     fun value(key: String, fallback: String) = values[key] ?: fallback
     fun put(key: String, text: String) { values[key] = text; preferences.edit().putString(key, text).apply() }
     var vision by remember { mutableStateOf(preferences.getBoolean("vision", false)) }
+    var useDefaultCode by remember { mutableStateOf(preferences.getBoolean("useDefaultTaskCode", false)) }
     var arm by remember { mutableStateOf(preferences.getBoolean("arm", false)) }
     var section by rememberSaveable { mutableIntStateOf(0) }
     var routeIndex by rememberSaveable { mutableIntStateOf(0) }
@@ -73,8 +71,8 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
     val roles = listOf("原料抓取", "粗加工取回", "粗加工放置", "第一批暂存", "第二批码垛")
 
     fun armParameters(role: Char, slot: Int): AutonomousArmParameters? {
-        val defaults = armDefaults(role)
-        fun p(field: String) = value("arm_${role}${slot}_$field", defaults.getValue(field))
+        val defaults = ScreenshotArmDefaults.fields(role, if (role == 'R') 2 else slot)
+        fun p(field: String) = value("arm_${role}${if (role == 'R') 2 else slot}_$field", defaults.getValue(field))
         return SequenceSettings.parse(p("r1"), p("z1"), p("r2"), p("z2"), p("rpm"), p("gripper"),
             open = p("open"), close = p("close"), baseHome = p("home"), baseTilt = p("tilt"))
             ?.let { AutonomousArmParameters(role, slot, it) }
@@ -84,9 +82,18 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
     Text("开始时车尾朝向另一个启停区。所有前后左右均以车自身为准，左右转为相对当前朝向转90°。中断重启前请恢复起始位置和朝向。")
     Text("按下列25步顺序执行，工位保持当前朝向；两次加工区均先放置三件，再抓回三件，最后堆叠。动作完成后间隔100ms。")
     Text(status, modifier = Modifier.fillMaxWidth())
-    Text("任务码：${taskCode.ifEmpty { if (vision) "等待扫码" else if (arm) "使用下方手动任务码" else "底盘模式不使用" }}")
+    Text(if (useDefaultCode || (!vision && arm)) "默认任务码：$DEFAULT_TASK_CODE"
+        else "任务码：${taskCode.ifEmpty { if (vision) "等待扫码" else "底盘模式不使用" }}")
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text("视觉校准")
+        Text("使用默认任务码")
+        Switch(checked = useDefaultCode, enabled = !running, onCheckedChange = {
+            useDefaultCode = it; preferences.edit().putBoolean("useDefaultTaskCode", it).apply()
+        })
+    }
+    Text(if (useDefaultCode) "跳过二维码识别，第一批红→黑→浅蓝，第二批黑→红→浅蓝。开启视觉时识别校准；关闭视觉时按固定参数取放。"
+        else "到扫码点读取任务码，再按实际任务码执行。")
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text("视觉识别与校准（关闭后到位直接动作）")
         Switch(checked = vision, enabled = !running, onCheckedChange = {
             vision = it; preferences.edit().putBoolean("vision", it).apply()
         })
@@ -98,14 +105,12 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
         })
     }
     Text(when {
-        vision && arm -> "完整流程：扫码、工位校准、两批取放及码垛。"
-        vision -> "底盘＋视觉：扫码并校准工位，不操作机械臂、夹爪或转盘。"
-        arm -> "底盘＋机械臂：使用手动任务码，按配置位置取放，不进行视觉校准。"
+        vision && arm -> if (useDefaultCode) "完整流程：默认任务码、工位校准、两批取放及码垛。" else "完整流程：扫码、工位校准、两批取放及码垛。"
+        vision -> if (useDefaultCode) "底盘＋视觉：使用默认任务码并校准工位，不操作机械臂。" else "底盘＋视觉：扫码并校准工位，不操作机械臂、夹爪或转盘。"
+        arm -> "到位直接动作：使用默认任务码，不扫码、不等待视觉、不修正底盘；按配置的左右位置映射和固定机械臂参数取放。原料需人工保证已到抓取位。"
         else -> "仅底盘：沿路线行驶，不扫码、不校准、不执行机械臂动作，无需初始化机械臂零点。"
     })
-    if (arm) Text("启用机械臂前，请在机械臂页初始化零点，并确认工位与车载槽位参数。")
-    if (arm && !vision) OutlinedTextField(value("taskCode", "156+123+516+231"), { put("taskCode", it) },
-        label = { Text("手动任务码（四组）") }, enabled = !running, modifier = Modifier.fillMaxWidth())
+    if (arm) Text("启用机械臂前，请在机械臂页初始化零点，并确认工位的左、中、右位置参数及车载槽转盘角度。")
     TabRow(selectedTabIndex = section) {
         listOf("路线", "视觉", "机械臂").forEachIndexed { index, label ->
             Tab(selected = section == index, enabled = !running, onClick = { section = index }, text = { Text(label) })
@@ -126,7 +131,7 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
                 OutlinedButton(onClick = { routeIndex-- }, enabled = !running && routeIndex > 0) { Text("上一点") }
                 OutlinedButton(onClick = { routeIndex++ }, enabled = !running && routeIndex < AutonomousRoute.names.lastIndex) { Text("下一点") }
             }
-            Text("${routeIndex + 1}/${AutonomousRoute.names.size} · ${AutonomousRoute.names[routeIndex]}")
+            Text("${routeIndex + 1}/${AutonomousRoute.names.size} · ${if (routeIndex == 1 && useDefaultCode) "后退1000mm · 默认任务码，无需扫码" else AutonomousRoute.names[routeIndex]}")
         }
         1 -> {
             Text(if (vision) "按实车相机与夹爪位置填写。" else "视觉校准已关闭，此处参数不参与本次执行。")
@@ -137,23 +142,32 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
             }
         }
         2 -> {
-            Text(if (arm) "直接填写各工位、各槽位参数，与调试卡片无关联。" else "机械臂动作已关闭，此处参数不参与本次执行。")
-            OutlinedTextField(value("slots", "0,90,180"), { put("slots", it) }, label = { Text("车载槽1/2/3转盘角度") },
+            Text(if (arm) "原料只用一套近车抓取位（画面下方），按任务码等颜色转到位再抓。其他工位固定左、中、右参数；车载槽转盘角度独立。" else "机械臂动作已关闭，此处参数不参与本次执行。")
+            Text("截图位置1/2/3暂对应左/中/右；原料近车位采用抓取2。堆叠Z比放下高100mm；第三槽角度未提供，默认暂保留180°。")
+            OutlinedButton(enabled = !running, onClick = {
+                for (r in "RGPTK") for (position in 1..3) {
+                    ScreenshotArmDefaults.fields(r, position).forEach { (field, initial) ->
+                        put("arm_${r}${position}_$field", initial)
+                    }
+                }
+            }) { Text("恢复截图抓放默认值") }
+            OutlinedTextField(value("slots", ScreenshotArmDefaults.SLOT_ANGLES), { put("slots", it) }, label = { Text("车载槽1/2/3转盘角度") },
                 enabled = arm && !running, modifier = Modifier.fillMaxWidth())
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 OutlinedButton(onClick = { roleIndex = (roleIndex + 4) % 5 }, enabled = !running) { Text("上一工位") }
                 OutlinedButton(onClick = { roleIndex = (roleIndex + 1) % 5 }, enabled = !running) { Text("下一工位") }
             }
             Text(roles[roleIndex], style = MaterialTheme.typography.titleMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (roleIndex == 0) Text("近车抓取位：请重新核对原中位置参数。相机确认到位后才合爪。")
+            else Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 (1..3).forEach { number -> FilterChip(selected = slot == number, enabled = !running,
-                    onClick = { slot = number }, label = { Text("车载槽$number") }) }
+                    onClick = { slot = number }, label = { Text(listOf("左位置", "中位置", "右位置")[number - 1]) }) }
             }
             Text(if (roleIndex < 2) "第一点：外部取料；第二点：车载存放。" else "第一点：车载取料；第二点：外部放置。")
             val role = "RGPTK"[roleIndex]
-            val defaults = armDefaults(role)
+            val defaults = ScreenshotArmDefaults.fields(role, if (role == 'R') 2 else slot)
             armFieldLabels.forEach { (field, label) ->
-                val key = "arm_${role}${slot}_$field"
+                val key = "arm_${role}${if (role == 'R') 2 else slot}_$field"
                 OutlinedTextField(value(key, defaults.getValue(field)), { put(key, it) }, label = { Text(label) },
                     enabled = arm && !running, modifier = Modifier.fillMaxWidth())
             }
@@ -164,7 +178,7 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
         val parameters = mutableListOf<AutonomousArmParameters>()
         if (arm) for ((index, role) in "RGPTK".withIndex()) for (number in 1..3) {
             val parsed = armParameters(role, number)
-            if (parsed == null) { roleIndex = index; slot = number; section = 2; error = "${roles[index]} · 槽$number 参数无效"; return@start }
+            if (parsed == null) { roleIndex = index; slot = number; section = 2; error = "${roles[index]} · ${listOf("左", "中", "右")[number - 1]}位置参数无效"; return@start }
             parameters.add(parsed)
         }
         val settings = try {
@@ -172,9 +186,9 @@ internal fun AutonomousPanel(connected: Boolean, running: Boolean, status: Strin
                 if (vision) value("fine","10").toInt() else 10,
                 if (vision) value("targetX","256.0").toFloat() else 256f, if (vision) value("targetY","160.0").toFloat() else 160f,
                 if (vision) value("processMap","321") else "321", if (vision) value("storageMap","321") else "321",
-                if (arm) value("slots","0,90,180").split(',').map { it.trim().toInt() } else listOf(0,90,180),
+                if (arm) value("slots",ScreenshotArmDefaults.SLOT_ANGLES).split(',').map { it.trim().toInt() } else listOf(0,90,180),
                 vision, arm, if (arm && !vision) value("taskCode","156+123+516+231").trim() else "",
-                turnRpm = value("turnRpm","40").toInt(), wheelPulses = value("wheelPulses","3200").toInt())
+                turnRpm = value("turnRpm","40").toInt(), wheelPulses = value("wheelPulses","3200").toInt(), useDefaultTaskCode = useDefaultCode)
         } catch (_: IllegalArgumentException) { null }
         if (settings == null || settings.frames(1,2,parameters).isEmpty()) error = "请检查速度、脉冲、任务码、视觉或槽位参数"
         else { error = null; onStart(settings, parameters) }

@@ -15,13 +15,27 @@ class AutonomousTaskTest {
     private val parameters = "RGPTK".flatMap { role -> (1..3).map { slot ->
         AutonomousArmParameters(role,slot,SequenceSettings(1100,-50,200,-40,20))
     } }
+    @Test fun defaultCodeSkipsQrWithoutDisablingPositionVision() {
+        val preset = settings.copy(useDefaultTaskCode = true, manualCode = "unused")
+        val frames = preset.frames(10, 11, parameters)
+        assertEquals("AUTO_OPTIONS,10,1,1,156+123+516+231\n", frames[1])
+        assertEquals("AUTO_PATH,10,BODY_NEAR_DEFAULT_V1\n", frames[3])
+        assertEquals(20, frames.size)
+        val normal = preset.copy(useDefaultTaskCode = false).frames(10, 11, parameters)
+        assertEquals("AUTO_OPTIONS,10,1,1,-\n", normal[1])
+        assertEquals("AUTO_PATH,10,BODY_NEAR_V3\n", normal[3])
+        assertEquals("AUTO_OPTIONS,10,0,1,156+123+516+231\n", preset.copy(visionEnabled = false).frames(10,11,parameters)[1])
+        val visualOnly = preset.copy(armEnabled = false).frames(10,11,emptyList())
+        assertEquals("AUTO_OPTIONS,10,1,0,156+123+516+231\n", visualOnly[1])
+        assertTrue(validAutonomousCode(DEFAULT_TASK_CODE))
+    }
     @Test fun uploadIndependentParametersAndRouteBeforeStart() {
         val frames = settings.frames(10, 11, parameters)
         assertEquals(20, frames.size)
         assertEquals("AUTO_CFG,10,9889,10000,45,10,256.4,160.3,321,123,0,90,180\n", frames.first())
         assertEquals("AUTO_OPTIONS,10,1,1,-\n",frames[1])
         assertEquals("AUTO_DRIVE,10,3291,40,3200\n",frames[2])
-        assertEquals("AUTO_PATH,10,BODY_V1\n",frames[3])
+        assertEquals("AUTO_PATH,10,BODY_NEAR_V3\n",frames[3])
         assertTrue(frames[4].startsWith("AUTO_ARM,10,R,1,STATE_V2,10,A,"))
         assertTrue(frames[10].startsWith("AUTO_ARM,10,P,1,STATE_V2,10,P,"))
         assertTrue(frames[18].startsWith("AUTO_ARM,10,K,3,"))
@@ -47,10 +61,10 @@ class AutonomousTaskTest {
         assertEquals("AUTO_OPTIONS,10,0,0,-\n",frames[1])
         assertFalse(frames.any { it.startsWith("AUTO_ARM,") })
     }
-    @Test fun manualTaskCodeForArmWithoutVision() {
+    @Test fun armWithoutVisionUsesFixedProfilesAndDefaultTaskCode() {
         val mode = settings.copy(visionEnabled = false, manualCode = "156+123+516+231")
-        assertTrue(mode.frames(10,11,parameters).contains("AUTO_OPTIONS,10,0,1,156+123+516+231\n"))
-        assertTrue(mode.copy(manualCode = "").frames(10,11,parameters).isEmpty())
+        assertEquals("AUTO_OPTIONS,10,0,1,156+123+516+231\n", mode.frames(10,11,parameters)[1])
+        assertEquals("AUTO_PATH,10,BODY_NEAR_DEFAULT_V1\n", mode.copy(manualCode = "").frames(10,11,parameters)[3])
         assertFalse(validAutonomousCode("156+123+234+231"))
         assertFalse(validAutonomousCode("116+123+611+231"))
         assertFalse(validAutonomousCode("123+321"))
@@ -59,6 +73,17 @@ class AutonomousTaskTest {
         val frames=settings.copy(armEnabled=false).frames(10,11,emptyList())
         assertEquals(5,frames.size)
         assertEquals("AUTO_OPTIONS,10,1,0,-\n",frames[1])
+    }
+    @Test fun rawWaitStatusIsReadable() {
+        assertTrue(AutonomousStatus.text("AUTO,11,WORK,4,0,0,0,WAIT_RAW_TARGET").contains("等待目标颜色"))
+        assertTrue(AutonomousStatus.text("AUTO,11,STOPPED,4,0,0,0,RAW_TARGET_TIMEOUT").contains("近车位超时"))
+    }
+    @Test fun stoppedStageAndOriginalErrorAreVisible() {
+        val text = AutonomousStatus.text("AUTO,11,STOPPED,4,1,0,0,ARM:ODOM_READ")
+        assertTrue(text.contains("停止环节：机械臂取放"))
+        assertTrue(text.contains("第2件"))
+        assertTrue(text.contains("编码器失败"))
+        assertTrue(AutonomousStatus.text("AUTO,11,WORK,4,0,0,0,ALIGN:WAIT_VISION").contains("工位中心识别"))
     }
     @Test fun taskStatusIsReadable() {
         assertTrue(AutonomousStatus.text("AUTO,11,STOPPED,2,0,0,0,VISION_TIMEOUT").contains("视觉识别超时"))

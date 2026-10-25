@@ -1,9 +1,12 @@
 package com.example.app
 
+internal const val DEFAULT_TASK_CODE = "156+123+516+231"
+
 internal const val DEFAULT_TURN_CORRECTION = 0.96
 
 internal object AutonomousRoute {
-    const val version = "BODY_V1"
+    const val version = "BODY_NEAR_V3"
+    const val defaultCodeVersion = "BODY_NEAR_DEFAULT_V1"
     val names = listOf("左移100mm", "后退1000mm · 识别二维码", "前进900mm", "左转90°",
         "前进1000mm · 第一批圆盘抓取", "左转90°", "前进1900mm", "左转90° · 第一批放置后抓回",
         "后退900mm", "右转90°", "后退900mm · 第一批放下", "后退900mm", "右转90°",
@@ -31,6 +34,7 @@ internal data class AutonomousSettings(
     val wheelbaseMm: Double = 190.0, val trackMm: Double = 251.4,
     val turnCorrection: Double = DEFAULT_TURN_CORRECTION, val turnRpm: Int = 40,
     val wheelPulses: Int = 3200,
+    val useDefaultTaskCode: Boolean = false,
 ) {
     fun turnPulses(): Int? {
         if (!wheelbaseMm.isFinite() || wheelbaseMm !in 50.0..2000.0 ||
@@ -39,11 +43,10 @@ internal data class AutonomousSettings(
         val pulses = Math.round(Math.PI * (wheelbaseMm + trackMm) / 4.0 * forwardPpm / 1000.0 * turnCorrection)
         return pulses.takeIf { it in 1L..500000L }?.toInt()
     }
-    fun valid() = wheelPulses in 200..51200 && forwardPpm in 1..1000000 && lateralPpm in 1..1000000 && rpm in 5..1200 && (!visionEnabled || (fineRpm in 5..300 &&
+    fun valid() = wheelPulses in 200..51200 && forwardPpm in 1..1000000 && lateralPpm in 1..1000000 && rpm in 5..1200 && (!(visionEnabled || armEnabled) || (fineRpm in 5..300 &&
         targetX.isFinite() && targetY.isFinite() && targetX >= 0 && targetX <= 511.9f && targetY >= 0 && targetY <= 319.9f &&
         processMap.toList().sorted() == "123".toList() && storageMap.toList().sorted() == "123".toList())) &&
         (!armEnabled || (slots.size == 3 && slots.all { it in 0..270 } && slots.distinct().size == 3)) &&
-        (visionEnabled || !armEnabled || validAutonomousCode(manualCode)) &&
         turnPulses() != null
     fun frames(config: Long, run: Long, parameters: List<AutonomousArmParameters>): List<String> {
         val required = "RGPTK".flatMap { role -> (1..3).map { role to it } }.toSet()
@@ -53,14 +56,15 @@ internal data class AutonomousSettings(
         val x = java.lang.String.format(java.util.Locale.US, "%.1f", if (visionEnabled) targetX else 256f)
         val y = java.lang.String.format(java.util.Locale.US, "%.1f", if (visionEnabled) targetY else 160f)
         val fine = if (visionEnabled) fineRpm else 10
-        val mp = if (visionEnabled) processMap else "321"
-        val mt = if (visionEnabled) storageMap else "321"
+        val mp = if (visionEnabled || armEnabled) processMap else "321"
+        val mt = if (visionEnabled || armEnabled) storageMap else "321"
         val angles = if (armEnabled) slots else listOf(0,90,180)
-        val code = if (!visionEnabled && armEnabled) manualCode else "-"
+        val code = if (useDefaultTaskCode || (!visionEnabled && armEnabled)) DEFAULT_TASK_CODE else "-"
+        val pathVersion = if (useDefaultTaskCode || (!visionEnabled && armEnabled)) AutonomousRoute.defaultCodeVersion else AutonomousRoute.version
         return listOf("AUTO_CFG,$config,$forwardPpm,$lateralPpm,$rpm,$fine,$x,$y,$mp,$mt,${angles.joinToString(",")}\n",
             "AUTO_OPTIONS,$config,${if (visionEnabled) 1 else 0},${if (armEnabled) 1 else 0},$code\n",
             "AUTO_DRIVE,$config,${turnPulses()},$turnRpm,$wheelPulses\n",
-            "AUTO_PATH,$config,${AutonomousRoute.version}\n") +
+            "AUTO_PATH,$config,$pathVersion\n") +
             (if (armEnabled) parameters.map { it.frame(config) } else emptyList()) + "AUTO_START,$run,$config\n"
     }
 }
@@ -87,14 +91,37 @@ internal object AutonomousStatus {
             "ROUTE" -> "已接收车身动作路线"
             else -> "任务配置失败"
         }
-        val reason = when (fields[7]) {
+        val detail = fields[7].split(':', limit = 2)
+        val reasonCode = detail.last()
+        val stage = if (detail.size == 2) when (detail[0]) {
+            "READY" -> "执行器就绪检查"; "REFERENCE" -> "陀螺仪参考初始化"
+            "STOW" -> "机械臂收回"; "DRIVE" -> "底盘定距移动"; "TURN" -> "底盘转向"
+            "QR" -> "二维码识别"; "ALIGN" -> "工位中心识别"; "CORRECT" -> "底盘视觉修正"
+            "SELECT" -> "物块颜色选位"; "SLOT" -> "车载转盘定位"
+            "RAW_READY" -> "原料抓取预备"; "RAW_WAIT" -> "等待原料到近车位"
+            "ARM" -> "机械臂取放"; "ARM_BASE" -> "相机观察基座定位"
+            else -> "全流程衔接"
+        } else ""
+        val reason = when {
+            Regex("COLOR_[1-6]_POSITION_[1-3]").matches(reasonCode) -> {
+                val parts = reasonCode.split('_')
+                "颜色${parts[1]} → ${listOf("左", "中", "右")[parts[3].toInt() - 1]}位置参数"
+            }
+            else -> when (reasonCode) {
             "STM_NOT_READY_INITIALIZE_ORIGIN" -> "请先初始化机械臂零点并确认空闲"
             "STM_NOT_IDLE" -> "执行器忙碌，请先停止并等待空闲"
             "NOT_CONFIGURED_OR_DUPLICATE" -> "配置不完整或重复启动"
+            "DEFAULT_TASK_CODE_REQUIRED" -> "默认任务码配置缺失，请同步更新App与ESP32"
             "TASK_CODE_REQUIRED", "TASK_CODE" -> "请填写有效的四组任务码"
             "ROUTE" -> "路线版本无效，请同步更新App与ESP32"
             "OPTIONS" -> "执行模式配置无效"
             "DRIVE" -> "行驶细分脉冲或转向参数无效"
+            "ARM_REQUIRES_POSITION_VISION" -> "机械臂需要开启视觉以选择左、中、右位置"
+            "WAIT_RAW_TARGET" -> "等待目标颜色转到下方近车抓取位"
+            "RAW_TARGET_AT_NEAR" -> "目标颜色已到近车位，开始夹取"
+            "RAW_TARGET_TIMEOUT" -> "等待原料转到近车位超时，已停止"
+            "WAIT_ACTION" -> "等待STM32完成确认"
+            "WAIT_VISION" -> "等待相机识别确认"
             "VISION_TIMEOUT" -> "等待视觉识别超时"
             "VISION_OUT_OF_APPROACH_RANGE" -> "目标超出对准范围或未能收敛"
             "LANE_BOUNDARY" -> "预计运动超出灰色车道"
@@ -116,8 +143,11 @@ internal object AutonomousStatus {
             "DISCONNECTED" -> "连接已断开"
             "USER", "USER_STOP" -> "手动停止"
             "0", "S1_HEAD_DOWN", "TAIL_TO_OTHER_START", "CARD_DONE", "S2" -> ""
-            else -> fields[7]
+            else -> reasonCode
         }
-        return "$state · 抓取动作${fields[5]} / 放置动作${fields[6]}${if (reason.isEmpty()) "" else " · $reason"}"
+        }
+        val node = fields[3].toIntOrNull()?.let { AutonomousRoute.names.getOrNull(it) }
+        val location = if (stage.isEmpty()) "" else " · ${if (fields[2] == "STOPPED") "停止环节：" else "当前环节："}$stage · 第${(fields[4].toIntOrNull() ?: 0) + 1}件 · ${node ?: "路线结束"}"
+        return "$state$location · 抓取动作${fields[5]} / 放置动作${fields[6]}${if (reason.isEmpty()) "" else " · $reason"}"
     }
 }
