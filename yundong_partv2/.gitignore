@@ -1,0 +1,12 @@
+**/build/
+**/.gradle/
+**/.kotlin/
+**/local.properties
+**/.idea/
+**/__pycache__/
+*.su
+*.o
+*.obj
+*.elf
+*.map
+**/sdkconfig.old

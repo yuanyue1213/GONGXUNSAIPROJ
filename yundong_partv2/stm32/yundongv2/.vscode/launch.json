@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "STM32 · 相机串口测试（上电发送）",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "deviceName": "STM32H743ZIT6",
+      "deviceCore": "Cortex-M7",
+      "preLaunchTask": "STM32: Build CameraUartTest",
+      "preBuild": "",
+      "runEntry": "main",
+      "serverInterface": "SWD",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${workspaceFolder}/build/CameraUartTest/yundongv2.elf",
+          "symbolFileName": "${workspaceFolder}/build/CameraUartTest/yundongv2.elf"
+        }
+      ]
+    },
+    {
+      "name": "STM32H743 · ST-Link Debug",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "deviceName": "STM32H743ZIT6",
+      "deviceCore": "Cortex-M7",
+      "preLaunchTask": "STM32: Build Debug",
+      "preBuild": "",
+      "runEntry": "main",
+      "serverInterface": "SWD",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${workspaceFolder}/build/Debug/yundongv2.elf",
+          "symbolFileName": "${workspaceFolder}/build/Debug/yundongv2.elf"
+        }
+      ]
+    }
+  ]
+}

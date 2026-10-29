@@ -1,0 +1,14 @@
+{
+    "stm32cube-ide-clangd.path": "cube",
+    "stm32cube-ide-clangd.arguments": [
+        "starm-clangd",
+        "--query-driver=C:/Users/ASUS/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/*/bin/arm-none-eabi-gcc.exe",
+        "--background-index"
+    ],
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "cmake.useCMakePresets": "always",
+    "cmake.cmakePath": "cube-cmake",
+    "cmake.configureArgs": [
+        "-DCMAKE_COMMAND=cube-cmake"
+    ]
+}

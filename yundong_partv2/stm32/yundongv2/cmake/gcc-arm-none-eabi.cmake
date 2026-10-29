@@ -1,0 +1,30 @@
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_PROCESSOR arm)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+set(TOOLCHAIN_PREFIX arm-none-eabi- CACHE STRING "Cross compiler prefix or absolute prefix")
+# VS Code 的进程环境不一定包含 STM32Cube 扩展安装的工具链目录。
+# 支持调用方的 PATH，也自动查找扩展下载的带版本号工具包。
+file(GLOB _stm32_gcc_bins "$ENV{LOCALAPPDATA}/stm32cube/bundles/gnu-tools-for-stm32/*/bin")
+list(SORT _stm32_gcc_bins COMPARE NATURAL ORDER DESCENDING)
+find_program(STM32_ARM_GCC NAMES "${TOOLCHAIN_PREFIX}gcc"
+    HINTS ${_stm32_gcc_bins}
+    DOC "Absolute path to the ARM cross compiler" REQUIRED)
+get_filename_component(_arm_bin "${STM32_ARM_GCC}" DIRECTORY)
+get_filename_component(_arm_prefix "${STM32_ARM_GCC}" NAME_WE)
+string(REGEX REPLACE "gcc$" "" _arm_prefix "${_arm_prefix}")
+set(CMAKE_C_COMPILER "${STM32_ARM_GCC}")
+set(CMAKE_ASM_COMPILER "${STM32_ARM_GCC}")
+# 后处理也使用同一套工具链，不能继续依赖编辑器的 PATH 或旧缓存。
+find_program(STM32_ARM_OBJCOPY NAMES "${_arm_prefix}objcopy" HINTS "${_arm_bin}" NO_DEFAULT_PATH REQUIRED)
+find_program(STM32_ARM_SIZE NAMES "${_arm_prefix}size" HINTS "${_arm_bin}" NO_DEFAULT_PATH REQUIRED)
+set(CMAKE_OBJCOPY "${STM32_ARM_OBJCOPY}" CACHE FILEPATH "objcopy" FORCE)
+set(CMAKE_SIZE "${STM32_ARM_SIZE}" CACHE FILEPATH "size" FORCE)
+set(CMAKE_EXECUTABLE_SUFFIX_C ".elf")
+set(CMAKE_EXECUTABLE_SUFFIX_ASM ".elf")
+set(TARGET_FLAGS "-mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard")
+set(CMAKE_C_FLAGS_INIT "${TARGET_FLAGS} -Wall -fdata-sections -ffunction-sections -fstack-usage")
+set(CMAKE_ASM_FLAGS_INIT "${TARGET_FLAGS} -x assembler-with-cpp -MMD -MP")
+set(CMAKE_C_FLAGS_DEBUG_INIT "-O0 -g3")
+set(CMAKE_C_FLAGS_RELEASE_INIT "-Os")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "${TARGET_FLAGS} -T\"${CMAKE_CURRENT_LIST_DIR}/../STM32H743xx_FLASH.ld\" --specs=nano.specs -Wl,-Map=yundongv2.map -Wl,--gc-sections -Wl,--print-memory-usage")
+set(TOOLCHAIN_LINK_LIBRARIES m)

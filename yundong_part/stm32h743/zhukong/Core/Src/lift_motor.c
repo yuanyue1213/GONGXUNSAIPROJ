@@ -7,6 +7,7 @@
 #define LIFT_SPEED_RPM         30U
 #define LIFT_ACCELERATION      10U
 #define LIFT_ACK_TIMEOUT_MS    20U
+#define ARM_POSITION_TIMEOUT_MS 20U
 /* Installed lift: U rises with CCW, D lowers with CW; shared by both motion modes. */
 #define LIFT_UP_DIRECTION      ZDT_DIRECTION_CCW
 #define LIFT_DOWN_DIRECTION    ZDT_DIRECTION_CW
@@ -297,9 +298,12 @@ static bool read_position(uint8_t id, int64_t *angle_tenths)
         s_last_error[id-1U]="TX"; return false;
     }
     uint32_t start = HAL_GetTick();
-    while ((uint32_t)(HAL_GetTick() - start) < 20U) {
-        uint32_t remaining = 20U - (uint32_t)(HAL_GetTick() - start);
-        if (HAL_UART_Receive(s_uart, &byte, 1U, remaining) != HAL_OK) return false;
+    while (true) {
+        uint32_t elapsed = HAL_GetTick() - start;
+        if (elapsed >= ARM_POSITION_TIMEOUT_MS) break;
+        /* Use one elapsed sample: an interrupt between two tick reads must not
+         * underflow remaining and turn a 20ms read into a very long wait. */
+        if (HAL_UART_Receive(s_uart, &byte, 1U, ARM_POSITION_TIMEOUT_MS-elapsed) != HAL_OK) return false;
         response[count++] = byte;
         if (count < sizeof(response)) continue;
         if (response[0] == id && response[1] == 0x36U && response[2] <= 1U && response[7] == ZDT_MOTOR_FRAME_TAIL) {
@@ -318,9 +322,25 @@ static bool read_position(uint8_t id, int64_t *angle_tenths)
     return false;
 }
 
+static void ArmMotor_RecoverRx(void)
+{
+    __HAL_UART_CLEAR_OREFLAG(s_uart);
+    __HAL_UART_CLEAR_NEFLAG(s_uart);
+    __HAL_UART_CLEAR_FEFLAG(s_uart);
+    __HAL_UART_CLEAR_PEFLAG(s_uart);
+    __HAL_UART_SEND_REQ(s_uart,UART_RXDATA_FLUSH_REQUEST);
+}
+
 bool ArmMotor_ReadPosition(uint8_t id, int64_t *angle_tenths)
 {
+    if(angle_tenths==NULL||id<1U||id>2U) return false;
     bool ok=read_position(id,angle_tenths);
+    if(!ok&&s_uart!=NULL&&s_firmware[id-1U]!=ARM_FIRMWARE_UNKNOWN) {
+        /* One bounded retry for this read-only query. Never repeat a motion
+         * command or return a cached position as a successful fresh reading. */
+        ArmMotor_RecoverRx();
+        ok=read_position(id,angle_tenths);
+    }
     if(!ok&&id>=1U&&id<=2U)
         LiftMotor_Fault(id,s_firmware[id-1U]==ARM_FIRMWARE_UNKNOWN?"FIRMWARE_READ":"POSITION_READ");
     return ok;
@@ -368,13 +388,17 @@ static bool read_status(uint8_t id, uint8_t *status)
 
     if ((s_uart == NULL) || (status == NULL) ||
         (id < LIFT_MOTOR_ID) || (id > FORE_AFT_MOTOR_ID)) return false;
-    if (HAL_UART_Transmit(s_uart, request, sizeof(request), 20U) != HAL_OK)
+    s_last_error[id-1U]="NO_REPLY";
+    if (HAL_UART_Transmit(s_uart, request, sizeof(request), 20U) != HAL_OK) {
+        s_last_error[id-1U]="TX";
         return false;
+    }
     start = HAL_GetTick();
-    while ((uint32_t)(HAL_GetTick() - start) < 20U)
+    while (true)
     {
-        uint32_t remaining = 20U - (uint32_t)(HAL_GetTick() - start);
-        if (HAL_UART_Receive(s_uart, &byte, 1U, remaining) != HAL_OK)
+        uint32_t elapsed=HAL_GetTick()-start;
+        if(elapsed>=LIFT_ACK_TIMEOUT_MS) break;
+        if (HAL_UART_Receive(s_uart, &byte, 1U, LIFT_ACK_TIMEOUT_MS-elapsed) != HAL_OK)
             return false;
         response[count++] = byte;
         if (count < sizeof(response)) continue;
@@ -382,8 +406,10 @@ static bool read_status(uint8_t id, uint8_t *status)
             (response[3] == ZDT_MOTOR_FRAME_TAIL))
         {
             *status = response[2];
+            s_last_error[id-1U]="NONE";
             return true;
         }
+        s_last_error[id-1U]="BAD_REPLY";
         response[0] = response[1];
         response[1] = response[2];
         response[2] = response[3];
@@ -394,7 +420,12 @@ static bool read_status(uint8_t id, uint8_t *status)
 
 bool LiftMotor_ReadStatus(uint8_t id, uint8_t *status)
 {
+    if(id<1U||id>2U||status==NULL) return false;
     bool ok=read_status(id,status);
+    if(!ok&&s_uart!=NULL) {
+        ArmMotor_RecoverRx();
+        ok=read_status(id,status);
+    }
     if(!ok) LiftMotor_Fault(id,"STATUS_READ");
     return ok;
 }

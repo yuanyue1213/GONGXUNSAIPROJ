@@ -18,7 +18,7 @@ typedef enum { OFF, READY, REFERENCE, STOW, NAV, ARRIVE, QR, PREPARE, SLOT, OBSE
 static struct {
     AutoOutput stm,event;
     Phase phase,next;
-    bool running,waiting,have_code,vision_enabled,arm_enabled,options_loaded,config_error,drive_loaded,body_loaded,station_aligned,position_ready,default_code_mode;
+    bool running,waiting,have_code,vision_enabled,arm_enabled,options_loaded,config_error,drive_loaded,body_loaded,station_aligned,position_ready,default_code_mode,camera_replied;
     uint32_t run,id,pending,since,last_query,settle_until,config_id,last_run;
     uint32_t forward,lateral,rpm,fine,mask,corrections,turn_rpm,correction_pulses,wheel_ppr;
     float target_x,target_y;
@@ -210,6 +210,7 @@ static void request_camera(TaskVisionKind kind,unsigned target,uint32_t now)
     else if(kind==TASK_OCCUPIED) snprintf(a.camera_line,sizeof(a.camera_line),"CAM,%lu,OCCUPIED,%u,%.1f,%.1f\n",
         (unsigned long)a.pending,target,(double)a.target_x,(double)a.target_y);
     else snprintf(a.camera_line,sizeof(a.camera_line),"CAM,%lu,RING,%u\n",(unsigned long)a.pending,target);
+    a.camera_replied=false;
     a.since=a.last_query=now; a.stm(a.camera_line);
     char detail[64]; snprintf(detail,sizeof(detail),"%s:WAIT_VISION",stage()); emit("WORK",detail);
 }
@@ -268,6 +269,13 @@ static void enter_node(uint32_t now)
 void AutoTask_Input(const char *line,uint32_t now)
 {
     if(!a.running) return;
+    if(strncmp(line,"CAM_TX,",7U)==0) {
+        const char *p=line+7U; uint32_t id;
+        if(!RobotProtocol_U32(&p,&id,',')||id!=a.pending||a.waiting) return;
+        if((a.phase==QR||a.phase==OBSERVE||a.phase==SELECT||a.phase==RAW_WAIT)&&strcmp(p,"ERROR")==0)
+            AutoTask_Stop("CAMERA_TX_FAILED");
+        return;
+    }
     if(strncmp(line,"STATUS,",7U)==0) {
         const char *p=line+7U; uint32_t id;
         if(!RobotProtocol_U32(&p,&id,',')||id!=a.pending) return;
@@ -306,6 +314,18 @@ void AutoTask_Input(const char *line,uint32_t now)
     }
     TaskVision v;
     if(!TaskProtocol_Vision(line,&v)||v.request!=a.pending||a.waiting) return;
+    if(a.phase==QR||a.phase==OBSERVE||a.phase==SELECT||a.phase==RAW_WAIT) {
+        TaskVisionKind expected; unsigned target=0;
+        if(a.phase==QR) expected=TASK_QR;
+        else if(a.phase==SELECT) { expected=TASK_PICK; target=color(); }
+        else if(a.phase==RAW_WAIT) { expected=TASK_NEAR; target=color(); }
+        else target=visual_target(&expected);
+        if(v.kind!=TASK_NONE&&(v.kind!=expected||(expected!=TASK_QR&&v.target!=target))) return;
+        if(!a.camera_replied) {
+            a.camera_replied=true;
+            char detail[64]; snprintf(detail,sizeof(detail),"%s:CAMERA_RESPONDING",stage()); emit("WORK",detail);
+        }
+    }
     if(a.phase==QR&&v.kind==TASK_QR) {
         a.code=v.code; a.have_code=true;
         char event[64]; snprintf(event,sizeof(event),"TASK,%lu,%s\n",(unsigned long)a.run,v.text); a.event(event);
@@ -403,7 +423,7 @@ void AutoTask_Tick(uint32_t now)
         if(a.phase==RAW_WAIT&&a.pending==0U) {
             request_camera(TASK_NEAR,color(),now); emit("WORK","WAIT_RAW_TARGET"); break;
         }
-        if((uint32_t)(now-a.since)>60000U) { AutoTask_Stop(a.phase==RAW_WAIT?"RAW_TARGET_TIMEOUT":"VISION_TIMEOUT"); break; }
+        if((uint32_t)(now-a.since)>60000U) { AutoTask_Stop(!a.camera_replied?"CAMERA_NO_RESPONSE":a.phase==RAW_WAIT?"RAW_TARGET_TIMEOUT":"VISION_TIMEOUT"); break; }
         /* Camera keeps streaming the requested mode. A fresh request after a
          * correction invalidates the previous frame and restarts stability. */
         if((uint32_t)(now-a.last_query)>2000U) { a.stm(a.camera_line); a.last_query=now; }

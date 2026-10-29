@@ -23,6 +23,7 @@ static UART_HandleTypeDef camera_uart = {4, HAL_UART_STATE_READY};
 static uint32_t tick;
 static uint8_t *rx_byte;
 static uint8_t *camera_rx_byte;
+static bool fail_camera_tx;
 static uint8_t reply[8], reply_index,reply_length=4;
 static uint8_t frame[57];
 static unsigned position_frames, stop_frames;
@@ -97,6 +98,7 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, uint8_t *data,
         memcpy(application_reply+n,data,length); application_reply[n+length]=0; return HAL_OK;
     }
     if(uart==&camera_uart) {
+        if(fail_camera_tx) return HAL_TIMEOUT;
         assert(length<sizeof(camera_request)); memcpy(camera_request,data,length); camera_request[length]=0; return HAL_OK;
     }
     assert(uart == &motor_uart);
@@ -232,7 +234,7 @@ bool ServoControl_SetAngle(char c, uint16_t a)
 static void feed(const char *command);
 static void reset(void)
 {
-    application_reply[0]=camera_request[0]=0;
+    application_reply[0]=camera_request[0]=0; fail_camera_tx=false;
     tick = 0; position_frames = stop_frames = 0;
     sync_frames=queued_frames=encoder_queries=status_queries=fail_queue_id=0; fail_sync=false;
     fail_speed_id=0; pending_velocity_mask=0;
@@ -1833,9 +1835,15 @@ static void test_raw_prepare_wait_take(void)
 }
 static void test_turntable_camera_relay(void)
 {
+    reset(); feed("CAM,980,QR\n");
+    assert(strstr(application_reply,"CAM_TX,980,ERROR\n"));
+    reset(); camera_ready(); fail_camera_tx=true;
+    feed("CAM,981,QR\n"); assert(strstr(application_reply,"CAM_TX,981,ERROR\n"));
+    assert(!camera_request[0]);
     reset(); camera_ready();
     feed("CAM,990,TABLE,156,256.0,160.0\n");
     assert(strcmp(camera_request,"CAM,990,TABLE,156,256.0,160.0\n")==0);
+    assert(strstr(application_reply,"CAM_TX,990,OK\n"));
     camera_feed("VISION,990,TABLE,156,255.0,160.0\n"); RobotControl_Tick();
     assert(strstr(application_reply,"VISION,990,TABLE,156,255.0,160.0\n"));
     application_reply[0]=0;

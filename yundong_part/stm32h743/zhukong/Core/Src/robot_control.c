@@ -1782,7 +1782,10 @@ static void RobotControl_Dispatch(const char *frame)
     if(strncmp(frame,"CAM,",4U)==0) {
         TaskCameraRequest request;
         if(!TaskProtocol_Camera(frame,&request)) return;
-        (void)CameraLink_SendTask(frame); return;
+        bool sent=CameraLink_SendTask(frame);
+        char reply[64]; snprintf(reply,sizeof(reply),"CAM_TX,%lu,%s\n",
+            (unsigned long)request.request,sent?"OK":"ERROR");
+        RobotControl_SendLine(reply); return;
     }
     if(strncmp(frame,"QUERY,",6U)==0) {
         p=frame+6U;

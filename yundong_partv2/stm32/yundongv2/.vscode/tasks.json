@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "STM32: Configure CameraUartTest",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "CameraUartTest",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build CameraUartTest",
+      "type": "cmake",
+      "command": "build",
+      "preset": "CameraUartTest",
+      "dependsOn": "STM32: Configure CameraUartTest",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "STM32: Configure Debug",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "Debug",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build Debug",
+      "type": "cmake",
+      "command": "build",
+      "preset": "Debug",
+      "dependsOn": "STM32: Configure Debug",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    }
+  ]
+}

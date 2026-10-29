@@ -14,12 +14,28 @@ static int fail_enable, fail_position;
 static uint32_t real_position;
 static uint8_t real_sign;
 static int fail_read;
+static unsigned read_requests, transient_read_failures, transient_bad_frames, transient_tx_failures;
+static bool interrupt_tick_jump;
+static unsigned position_clock_calls;
+static unsigned status_requests, status_clock_calls, transient_status_failures, transient_status_bad_frames, transient_status_tx_failures;
+static bool fail_status_read, interrupt_status_tick_jump;
+static uint8_t real_status;
 static bool echo_query, bad_parameter_count;
 static uint8_t fault_id;
 static const char *fault_operation;
 void LiftMotor_Fault(uint8_t id, const char *operation)
 { fault_id=id; fault_operation=operation; }
-uint32_t HAL_GetTick(void) { return tick; }
+uint32_t HAL_GetTick(void) {
+    if(interrupt_tick_jump&&read_requests==1U) {
+        static const uint32_t sequence[]={0,0,19,19,21};
+        tick=sequence[position_clock_calls<5U?position_clock_calls++:4U];
+    }
+    if(interrupt_status_tick_jump&&status_requests==1U) {
+        static const uint32_t sequence[]={0,0,19,19,21};
+        tick=sequence[status_clock_calls<5U?status_clock_calls++:4U];
+    }
+    return tick;
+}
 HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *u, uint8_t *data, uint16_t len, uint32_t timeout)
 {
     (void)timeout; assert(u == &uart && (data[0] == 1 || data[0] == 2));
@@ -35,10 +51,21 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *u, uint8_t *data, uint16
             memcpy(response,data,len); response_length+=len;
         }
     } else if (data[1] == 0x36) {
+        ++read_requests;
+        if(transient_tx_failures) { --transient_tx_failures; return HAL_ERROR; }
         assert(len == 3); response_length = fail_read ? 0 : 8;
+        if(transient_read_failures) { --transient_read_failures; response_length=0; }
         response[2] = real_sign;
         response[3] = (uint8_t)(real_position >> 24); response[4] = (uint8_t)(real_position >> 16);
         response[5] = (uint8_t)(real_position >> 8); response[6] = (uint8_t)real_position; response[7] = 0x6B;
+        if(transient_bad_frames) { --transient_bad_frames; response[7]=0xFF; }
+    } else if(data[1]==0x3A) {
+        ++status_requests;
+        if(transient_status_tx_failures) { --transient_status_tx_failures; return HAL_ERROR; }
+        assert(len==3); response_length=fail_status_read?0:4;
+        response[2]=real_status; response[3]=0x6B;
+        if(transient_status_failures) { --transient_status_failures; response_length=0; }
+        if(transient_status_bad_frames) { --transient_status_bad_frames; response[3]=0xFF; }
     } else {
         response_length = 4; response[2] = 2; response[3] = 0x6B;
         if (data[1] == 0xF3 && fail_enable) response_length = 0;
@@ -53,6 +80,7 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *u, uint8_t *data, uint16
 HAL_StatusTypeDef HAL_UART_Receive(UART_HandleTypeDef *u, uint8_t *data, uint16_t len, uint32_t timeout)
 {
     assert(u == &uart);
+    if(response[1]==0x36||response[1]==0x3A) assert(timeout<=20U);
     if (response_index + len > response_length) { tick += timeout; return HAL_TIMEOUT; }
     memcpy(data, response + response_index, len); response_index += len; return HAL_OK;
 }
@@ -61,6 +89,10 @@ static void reset(unsigned length)
     tick = position_count = 0; firmware_length = length;
     fail_enable = fail_position = 0; LiftMotor_Init(&uart);
     fail_read = 0; real_position = 0; real_sign = 0;
+    read_requests=transient_read_failures=transient_bad_frames=transient_tx_failures=0;
+    interrupt_tick_jump=false; position_clock_calls=0;
+    status_requests=status_clock_calls=transient_status_failures=transient_status_bad_frames=transient_status_tx_failures=0;
+    fail_status_read=interrupt_status_tick_jump=false; real_status=3;
     fault_id=0; fault_operation=NULL;
     echo_query=bad_parameter_count=false;
 }
@@ -71,6 +103,44 @@ int main(void)
     signal(SIGABRT, exit);
 #endif
     int64_t angle;
+    uint8_t status;
+    for(unsigned id=1U;id<=2U;++id) {
+        for(unsigned fault=0;fault<3U;++fault) {
+            reset(0x25);
+            if(fault==0) transient_status_failures=1;
+            if(fault==1) transient_status_bad_frames=1;
+            if(fault==2) transient_status_tx_failures=1;
+            assert(LiftMotor_ReadStatus(id,&status)&&status==3);
+            assert(status_requests==2&&position_count==0&&fault_operation==NULL);
+        }
+        reset(0x25); fail_status_read=true; status=0xFF;
+        assert(!LiftMotor_ReadStatus(id,&status)&&status==0xFF&&status_requests==2&&tick<=40);
+        assert(fault_id==id&&strcmp(fault_operation,"STATUS_READ")==0);
+        reset(0x25); real_status=9;
+        assert(LiftMotor_ReadStatus(id,&status)&&status==9&&status_requests==1); /* driver protection is not hidden */
+    }
+    reset(0x25); interrupt_status_tick_jump=true;
+    assert(LiftMotor_ReadStatus(2,&status)&&status==3&&status_requests==2);
+    reset(0x25); interrupt_tick_jump=true; real_position=54321;
+    assert(ArmMotor_ReadPosition(2,&angle)&&angle==54321&&read_requests==2);
+    for(unsigned firmware=0;firmware<2U;++firmware) {
+        for(unsigned fault=0;fault<3U;++fault) {
+            reset(firmware?0x25:0x21); real_position=65536;
+            if(fault==0) transient_read_failures=1;
+            if(fault==1) transient_bad_frames=1;
+            if(fault==2) transient_tx_failures=1;
+            assert(ArmMotor_ReadPosition(2,&angle));
+            assert(angle==(firmware?65536:3600));
+            assert(read_requests==2&&position_count==0&&fault_operation==NULL);
+            assert(strcmp(LiftMotor_LastError(2),"NONE")==0);
+        }
+        reset(firmware?0x25:0x21); fail_read=1; angle=123;
+        assert(!ArmMotor_ReadPosition(2,&angle));
+        assert(angle==123&&read_requests==2&&tick<=40&&position_count==0);
+        assert(fault_id==2&&strcmp(fault_operation,"POSITION_READ")==0);
+        reset(firmware?0x25:0x21);
+        assert(!ArmMotor_ReadPosition(2,NULL)&&read_requests==0);
+    }
     reset(0x25); echo_query=true;
     assert(ArmMotor_ReadPosition(1,&angle)&&LiftMotor_FirmwareCode(1)=='X');
     reset(0x21); echo_query=true;
@@ -170,6 +240,6 @@ int main(void)
     reset(0x25);
     assert(ArmMotor_MoveAbsolute(1, 900, 600, 3200) == HAL_OK);
     assert(position[7] == 0x17 && position[8] == 0x70);
-    puts("PASS: ID1/ID2 Emm/X FD frames, angle conversion, directions and ACK failures");
+    puts("PASS: ID1/ID2 Emm/X, transient position read/TX/frame retry, persistent-failure stop, bounded timeout, motion commands never retried");
     return 0;
 }

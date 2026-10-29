@@ -316,3 +316,12 @@ S1 → (2250,2200) → NE(2200,2200) → Q
 - 保留原25步路线、动作完成确认及100ms间隔。视觉模式继续遵循请求识别、匹配编号/目标、执行动作、等待DONE后再继续；动作错误/忙碌及超时停止。
 - AUTO最后一字段支持“环节:原因”，如RAW_WAIT:RAW_TARGET_TIMEOUT、DRIVE:MOTOR_FAULT、ARM:ACTION_TIMEOUT；App显示当前路线、第几件和停止环节。WAIT_ACTION/WAIT_VISION表示等待执行器/相机确认，不代表已经发生硬件故障。
 - 更新App和ESP32；本次无需更新STM32和视觉脚本。无新增硬件故障检测能力，电机详情沿用已有MOTOR_DIAG。
+
+
+### 2026-10-25 相机通信错误反馈
+
+- STM32收到合法CAM请求后，尝试UART4发送，并向ESP32回传CAM_TX,id,OK或CAM_TX,id,ERROR。OK仅表示本地发送完成，不确认相机收到了；实际VISION,id,NONE或识别结果才证明相机返回数据。
+- ESP32仅接受当前视觉等待编号的CAM_TX错误，停止并向App报告阶段:CAMERA_TX_FAILED。过期编号忽略。
+- 每个新视觉请求重置camera_replied，重复发送同一请求不重置。60秒未收到合法且匹配的相机回包报告CAMERA_NO_RESPONSE；收到合法NONE但未完成稳定识别则沿用VISION_TIMEOUT/RAW_TARGET_TIMEOUT。单纯CAM_TX,id,OK不计相机已回应。
+- App新增这三类通信状态的中文说明：发送失败、完全无相机回包、已收到相机回包等待稳定识别。
+- MaixCAM脚本显式配置选定UART的pinmap；保留ttyS2默认值，现场A21/A22接线应明确设置为ttyS4。不会自动换端口。

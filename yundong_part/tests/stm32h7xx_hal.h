@@ -14,6 +14,9 @@ typedef enum { HAL_OK, HAL_ERROR, HAL_BUSY, HAL_TIMEOUT } HAL_StatusTypeDef;
 #define __HAL_UART_CLEAR_OREFLAG(x) ((void)(x))
 #define __HAL_UART_CLEAR_NEFLAG(x) ((void)(x))
 #define __HAL_UART_CLEAR_FEFLAG(x) ((void)(x))
+#define __HAL_UART_CLEAR_PEFLAG(x) ((void)(x))
+#define UART_RXDATA_FLUSH_REQUEST 1U
+#define __HAL_UART_SEND_REQ(x, y) ((void)(x), (void)(y))
 static inline void HAL_NVIC_SetPriority(int irq, int priority, int sub) { (void)irq; (void)priority; (void)sub; }
 static inline void HAL_NVIC_EnableIRQ(int irq) { (void)irq; }
 static inline uint32_t __get_PRIMASK(void) { return 0; }

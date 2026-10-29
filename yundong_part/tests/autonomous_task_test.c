@@ -183,14 +183,26 @@ static void test_camera_corrections(void)
 }
 static void test_raw_wait_timeout_and_stop(void)
 {
-    setup(true,true,45); uint32_t now; unsigned id,color;
-    for(now=0;now<30000U;now+=200U) {
-        if(sscanf(outgoing,"CAM,%u,NEAR,%u",&id,&color)==2) break;
-        respond(now); AutoTask_Tick(now);
+    for(unsigned response=0;response<3U;++response) {
+        setup(true,true,45); uint32_t now; unsigned id,color;
+        for(now=0;now<30000U;now+=200U) {
+            if(sscanf(outgoing,"CAM,%u,NEAR,%u",&id,&color)==2) break;
+            respond(now); AutoTask_Tick(now);
+        }
+        assert(now<30000U&&cards==0U&&raw_preps==1U);
+        outgoing[0]=0; char reply[96];
+        snprintf(reply,sizeof(reply),"CAM_TX,%u,ERROR",id-1U); AutoTask_Input(reply,now);
+        assert(AutoTask_Running());
+        if(response==2U) {
+            snprintf(reply,sizeof(reply),"CAM_TX,%u,ERROR",id); AutoTask_Input(reply,now);
+            assert(!AutoTask_Running()&&strstr(events,"RAW_WAIT:CAMERA_TX_FAILED"));
+        } else {
+            if(response) { snprintf(reply,sizeof(reply),"VISION,%u,NONE",id); AutoTask_Input(reply,now); }
+            AutoTask_Tick(now+60001U);
+            assert(!AutoTask_Running()&&strstr(events,response?"RAW_WAIT:RAW_TARGET_TIMEOUT":"RAW_WAIT:CAMERA_NO_RESPONSE"));
+        }
+        assert(stops>=4U);
     }
-    assert(now<30000U&&cards==0U&&raw_preps==1U);
-    outgoing[0]=0; AutoTask_Tick(now+60001U);
-    assert(!AutoTask_Running()&&strstr(events,"RAW_WAIT:RAW_TARGET_TIMEOUT")&&stops>=4U);
 }
 int main(void) { test_supported_modes(); test_raw_wait_timeout_and_stop(); test_interval_and_stale_completion(); test_camera_corrections();
     puts("PASS: exact 25 body steps, six docks, both process retrievals, four supported modes, fixed physical profiles, independent onboard slots, 1200RPM, 100ms gap, stale IDs, body-axis vision"); }

@@ -85,6 +85,11 @@ class AutonomousTaskTest {
         assertTrue(text.contains("编码器失败"))
         assertTrue(AutonomousStatus.text("AUTO,11,WORK,4,0,0,0,ALIGN:WAIT_VISION").contains("工位中心识别"))
     }
+    @Test fun cameraCommunicationErrorsAreDistinct() {
+        assertTrue(AutonomousStatus.text("AUTO,11,STOPPED,1,0,0,0,QR:CAMERA_TX_FAILED").contains("发送请求失败"))
+        assertTrue(AutonomousStatus.text("AUTO,11,STOPPED,1,0,0,0,QR:CAMERA_NO_RESPONSE").contains("未收到相机回包"))
+        assertTrue(AutonomousStatus.text("AUTO,11,WORK,1,0,0,0,QR:CAMERA_RESPONDING").contains("双向通信已收到回包"))
+    }
     @Test fun taskStatusIsReadable() {
         assertTrue(AutonomousStatus.text("AUTO,11,STOPPED,2,0,0,0,VISION_TIMEOUT").contains("视觉识别超时"))
         assertEquals("任务码：156+123+516+231", AutonomousStatus.text("TASK,11,156+123+516+231"))
