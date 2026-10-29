@@ -62,9 +62,21 @@ int main(void)
 {
     Motion_Init(service);
     assert(Motion_EstimateMs(0,100,200)==0);
-    assert(Motion_EstimateMs(1,60,60)==2200); /* 1 s acceleration + 1 s deceleration */
-    assert(Motion_EstimateMs(2,60,60)==3200);
-    assert(Motion_Move('F',1000,68)&&wheel_calls==1&&services>0);
+    assert(Motion_EstimateMs(1,60,60)==2000+MISSION_MOTION_SETTLE_MS); /* 1 s acceleration + 1 s deceleration */
+    assert(Motion_EstimateMs(2,60,60)==3000+MISSION_MOTION_SETTLE_MS);
+    uint32_t wheel_start=tick;
+    assert(Motion_Move('F',1000,MISSION_ROUTE_RPM)&&wheel_calls==1&&services>0);
+    uint32_t wheel_ms=tick-wheel_start;
+    /* 12585/3200圈，档位10=81.3RPM/s，耗时约3.41秒+余量。
+     * 旧代码误用10RPM/s，会等约9.72秒。 */
+    uint32_t wheel_expected=(uint32_t)ceil(2.0*sqrt((12585.0/3200.0)*60.0*246.0/20000.0)*1000.0)+MISSION_MOTION_SETTLE_MS;
+    assert(wheel_ms>=wheel_expected&&wheel_ms<wheel_expected+30U);
+    /* 短距离同样使用正确加速度，不能套用错误的旧等待时间。 */
+    wheel_start=tick;
+    assert(Motion_Move('L',100,MISSION_FINE_RPM));
+    wheel_ms=tick-wheel_start;
+    wheel_expected=(uint32_t)ceil(2.0*sqrt((1323.0/3200.0)*60.0*246.0/20000.0)*1000.0)+MISSION_MOTION_SETTLE_MS;
+    assert(wheel_ms>=wheel_expected&&wheel_ms<wheel_expected+30U);
     uint32_t before=tick;
     assert(Motion_MoveAll(1270,40,200,300)); /* both axes = one motor revolution */
     uint32_t duration=tick-before;

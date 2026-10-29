@@ -52,16 +52,20 @@ _Static_assert(MOTION_GRIPPER_DPS<=SERVO_GRIPPER_MAX_DPS&&
 #define MISSION_ALIGN_COARSE_RPM STEPPER_MAX_SPEED_RPM
 #define MISSION_ALIGN_FINE_RPM MOTION_FINE_RPM
 #define MISSION_UNALIGN_RPM STEPPER_MAX_SPEED_RPM
+/* 仅用于原料区识别成功后的粗调，方向由图像位置决定，单位mm。 */
+#define RAW_COARSE_FORWARD_MM 1000.0f
+#define RAW_COARSE_LATERAL_MM 5.0f
 /* 相对搜索起点的目标坐标幅值：前后 ±100 mm、左右 ±50 mm。 */
 #define MISSION_ALIGN_SEARCH_FORWARD_MM 100.0f
 #define MISSION_ALIGN_SEARCH_LATERAL_MM 50.0f
 /* NONE 也可能是相机正在积累稳定帧，先留出识别窗口再触发移动。 */
 #define MISSION_ALIGN_NONE_SETTLE_MS 1500U
-/* 预计耗时的标定入口；底盘加速度字段沿用 10，机械臂 Emm 字段也是 10。
- * X 固件实际下发 200 RPM/s；Emm 使用参考项目的加速度参数时间估算方法。 */
+/* 底盘Emm加速度为0..255档位；等待时按手册换算RPM/s，0为无加减速。
+ * 机械臂估时参数仍沿用原值，X固件实际下发200 RPM/s。 */
 #define MISSION_WHEEL_ACCEL 10U
+_Static_assert(MISSION_WHEEL_ACCEL<=255U,"Emm acceleration level must be 0..255");
 #define MISSION_ARM_EMM_ACCEL 10.0
-#define MISSION_MOTION_SETTLE_MS 200U
+#define MISSION_MOTION_SETTLE_MS 50U
 /* 各区按左、中、右填写 {抓取伸缩,放置伸缩,高度,底座角度}。
  * 先沿用已使用的姿态，可把对应区域宏替换成独立的三组参数。 */
 #define ARM_STATION_POSES { {1540,1520,-128,209}, {1190,1200,-126,170}, {1850,1850,-120,134} }
@@ -86,9 +90,9 @@ _Static_assert(MOTION_GRIPPER_DPS<=SERVO_GRIPPER_MAX_DPS&&
 #define ARM_SLOT_BASE 57U
 #define ARM_RAW_RETURN_BASE 180U
 #define ARM_STOW_BASE 180U
-#define ARM_GRIP_SETTLE_MS 500U
-#define ARM_RELEASE_SETTLE_MS 200U
-#define MISSION_STEP_SETTLE_MS 100U
+#define ARM_GRIP_SETTLE_MS 200U
+#define ARM_RELEASE_SETTLE_MS 100U
+#define MISSION_STEP_SETTLE_MS 20U
 
 /* 传动及转向控制。 */
 #define ARM_RADIAL_MM_PER_REV 127.0

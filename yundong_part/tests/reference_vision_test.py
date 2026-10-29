@@ -3,6 +3,7 @@ import copy
 import ast
 import importlib.util
 import math
+import json
 import tempfile
 import sys
 import types
@@ -48,18 +49,15 @@ def stable(engine, img, codes=(), count=3):
 class ReferenceTests(unittest.TestCase):
     def setUp(self):
         self.cfg = v.defaults()
-        centers = {name: np.array(value, np.float32) for name, value in v.DEFAULT_LAB_CENTER.items()}
+        centers = {name: np.array(value, np.float32) for name, value in v.DEFAULT_HSV_CENTER.items()}
         for color, bgr in BGR.items():
-            centers[v.COLORS[color]] = cv2.cvtColor(np.array([[bgr]], np.float32)/255., cv2.COLOR_BGR2LAB)[0, 0]
-        self.lab_data = (centers, {name: np.array([8,8,8], np.float32) for name in centers}, set(centers))
-        self.lab_patch = patch.object(v, "load_lab_thresholds", return_value=self.lab_data)
-        self.lab_patch.start()
-        self.addCleanup(self.lab_patch.stop)
+            centers[v.COLORS[color]] = cv2.cvtColor(np.array([[bgr]], np.uint8), cv2.COLOR_BGR2HSV)[0, 0]
+        self.hsv_data = (centers, {name: np.array([8,8,8], np.float32) for name in centers}, set(centers))
+        self.hsv_patch = patch.object(v, "load_hsv_thresholds", return_value=self.hsv_data)
+        self.hsv_patch.start()
+        self.addCleanup(self.hsv_patch.stop)
         self.engine = v.Engine(self.cfg)
 
-    def prepare_near(self):
-        self.engine.select((100, "TABLE", 156))
-        self.assertIn(",TABLE,156,", stable(self.engine, table(), count=5))
 
     def test_default_validation_and_independent_config(self):
         self.assertEqual(v.validate_config(self.cfg), self.cfg)
@@ -76,44 +74,94 @@ class ReferenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             v.validate_config(bad)
 
-    def test_original_algorithms_and_calibration_are_preserved(self):
+    def test_original_qr_stability_and_hsv_persistence(self):
         original = ast.parse((ROOT / "camera/MaixVision/vision_original_20261025.py").read_text(encoding="utf-8"))
         restored_text = (ROOT / "camera/MaixVision/main.py").read_text(encoding="utf-8")
         restored = ast.parse(restored_text.replace("ORIGINAL_COLORS.items()", "COLORS.items()").replace("class OriginalStableTarget:", "class StableTarget:"))
         def functions(tree):
             return {n.name: ast.dump(n, include_attributes=False) for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
         expected, actual = functions(original), functions(restored)
-        for name in ("save_lab_thresholds", "turntable_geometry", "on_turntable_track",
-                     "TurntableCenterDetector", "TurntableTaskDetector", "table_colors", "NearPickup", "StableTarget"):
+        for name in ("StableTarget",):
             self.assertEqual(actual[name], expected[name], name)
-        centers, tolerances, calibrated = self.lab_data
+        centers, tolerances, calibrated = self.hsv_data
         with tempfile.TemporaryDirectory() as folder:
-            path = str(Path(folder)/"lab_thresholds.json")
-            self.assertTrue(v.save_lab_thresholds(centers, tolerances, calibrated, path))
+            path = str(Path(folder)/"hsv_thresholds.json")
+            self.assertTrue(v.save_hsv_thresholds(centers, tolerances, calibrated, path))
             # Bypass setUp's in-memory loader to test the original persistence code.
-            self.lab_patch.stop()
-            loaded = v.load_lab_thresholds(path)
+            self.hsv_patch.stop()
+            loaded = v.load_hsv_thresholds(path)
             self.assertEqual(loaded[2], calibrated)
             np.testing.assert_allclose(loaded[0]["red"], centers["red"])
-            self.lab_patch.start()
+            self.hsv_patch.start()
 
-    def test_malformed_lab_types_fall_back_without_startup_failure(self):
-        self.lab_patch.stop()
+    def test_malformed_hsv_types_fall_back_without_startup_failure(self):
+        self.hsv_patch.stop()
         try:
             with tempfile.TemporaryDirectory() as folder:
-                path = Path(folder)/"lab.json"
+                path = Path(folder)/"hsv.json"
                 for payload in ("[]", "null", "123", "{}",
-                                '{"version":1,"lab_center":[],"lab_tol":{}}',
-                                '{"version":1,"lab_center":{},"lab_tol":null}',
-                                '{"version":1,"lab_center":{},"lab_tol":{},"calibrated_colors":[{}]}'):
+                                '{"version":2,"color_space":"HSV","hsv_center":[],"hsv_tol":{}}',
+                                '{"version":2,"color_space":"HSV","hsv_center":{},"hsv_tol":null}',
+                                '{"version":2,"color_space":"HSV","hsv_center":{},"hsv_tol":{},"calibrated_colors":[{}]}'):
                     path.write_text(payload)
-                    centers, tolerances, calibrated = v.load_lab_thresholds(str(path))
+                    centers, tolerances, calibrated = v.load_hsv_thresholds(str(path))
                     self.assertEqual(calibrated, set())
-                    for name in v.DEFAULT_LAB_CENTER:
-                        np.testing.assert_allclose(centers[name], v.DEFAULT_LAB_CENTER[name])
-                        np.testing.assert_allclose(tolerances[name], v.DEFAULT_LAB_TOL[name])
+                    for name in v.DEFAULT_HSV_CENTER:
+                        np.testing.assert_allclose(centers[name], v.DEFAULT_HSV_CENTER[name])
+                        np.testing.assert_allclose(tolerances[name], v.DEFAULT_HSV_TOL[name])
         finally:
-            self.lab_patch.start()
+            self.hsv_patch.start()
+
+    def test_hsv_hue_wrap_sampling_and_mask(self):
+        hsv = np.array([[[179, 220, 220], [1, 220, 220], [90, 220, 220],
+                         [0, 0, 220], [0, 220, 30]]], np.uint8)
+        center = v.sample_hsv(cv2.cvtColor(hsv[:, :2], cv2.COLOR_HSV2BGR))
+        self.assertLess(min(center[0], 180-center[0]), 2)
+        mask = v.hsv_mask(hsv, center, [5, 20, 20])
+        self.assertEqual(mask.tolist(), [[255, 255, 0, 0, 0]])
+        # 黑色H可以任意，亮度门限仍要排除白底。
+        gray = np.array([[[0, 0, 20], [120, 10, 30], [0, 0, 235]]], np.uint8)
+        self.assertEqual(v.hsv_mask(gray, v.DEFAULT_HSV_CENTER['black'], v.DEFAULT_HSV_TOL['black']).tolist(), [[255, 255, 0]])
+
+    def test_old_lab_file_is_not_loaded_as_hsv(self):
+        self.hsv_patch.stop()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder)/"old.json"
+                path.write_text(json.dumps({"version":1,"lab_center":{"red":[47,65,35]},"lab_tol":{"red":[15,12,12]},"calibrated_colors":["red"]}))
+                self.assertEqual(v.load_hsv_thresholds(str(path))[2], set())
+                centers, tolerances, calibrated = self.hsv_data
+                v.save_hsv_thresholds(centers, tolerances, calibrated, str(path))
+                data = json.loads(path.read_text())
+                self.assertEqual(data['color_space'], 'HSV')
+                data['hsv_center']['red'][0] = 180
+                path.write_text(json.dumps(data))
+                self.assertNotIn('red', v.load_hsv_thresholds(str(path))[2])
+        finally:
+            self.hsv_patch.start()
+
+    def test_hsv_touch_calibration_samples_and_adjusts_all_channels(self):
+        touches = iter([(10,10,True),(0,0,False),(10,10,True),(0,0,False),
+                        (10,10,True),(0,0,False),(50,70,True),(0,0,False),
+                        (50,130,True),(0,0,False),(50,190,True),(0,0,False),
+                        (200,270,True),(0,0,False)])
+        maix = types.ModuleType('maix')
+        maix.app = types.SimpleNamespace(need_exit=lambda:False)
+        ticks = iter([1000,1200,1400])
+        maix.time = types.SimpleNamespace(ticks_ms=lambda:next(ticks))
+        maix.image = types.SimpleNamespace(image2cv=lambda frame, **kw:frame.copy(), cv2image=lambda img, **kw:img,
+            resize_map_pos_reverse=lambda a,b,c,d,fit,x,y:(x,y), Fit=types.SimpleNamespace(FIT_CONTAIN=1))
+        cam = types.SimpleNamespace(read=lambda:np.full((320,512,3), BGR[1], np.uint8))
+        disp = types.SimpleNamespace(show=lambda img:None,width=lambda:512,height=lambda:320)
+        touch = types.SimpleNamespace(read=lambda:next(touches))
+        with tempfile.TemporaryDirectory() as folder, patch.dict(sys.modules, {'maix':maix}):
+            self.engine.table.path = str(Path(folder)/'hsv.json')
+            old_tol = self.engine.table.tolerances['red'].copy()
+            v.calibrate_table_colors(cam, disp, touch, self.engine.table, ('red',))
+            np.testing.assert_allclose(self.engine.table.centers['red'], v.sample_hsv(cam.read()))
+            np.testing.assert_allclose(self.engine.table.tolerances['red'], old_tol+1)
+            data = json.loads(Path(self.engine.table.path).read_text())
+            self.assertEqual(data['color_space'], 'HSV')
 
     def test_command_footer_does_not_cover_camera_pixels(self):
         img = blocks([(2, (256, 260))])
@@ -124,33 +172,62 @@ class ReferenceTests(unittest.TestCase):
         np.testing.assert_array_equal(display[:v.HEIGHT], img)
         self.assertTrue(np.any(display[v.HEIGHT:]))
 
-    def test_original_idle_preview_does_not_prime_task(self):
-        preview = v.IdleTablePreview(self.engine.table, target=156)
-        for _ in range(5):
-            center = preview.draw(table())
-        self.assertIsNotNone(center)
-        self.assertIsNone(self.engine.table.detector)
-        self.assertIsNone(self.engine.near.point)
-        self.engine.select((80, "TABLE", 156))
-        for _ in range(4):
-            self.assertEqual(self.engine.process(table()), "VISION,80,NONE\n")
-        self.assertIn("VISION,80,TABLE,156,", self.engine.process(table()))
+    def test_crash_log_keeps_stage_request_and_traceback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder)/"vision_error.log")
+            try:
+                raise ValueError("test NEAR exception")
+            except ValueError:
+                v.save_error_log("Process NEAR", (12, "NEAR", 1), path)
+            log = Path(path).read_text(encoding="utf-8")
+            self.assertIn("Process NEAR", log)
+            self.assertIn("(12, 'NEAR', 1)", log)
+            self.assertIn("Traceback", log)
+            self.assertIn("ValueError: test NEAR exception", log)
+            # 日志文件无法写入也不能掩盖原始异常。
+            with patch("builtins.open", side_effect=PermissionError("read only")), patch("builtins.print") as output:
+                v.save_error_log("Display", None, path)
+            self.assertIn("VISION ERROR", output.call_args_list[0].args[0])
+            self.assertTrue(output.call_args_list[0].kwargs["flush"])
 
-    def test_default_preview_and_table_include_yellow(self):
-        img = blocks([(1, (160, 130)), (2, (350, 130)), (3, (256, 270))])
-        preview = v.IdleTablePreview(self.engine.table)
-        self.assertEqual(preview.target, 123)
+    def test_initialization_failure_prints_stage_and_traceback(self):
+        maix = types.ModuleType("maix")
+        for name in ("camera", "display", "app", "image"):
+            setattr(maix, name, types.SimpleNamespace())
+        with patch.dict(sys.modules, {"maix": maix}), patch.object(v, "load_config", side_effect=ValueError("bad config")), patch("builtins.open", side_effect=PermissionError("read only")), patch("builtins.print") as output:
+            with self.assertRaisesRegex(ValueError, "bad config"):
+                v.main()
+        error = next(call for call in output.call_args_list if call.args and "VISION ERROR" in str(call.args[0]))
+        self.assertTrue(error.kwargs["flush"])
+        self.assertIn("Load configuration / HSV", error.args[0])
+        self.assertIn("ValueError: bad config", error.args[0])
+
+    def test_idle_single_material_preview_does_not_prime_task(self):
+        preview = v.IdleMaterialPreview(self.engine.detector)
+        img = blocks([(2, (256, 160))])
         for _ in range(5):
-            center = preview.draw(img.copy())
-        self.assertIsNotNone(center)
-        self.assertEqual(set(preview.detector.last_points), {"red", "yellow", "blue"})
-        self.engine.select((90, "TABLE", 123))
-        self.assertIn("VISION,90,TABLE,123,", stable(self.engine, img, count=5))
-        self.assertEqual({obj["color"] for obj in self.engine.objects}, {1, 2, 3})
-        # 屏幕绘制路径必须包含yellow标签，而不只是内部检测到了黄色。
+            preview.draw(img.copy())
+        self.assertEqual(len(preview.objects), 1)
+        self.assertEqual(preview.objects[0]["color"], 2)
+        self.assertIsNone(self.engine.request)
+        self.engine.select((80, "TABLE", 156))
+        for _ in range(2):
+            self.assertEqual(self.engine.process(img), "VISION,80,NONE\n")
+        self.assertIn("VISION,80,TABLE,156,", self.engine.process(img))
+
+
+    def test_preview_and_table_display_only_selected_yellow(self):
+        img = blocks([(1, (140, 130)), (2, (256, 160)), (3, (372, 270))])
+        preview = v.IdleMaterialPreview(self.engine.detector)
+        preview.draw(img.copy())
+        self.assertEqual([obj["color"] for obj in preview.objects], [2])
+        self.engine.select((90, "TABLE", 156))  # Yellow need not be in the batch.
+        self.assertIn("VISION,90,TABLE,156,", stable(self.engine, img))
+        self.assertEqual([obj["color"] for obj in self.engine.objects], [2])
         with patch.object(v.cv2, "putText", wraps=cv2.putText) as text:
             v.draw_status(img.copy(), self.engine, 0., "TEST")
         self.assertIn("yellow", [call.args[1] for call in text.call_args_list])
+
 
     def test_protocol_validation_and_fragmented_overlong_lines(self):
         self.assertTrue(v.valid_code("156+123+516+231"))
@@ -217,45 +294,128 @@ class ReferenceTests(unittest.TestCase):
             self.assertEqual(len(found), 1)
             self.assertLess(np.linalg.norm(np.array(found[0]["center"])-(256, 180)), 6.)
 
-    def test_table_rotation_uses_center_stability_not_vertices(self):
-        self.engine.select((10, "TABLE", 156, 256., 160.))
-        for i in range(4):
-            self.assertEqual(self.engine.process(table(i*.13)), "VISION,10,NONE\n")
-        result = self.engine.process(table(.52))
-        self.assertIn("VISION,10,TABLE,156,", result)
-        xy = np.array(list(map(float, result.strip().split(",")[-2:])))
-        self.assertLess(np.linalg.norm(xy-(256, 160)), 2.)
+    def test_table_accepts_any_single_calibrated_color_without_other_colors(self):
+        calibrated = set(self.engine.table.calibrated)
+        for color in BGR:
+            self.engine.table.calibrated = {v.COLORS[color]}
+            self.engine.select((100+color, "TABLE", 156))
+            reply = stable(self.engine, blocks([(color, (280, 180))]))
+            self.assertTrue(reply.startswith("VISION,%d,TABLE,156," % (100+color)), reply)
+            xy = np.array(list(map(float, reply.strip().split(",")[-2:])))
+            self.assertLess(np.linalg.norm(xy-(280, 180)), 2.)
+            self.assertEqual([obj["color"] for obj in self.engine.objects], [color])
+        self.engine.table.calibrated = calibrated
 
-    def test_missing_or_duplicate_color_does_not_output_center(self):
+
+    def test_table_selects_nearest_one_and_does_not_apply_station_offset(self):
+        self.cfg["material_offset"] = [60, 40]
         self.engine.select((10, "TABLE", 156))
-        for img in (blocks([(1, (160, 180)), (5, (300, 180))]),
-                    blocks([(1, (160, 180)), (1, (220, 90)), (5, (300, 180)), (6, (250, 240))])):
-            self.assertEqual(stable(self.engine, img, count=6), "VISION,10,NONE\n")
+        img = blocks([(1, (180, 160)), (1, (286, 160)), (4, (420, 250))])
+        reply = stable(self.engine, img)
+        self.assertIn("VISION,10,TABLE,156,", reply)
+        xy = np.array(list(map(float, reply.strip().split(",")[-2:])))
+        self.assertLess(np.linalg.norm(xy-(286, 160)), 2.)
+        self.assertEqual(len(self.engine.objects), 1)
+        self.assertEqual(stable(self.engine, canvas()), "VISION,10,NONE\n")
 
-    def test_near_requires_table_then_survives_removed_blocks(self):
-        self.engine.select((99, "NEAR", 1))
-        self.assertEqual(stable(self.engine, blocks([(1, (256, 230))]), count=5), "VISION,99,NONE\n")
-        self.prepare_near()
+    def test_centered_table_reply_uses_whole_pixels_for_fixed_coarse_move(self):
+        self.engine.select((10, "TABLE", 156, 256., 160.))
+        img = blocks([(2, (256, 160))])
+        # 缩放拟合产生的亚像素误差不能触发STM32固定1000/5mm粗调。
+        self.assertEqual(stable(self.engine, img), "VISION,10,TABLE,156,256.0,160.0\n")
+
+
+    def test_near_fixed_window_accepts_each_color_without_table(self):
+        for color in BGR:
+            self.engine.select((100+color, "NEAR", color))
+            img = blocks([(color, (256, 160))])
+            self.assertEqual(self.engine.process(img), "VISION,%d,NONE\n" % (100+color))
+            self.assertEqual(self.engine.process(img), "VISION,%d,NONE\n" % (100+color))
+            self.assertEqual(self.engine.process(img), "VISION,%d,NEAR,%d,2\n" % (100+color, color))
+
+
+    def test_near_ignores_outside_same_color_and_rejects_wrong_inside_color(self):
         self.engine.select((11, "NEAR", 1))
-        img = blocks([(1, (256, 230))])
-        self.assertEqual(stable(self.engine, img, count=5), "VISION,11,NEAR,1,2\n")
+        img = blocks([(1, (350, 230)), (4, (256, 160))])
+        self.assertEqual(stable(self.engine, img, count=5), "VISION,11,NONE\n")
+        self.assertEqual(stable(self.engine, blocks([(1, (350, 230))]), count=5), "VISION,11,NONE\n")
+        self.assertEqual(stable(self.engine, blocks([(1, (256, 160)), (1, (350, 230))])), "VISION,11,NEAR,1,2\n")
+
+
+    def test_table_stability_resets_on_position_color_and_missing_frames(self):
+        self.engine.select((10, "TABLE", 156))
+        red = blocks([(1, (230, 160))])
+        green = blocks([(4, (280, 160))])
+        for _ in range(2):
+            self.assertEqual(self.engine.process(red), "VISION,10,NONE\n")
+        for _ in range(2):
+            self.assertEqual(self.engine.process(green), "VISION,10,NONE\n")
+        self.assertIn(",TABLE,156,", self.engine.process(green))
+        # At the same pixel a new color must collect three new frames too.
+        yellow = blocks([(2, (280, 160))])
+        for _ in range(2):
+            self.assertEqual(self.engine.process(yellow), "VISION,10,NONE\n")
+        self.assertIn(",TABLE,156,", self.engine.process(yellow))
+        moved = blocks([(2, (320, 160))])
+        self.assertEqual(self.engine.process(moved), "VISION,10,NONE\n")
+        self.assertEqual(self.engine.process(canvas()), "VISION,10,NONE\n")
+        for _ in range(2):
+            self.assertEqual(self.engine.process(moved), "VISION,10,NONE\n")
+        self.assertIn(",TABLE,156,", self.engine.process(moved))
+
+
+    def test_near_stability_restarts_after_interruption_or_color_change(self):
+        self.engine.select((11, "NEAR", 1))
+        img = blocks([(1, (256, 160)), (5, (180, 200)), (5, (332, 200))])
+        for _ in range(2):
+            self.assertEqual(self.engine.process(img), "VISION,11,NONE\n")
         self.assertEqual(self.engine.process(canvas()), "VISION,11,NONE\n")
-        for _ in range(4):
+        for _ in range(2):
             self.assertEqual(self.engine.process(img), "VISION,11,NONE\n")
         self.assertEqual(self.engine.process(img), "VISION,11,NEAR,1,2\n")
-        self.engine.select((12, "NEAR", 5))
-        self.assertEqual(stable(self.engine, img), "VISION,12,NONE\n")
-        self.engine.select((13, "NEAR", 1))
-        far = blocks([(1, (256, 205))])
-        self.assertEqual(stable(self.engine, far), "VISION,13,NONE\n")
+        self.engine.select((12, "NEAR", 4))
+        green = blocks([(4, (256, 160))])
+        for _ in range(2):
+            self.assertEqual(self.engine.process(green), "VISION,12,NONE\n")
+        self.assertEqual(self.engine.process(green), "VISION,12,NEAR,4,2\n")
 
-    def test_near_duplicate_and_moving_target_rejected(self):
-        self.prepare_near()
+    def test_near_requires_majority_color_coverage_in_fixed_window(self):
         self.engine.select((11, "NEAR", 1))
-        img = blocks([(1, (256, 230)), (1, (310, 210))])
-        self.assertEqual(stable(self.engine, img), "VISION,11,NONE\n")
-        for x in (245, 250, 255, 260, 265):
-            self.assertEqual(self.engine.process(blocks([(1, (x, 230))])), "VISION,11,NONE\n")
+        small = canvas()
+        cv2.rectangle(small, (244, 148), (253, 172), BGR[1], -1)
+        self.assertEqual(stable(self.engine, small, count=5), "VISION,11,NONE\n")
+        mostly = canvas()
+        cv2.rectangle(mostly, (244, 148), (260, 172), BGR[1], -1)
+        self.assertEqual(stable(self.engine, mostly), "VISION,11,NEAR,1,2\n")
+
+    def test_table_custom_target_and_ack_preserve_fixed_pickup_point(self):
+        request = (20, "TABLE", 156, 330., 210.)
+        self.engine.select(request)
+        img = blocks([(1, (330, 210)), (2, (256, 160))])
+        self.assertIn(",TABLE,156,", stable(self.engine, img))
+        self.assertEqual([obj["color"] for obj in self.engine.objects], [1])
+        self.engine.select((20, "ACK", 0))
+        self.assertTrue(self.engine.stopped)
+        np.testing.assert_array_equal(self.engine.near.point, [330,210])
+        self.engine.select((21, "IDLE", 0))
+        self.engine.select((22, "NEAR", 1))
+        self.assertEqual(stable(self.engine, blocks([(1, (256, 160))])), "VISION,22,NONE\n")
+        self.assertEqual(stable(self.engine, blocks([(1, (330, 210))])), "VISION,22,NEAR,1,2\n")
+
+
+    def test_material_frame_validation(self):
+        maix = types.ModuleType("maix")
+        convert = types.SimpleNamespace(image2cv=lambda frame, **kw: frame)
+        maix.image = convert
+        with patch.dict(sys.modules, {"maix": maix}):
+            for bad in (None, np.zeros((320, 512), np.uint8), np.zeros((10, 10, 3), np.uint8), np.zeros((320, 512, 3), np.float32)):
+                with self.assertRaises(ValueError):
+                    v.read_material_frame(types.SimpleNamespace(read=lambda: bad))
+            good = canvas()
+            self.assertIs(v.read_material_frame(types.SimpleNamespace(read=lambda: good)), good)
+            with patch.object(convert, "image2cv", side_effect=RuntimeError("conversion failed")):
+                with self.assertRaisesRegex(RuntimeError, "conversion failed"):
+                    v.read_material_frame(types.SimpleNamespace(read=lambda: good))
 
     def test_occupied_middle_and_persistent_left_middle_right(self):
         self.engine.select((20, "OCCUPIED", 156))
@@ -276,7 +436,7 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(stable(self.engine, table(), count=5), "VISION,20,NONE\n")
         self.assertEqual(stable(self.engine, blocks([(1, (140, 190)), (5, (256, 190))])), "VISION,20,NONE\n")
 
-    def test_final_pose_refresh_before_pick_and_near(self):
+    def test_final_pose_refresh_before_pick(self):
         # OCCUPIED 粗/精调的坐标不能直接用于车体移动后的 PICK。
         self.engine.select((1, "OCCUPIED", 156))
         self.assertIn(",OCCUPIED,", stable(self.engine, blocks([(1, (140, 190)), (5, (256, 190)), (6, (372, 190))])))
@@ -288,17 +448,6 @@ class ReferenceTests(unittest.TestCase):
         self.engine.select((5, "PICK", 6))
         remaining = blocks([(6, (372, 150))])
         self.assertEqual(stable(self.engine, remaining), "VISION,5,PICK,6,3\n")
-        # TABLE 的最终刷新同样要更新 NEAR 抓取点，且允许其余两件已被取走。
-        self.prepare_near()
-        shifted_table = cv2.warpAffine(table(), np.float32([[1, 0, 0], [0, 1, 20]]),
-                                      (512, 320), borderValue=(235, 235, 235))
-        self.engine.select((6, "IDLE", 0))
-        self.engine.select((7, "TABLE", 156))
-        self.assertIn(",TABLE,", stable(self.engine, shifted_table, count=5))
-        self.engine.select((8, "IDLE", 0))
-        self.engine.select((9, "NEAR", 1))
-        self.assertEqual(stable(self.engine, blocks([(1, (256, 250))]), count=5), "VISION,9,NEAR,1,2\n")
-
     def test_unused_modes_and_legacy_config_removed(self):
         self.assertIsNone(v.parse_request("CAM,1,MAT,1"))
         legacy = copy.deepcopy(self.cfg)
@@ -318,8 +467,8 @@ class ReferenceTests(unittest.TestCase):
                 # cam=None 确保先轮询任务，再进行任何阻塞的图像/触屏操作。
                 v.calibrate_table_colors(None, None, None, self.engine.table, ("red",), task_received)
 
-    def test_shared_lab_updates_material_detection_without_restart(self):
-        self.assertIs(self.engine.detector.lab_source, self.engine.table)
+    def test_shared_hsv_updates_material_detection_without_restart(self):
+        self.assertIs(self.engine.detector.hsv_source, self.engine.table)
         red = blocks([(1, (256, 190))])
         green = blocks([(4, (256, 190))])
         detector = self.engine.detector
@@ -332,23 +481,23 @@ class ReferenceTests(unittest.TestCase):
         # 中断标定后整体重新加载字典，也必须跟随新的阈值。
         self.engine.table.centers = dict(self.engine.table.centers)
         self.engine.table.centers["red"] = cv2.cvtColor(
-            np.array([[BGR[1]]], np.float32)/255., cv2.COLOR_BGR2LAB)[0, 0]
+            np.array([[BGR[1]]], np.uint8), cv2.COLOR_BGR2HSV)[0, 0]
         self.assertEqual(len(detector.materials(red, "PICK", (1,))), 1)
         self.assertEqual(detector.materials(green, "PICK", (1,)), [])
 
-    def test_material_modes_require_same_lab_calibration_as_table(self):
+    def test_station_and_fixed_pickup_require_requested_hsv_calibration(self):
         self.engine.table.calibrated = set(self.engine.table.calibrated)-{"red"}
         row = blocks([(1, (140, 190)), (5, (256, 190)), (6, (372, 190))])
-        for req, mode, target in ((80, "TABLE", 156), (81, "OCCUPIED", 156), (82, "PICK", 1)):
+        for req, mode, target in ((81, "OCCUPIED", 156), (82, "PICK", 1), (84, "NEAR", 1)):
             self.engine.select((req, mode, target))
             self.assertEqual(stable(self.engine, row, count=6), "VISION,%d,NONE\n" % req)
-            self.assertIn("NEED LAB: red", self.engine.state)
+            self.assertIn("NEED HSV: red", self.engine.state)
         self.assertEqual(self.engine.detector.materials(row, "PICK", (1,)), [])
         self.engine.table.calibrated.add("red")
         self.engine.select((83, "OCCUPIED", 156))
         self.assertIn(",OCCUPIED,156,", stable(self.engine, row))
 
-    def test_overlapping_blue_lab_masks_are_not_double_labelled(self):
+    def test_overlapping_blue_hsv_masks_are_not_double_labelled(self):
         self.engine.table.centers["light_blue"] = self.engine.table.centers["blue"].copy()
         img = blocks([(3, (256, 190))])
         self.assertEqual(self.engine.detector.materials(img, "PICK", (3, 6)), [])
@@ -475,8 +624,8 @@ class ReferenceTests(unittest.TestCase):
         count, current, sent, closed = [0], ["QR"], [], []
         schedule = {0: "CAM,1,QR\n", 3: "ACK,1\n", 5: "CAM,2,TABLE,156,256.0,160.0\n",
                     10: "CAM,3,IDLE\n", 11: "CAM,4,NEAR,1\n",
-                    16: "CAM,5,OCCUPIED,156,256.0,160.0\n", 19: "CAM,6,IDLE\n",
-                    20: "CAM,7,PICK,6\n", 23: "CAM,8,IDLE\n"}
+                    19: "CAM,5,OCCUPIED,156,256.0,160.0\n", 22: "CAM,6,IDLE\n",
+                    23: "CAM,7,PICK,6\n", 26: "CAM,8,IDLE\n"}
         def read_serial():
             command = schedule.get(count[0], "")
             if command:
@@ -485,7 +634,15 @@ class ReferenceTests(unittest.TestCase):
         def read_camera():
             self.assertNotEqual(current[0], "QR", "QR must not read the material camera")
             mode = current[0]
-            img = (table() if mode == "TABLE" else blocks([(1, (256, 230))]) if mode == "NEAR" else
+            if count[0] in (11, 12, 13):
+                failed = count[0]
+                count[0] += 1
+                if failed == 11:
+                    raise RuntimeError("temporary material capture failure")
+                if failed == 12:
+                    return None
+                return types.SimpleNamespace(img=np.zeros((320, 512), np.uint8))
+            img = (table() if mode == "TABLE" else blocks([(1, (256, 160))]) if mode == "NEAR" else
                    blocks([(1, (140, 190)), (5, (256, 190)), (6, (372, 190))]) if mode == "OCCUPIED" else
                    blocks([(6, (372, 190))]) if mode == "PICK" else canvas())
             count[0] += 1
@@ -495,7 +652,7 @@ class ReferenceTests(unittest.TestCase):
             clock[0] += .2
             return clock[0]
         def write_serial(data):
-            self.assertNotIn(count[0], (4, 5), "ACK后、下个请求前不能再发结果")
+            self.assertNotIn(count[0], (4, 5, 12, 13, 14), "ACK后或取帧失败时不能再发结果，包括NONE")
             sent.append(data.decode())
         serial = types.SimpleNamespace(read=read_serial, write=write_serial, close=lambda: closed.append("uart"))
         def read_usb():
@@ -508,7 +665,7 @@ class ReferenceTests(unittest.TestCase):
         camera = types.SimpleNamespace(read=read_camera, close=lambda: closed.append("camera"))
         displayed = []
         display = types.SimpleNamespace(show=lambda img: displayed.append(img))
-        original_preview_draw = v.IdleTablePreview.draw
+        original_preview_draw = v.IdleMaterialPreview.draw
         def draw_preview(preview, img):
             result = original_preview_draw(preview, img)
             img[200, 20] = (12, 34, 56)  # 预览层的绘制必须到达最终显示帧。
@@ -524,7 +681,7 @@ class ReferenceTests(unittest.TestCase):
         light_values = []
         maix.gpio = types.SimpleNamespace(Mode=types.SimpleNamespace(OUT=1),
             GPIO=lambda pin, mode: types.SimpleNamespace(value=lambda level: light_values.append(level)))
-        maix.app = types.SimpleNamespace(need_exit=lambda: count[0] >= 25)
+        maix.app = types.SimpleNamespace(need_exit=lambda: count[0] >= 28)
         def cv2image(img, **kw):
             if img.shape[:2] == (480, 640):
                 return types.SimpleNamespace(find_qrcodes=lambda: [types.SimpleNamespace(
@@ -532,7 +689,7 @@ class ReferenceTests(unittest.TestCase):
                     corners=lambda: [(100, 100), (300, 100), (300, 300), (100, 300)])])
             return img
         maix.image = types.SimpleNamespace(image2cv=lambda f, **kw: f.img.copy(), cv2image=cv2image)
-        with patch.dict(sys.modules, {"maix": maix}), patch.object(v, "load_config", return_value=(self.cfg, "TEST")), patch.object(v.time, "monotonic", monotonic), patch.object(v.IdleTablePreview, "draw", draw_preview), patch.object(v.cv2, "VideoCapture", return_value=usb) as capture:
+        with patch.dict(sys.modules, {"maix": maix}), patch.object(v, "load_config", return_value=(self.cfg, "TEST")), patch.object(v.time, "monotonic", monotonic), patch.object(v.IdleMaterialPreview, "draw", draw_preview), patch.object(v.cv2, "VideoCapture", return_value=usb) as capture:
             v.main()
         capture.assert_called_once_with(0)
         self.assertEqual(usb_settings, [(cv2.CAP_PROP_FPS, 30), (cv2.CAP_PROP_FRAME_WIDTH, 640), (cv2.CAP_PROP_FRAME_HEIGHT, 480)])

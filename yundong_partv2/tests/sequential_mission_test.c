@@ -20,6 +20,8 @@ static uint16_t arm_base;
 static bool fail_camera,fail_motion,zero_offsets,fail_fine,fail_refresh,aligning,searching,fail_search;
 static unsigned align_samples,align_axes,alignment_reads,alignment_moves,required_samples;
 static unsigned misses,search_axis,search_step,search_moves,coarse_queries;
+static TaskVisionKind alignment_kind;
+static unsigned alignment_target;
 static char last_report[160];
 void StartLink_Publish(const char *line)
 {
@@ -62,7 +64,8 @@ bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *result)
         ++pick_waits; snprintf(frame,sizeof(frame),"VISION,999,PICK,%u,2",target); break;
     default: {
         assert(aligning&&align_samples<3);
-        if(!align_samples) required_samples=kind==TASK_RING?2U:3U;
+        if(!align_samples) required_samples=kind==TASK_OCCUPIED?3U:2U;
+        alignment_kind=kind; alignment_target=target;
         assert(align_samples<required_samples);
         if(align_samples) assert(align_axes==(zero_offsets?0U:2U));
         if(fail_fine&&align_samples==1) return false;
@@ -70,6 +73,9 @@ bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *result)
         const char *name=kind==TASK_TABLE?"TABLE":kind==TASK_OCCUPIED?"OCCUPIED":"RING";
         unsigned x=zero_offsets?256:align_samples==0?286:254;
         unsigned y=zero_offsets?160:align_samples==0?150:163;
+        if(!zero_offsets&&kind==TASK_TABLE&&align_samples==0&&target==516U) {
+            x=226; y=170; /* 第二批原料验证相反方向的固定粗调。 */
+        }
         snprintf(frame,sizeof(frame),"VISION,999,%s,%u,%u,%u",name,target,x,y);
         ++align_samples; ++alignment_reads; align_axes=0; break;
     }
@@ -143,8 +149,15 @@ bool Motion_Move(char d,float mm,uint16_t rpm)
         static const char directions[2][2]={{'B','R'},{'F','L'}};
         static const float pixels[2][2]={{30,10},{2,3}};
         unsigned pass=align_samples-1U;
-        assert(d==directions[pass][align_axes]);
-        assert(fabsf(mm-pixels[pass][align_axes]*MISSION_ALIGN_MM_PER_PIXEL)<0.001f);
+        if(alignment_kind==TASK_TABLE&&pass==0) {
+            static const char raw_directions[2][2]={{'B','R'},{'F','L'}};
+            assert(d==raw_directions[alignment_target==516U?1:0][align_axes]);
+            float fixed=align_axes==0?RAW_COARSE_FORWARD_MM:RAW_COARSE_LATERAL_MM;
+            assert(mm==fixed);
+        } else {
+            assert(d==directions[pass][align_axes]);
+            assert(fabsf(mm-pixels[pass][align_axes]*MISSION_ALIGN_MM_PER_PIXEL)<0.001f);
+        }
         assert(rpm==(pass==0?MISSION_ALIGN_COARSE_RPM:MISSION_ALIGN_FINE_RPM));
         ++align_axes; ++alignment_moves; return true;
     }
@@ -180,7 +193,7 @@ int main(void)
 {
     MissionRunner_Run(100);
     assert(!MissionRunner_Running()&&strstr(last_report,"AUTO,100,DONE,25,3,24,24,S2"));
-    assert(alignment_reads==21&&alignment_moves==32);
+    assert(alignment_reads==19&&alignment_moves==32);
     assert(motion==25&&cards==24&&raw_waits==6&&pick_waits==9&&turntables==24&&references==1&&stows==9&&stops==0);
     expected_motion=0; fail_motion=true;
     MissionRunner_Run(101); assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==1);
@@ -189,7 +202,7 @@ int main(void)
     expected_motion=0; fail_camera=false; zero_offsets=true;
     unsigned reads=alignment_reads,moves=alignment_moves;
     MissionRunner_Run(103);
-    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+21&&alignment_moves==moves);
+    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+19&&alignment_moves==moves);
     expected_motion=0; zero_offsets=false; fail_fine=true;
     MissionRunner_Run(104);
     assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==3);
@@ -213,6 +226,6 @@ int main(void)
     unsigned old_cards=cards;
     old_stops=stops;
     MissionRunner_Run(109);
-    assert(strstr(last_report,",STOPPED,")&&cards==old_cards&&stops==old_stops+1);
-    puts("PASS: 25 route moves, eight stations, 24 transfers, fixed-origin search targets (+100,0)/(-100,0)/(0,+50)/(0,-50), B200 transition, target reacquisition, wrap, early success and undo");
+    assert(strstr(last_report,",STOPPED,")&&cards==old_cards+6&&stops==old_stops+1);
+    puts("PASS: unchanged 25 route moves, raw fixed 1000/5 mm coarse moves in both directions, two raw samples, occupied refresh, 24 transfers, fixed-origin NONE search and net-offset undo");
 }

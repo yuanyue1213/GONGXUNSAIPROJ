@@ -35,7 +35,7 @@ bool Motion_Servo(char c,uint16_t a,uint16_t dps)
     assert(c=='G'&&a==30&&dps==MOTION_GRIPPER_DPS);
     record('G'); return !fail_servo;
 }
-void Motion_Wait(uint32_t ms) { if(ms==200) ++waits; else assert(ms==100); }
+void Motion_Wait(uint32_t ms) { if(ms==ARM_RELEASE_SETTLE_MS) ++waits; else assert(ms==MISSION_STEP_SETTLE_MS); }
 void Motion_Stop(void) { ++stops; }
 int32_t Motion_Radial(void) { assert(false); return 0; }
 bool ServoControl_GetAngle(char c,uint16_t *v) { (void)c; (void)v; assert(false); return false; }

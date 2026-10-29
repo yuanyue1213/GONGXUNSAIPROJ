@@ -83,7 +83,13 @@ bool Motion_Move(char direction,float mm,uint16_t rpm)
     for(unsigned i=0;i<4;++i) wheel[i]=(int32_t)target[i];
     if(!wheels_enable()) return false;
     if(ZDT_Motor_MoveWheelSynchronous(wheel,rpm,MISSION_WHEEL_ACCEL)!=HAL_OK) return false;
-    Motion_Wait(Motion_EstimateMs((double)pulses/MISSION_WHEEL_PPR,rpm,MISSION_WHEEL_ACCEL));
+    double revolutions=(double)pulses/MISSION_WHEEL_PPR;
+    /* Emm档位不是RPM/s：每(256-acc)*50us改变1RPM，acc=0为无加减速。
+     * 见X42S手册Emm相对位置控制章节；不能把档位10当成10RPM/s。 */
+    uint32_t duration=MISSION_WHEEL_ACCEL==0U?
+        (uint32_t)ceil(revolutions*60000.0/rpm)+MISSION_MOTION_SETTLE_MS:
+        Motion_EstimateMs(revolutions,rpm,20000.0/(256.0-MISSION_WHEEL_ACCEL));
+    Motion_Wait(duration);
     return true;
 }
 bool Motion_Turn(char direction,float degrees,uint16_t rpm)

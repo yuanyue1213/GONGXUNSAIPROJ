@@ -80,6 +80,13 @@ static bool align_once(TaskVisionKind kind,unsigned target,uint16_t rpm,bool sea
     /* 同一帧算出两轴距离，依次移动；完成后由下一次请求重新识别。 */
     float x=(reply.center.x-MISSION_TARGET_X)*MISSION_ALIGN_MM_PER_PIXEL;
     float y=(reply.center.y-MISSION_TARGET_Y)*MISSION_ALIGN_MM_PER_PIXEL;
+    if(kind==TASK_TABLE&&search) {
+        /* 原料粗调：图像偏差只决定方向，车体前后/左右使用固定步长。
+         * 精调及其他站点仍按像素偏差换算距离。 */
+        bool x_forward=MISSION_IMAGE_RIGHT_DIRECTION=='F'||MISSION_IMAGE_RIGHT_DIRECTION=='B';
+        if(x!=0.0f) x=copysignf(x_forward?RAW_COARSE_FORWARD_MM:RAW_COARSE_LATERAL_MM,x);
+        if(y!=0.0f) y=copysignf(x_forward?RAW_COARSE_LATERAL_MM:RAW_COARSE_FORWARD_MM,y);
+    }
     return align_xy(x,y,rpm);
 }
 static bool align_station(TaskVisionKind kind,unsigned batch)
@@ -98,8 +105,8 @@ static bool align_station(TaskVisionKind kind,unsigned batch)
      * 保留本车相机分辨率和比例，两轮分别使用路线速度与微调速度。 */
     if(!align_once(kind,target,MISSION_ALIGN_COARSE_RPM,true)) return false;
     if(!align_once(kind,target,MISSION_ALIGN_FINE_RPM,false)) return false;
-    /* 最后一次移动后刷新圆台轨迹/三工位锚点；只采样，不再修正车体。 */
-    if(kind!=TASK_RING) {
+    /* 加工区最后一次移动后刷新三工位锚点；原料抓取直接看固定像素位置。 */
+    if(kind==TASK_OCCUPIED) {
         if(!CameraLink_Wait(kind,target,&reply)) return false;
         CameraLink_Idle();
     }
