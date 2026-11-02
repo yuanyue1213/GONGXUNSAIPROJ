@@ -137,6 +137,7 @@ bool Motion_Turn(char direction,float degrees,uint16_t rpm)
         Motion_Wait(TURN_LOOP_MS);
     }
 }
+#if !defined(NAVIGATION_ONLY)
 static bool servo_start(char channel,uint16_t target,uint16_t dps,uint32_t *duration)
 {
     uint16_t current;
@@ -177,12 +178,15 @@ bool Motion_MoveAll(int32_t r,int32_t z,uint16_t base,uint16_t rpm)
     return true;
 }
 int32_t Motion_Radial(void) { return radial; }
+#endif
 void Motion_Stop(void)
 {
     (void)wheels_stop();
+#if !defined(NAVIGATION_ONLY)
     (void)LiftMotor_Stop();
     (void)ArmMotor_StopForeAft();
     ServoControl_Cancel('G');
     ServoControl_Cancel('T');
     ServoControl_Cancel('B');
+#endif
 }

@@ -21,6 +21,8 @@ static void record(char c) { trace[used++]=c; trace[used]=0; }
 void StartLink_Publish(const char *s) { snprintf(last_status,sizeof(last_status),"%s",s); }
 bool ServoControl_SetAngle(char c,uint16_t a) { (void)c; (void)a; return true; }
 bool Motion_Reference(void) { return true; }
+bool RoutePlan_Prepare(uint32_t id) { (void)id; assert(false); return false; }
+bool RoutePlan_Run(unsigned leg) { (void)leg; assert(false); return false; }
 bool Motion_Move(char d,float mm,uint16_t rpm)
 {
     (void)d; (void)mm; (void)rpm; record('C'); return true;

@@ -2,6 +2,24 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "STM32 · 纯导航测试（无视觉/机械臂）",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "deviceName": "STM32H743ZIT6",
+      "deviceCore": "Cortex-M7",
+      "preLaunchTask": "STM32: Build NavigationOnly",
+      "preBuild": "",
+      "runEntry": "main",
+      "serverInterface": "SWD",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${workspaceFolder}/build/NavigationOnly/yundongv2.elf",
+          "symbolFileName": "${workspaceFolder}/build/NavigationOnly/yundongv2.elf"
+        }
+      ]
+    },
+    {
       "name": "STM32 · 夹爪15°测试（上电执行）",
       "type": "stlinkgdbtarget",
       "request": "launch",

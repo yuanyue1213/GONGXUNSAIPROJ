@@ -82,3 +82,7 @@ flowchart TD
 | 距离标定、视觉方向、搜索距离 | `stm32/yundongv2/App/Inc/mission_config.h` |
 | 默认运动速度 | `stm32/yundongv2/App/Inc/motion_speed.h` |
 
+
+## PC动态导航
+
+START由App触发；`FLOW_MAP_PREPARE`执行起步与扫描握手，`route_plan.c`收取并校验PC路线后，`FLOW_NAV`读取对应段执行。ESP共用UART写入循环桥接App/PC，UART2独立采集N10。协议及实车运行方法见 [PC导航](PC_NAVIGATION.md)。

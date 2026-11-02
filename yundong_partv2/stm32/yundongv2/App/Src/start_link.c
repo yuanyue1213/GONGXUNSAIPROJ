@@ -1,6 +1,7 @@
-/* UART5 启动入口：中断收字节，前台组帧，只接受 START。
- * 等待动作时仍可回复 BUSY；网络断开不会中止 STM32 的顺序流程。 */
+/* UART5入口：中断收字节，前台分发App START和PC扫描/路径帧。
+ * 等待动作时仍处理握手；接收命令只写数据，不重入任务执行。 */
 #include "start_link.h"
+#include "route_plan.h"
 #include "robot_config.h"
 #include "start_protocol.h"
 #include "mission_runner.h"
@@ -15,7 +16,7 @@ static uint8_t byte;
 static volatile uint8_t rx[START_RX_SIZE];
 static volatile uint16_t head,tail;
 static volatile bool fault;
-static char frame[32];
+static char frame[128];
 static unsigned length;
 static bool drop;
 static uint32_t pending,last_start,active;
@@ -26,7 +27,7 @@ static void receive(void)
 void StartLink_Init(UART_HandleTypeDef *uart)
 {
     command_uart=uart; head=tail=0; fault=false; length=0; drop=false;
-    pending=last_start=active=0; receive();
+    pending=last_start=active=0; RoutePlan_Init(); receive();
 }
 void StartLink_Publish(const char *line)
 {
@@ -40,6 +41,7 @@ static void status(uint32_t id,const char *state,const char *reason)
 }
 static void command(void)
 {
+    if(RoutePlan_Command(frame)) return;
     uint32_t id;
     if(!StartProtocol_Parse(frame,&id)) return;
     if(MissionRunner_Running()||pending) {
@@ -50,13 +52,16 @@ static void command(void)
         status(id,"ERROR","DUPLICATE_START");
         return;
     }
+    if(!RoutePlan_CanStart()) { status(id,"ERROR","PC_NOT_READY"); return; }
     last_start=id;
     pending=id;
 }
 void StartLink_Service(void)
 {
     ImuLink_Process();
+#if !defined(NAVIGATION_ONLY)
     CameraLink_Process();
+#endif
     if(!command_uart) return;
     if(command_uart->RxState==HAL_UART_STATE_READY) receive();
     if(fault) {
@@ -96,7 +101,10 @@ void StartLink_Tick(void)
 }
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *uart)
 {
-    if(ZDT_Motor_RxCallback(uart)||ImuLink_RxCallback(uart)||CameraLink_RxCallback(uart)) return;
+    if(ZDT_Motor_RxCallback(uart)||ImuLink_RxCallback(uart)) return;
+#if !defined(NAVIGATION_ONLY)
+    if(CameraLink_RxCallback(uart)) return;
+#endif
     if(uart!=command_uart) return;
     uint16_t next=(uint16_t)((head+1U)%START_RX_SIZE);
     if(next==tail) fault=true;
@@ -105,7 +113,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *uart)
 }
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *uart)
 {
-    if(ZDT_Motor_ErrorCallback(uart)||ImuLink_ErrorCallback(uart)||CameraLink_ErrorCallback(uart)) return;
+    if(ZDT_Motor_ErrorCallback(uart)||ImuLink_ErrorCallback(uart)) return;
+#if !defined(NAVIGATION_ONLY)
+    if(CameraLink_ErrorCallback(uart)) return;
+#endif
     if(uart!=command_uart) return;
     fault=true;
     __HAL_UART_CLEAR_OREFLAG(uart); __HAL_UART_CLEAR_NEFLAG(uart); __HAL_UART_CLEAR_FEFLAG(uart);

@@ -2,6 +2,23 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "STM32: Configure NavigationOnly",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "NavigationOnly",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build NavigationOnly",
+      "type": "cmake",
+      "command": "build",
+      "preset": "NavigationOnly",
+      "dependsOn": "STM32: Configure NavigationOnly",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
       "label": "STM32: Configure GripperTest",
       "type": "cmake",
       "command": "configure",
@@ -14,7 +31,9 @@
       "command": "build",
       "preset": "GripperTest",
       "dependsOn": "STM32: Configure GripperTest",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": [
+        "$gcc"
+      ]
     },
     {
       "label": "STM32: Configure CameraUartTest",
@@ -29,7 +48,9 @@
       "command": "build",
       "preset": "CameraUartTest",
       "dependsOn": "STM32: Configure CameraUartTest",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": [
+        "$gcc"
+      ]
     },
     {
       "label": "STM32: Configure Debug",
@@ -44,8 +65,13 @@
       "command": "build",
       "preset": "Debug",
       "dependsOn": "STM32: Configure Debug",
-      "group": { "kind": "build", "isDefault": true },
-      "problemMatcher": ["$gcc"]
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
     }
   ]
 }

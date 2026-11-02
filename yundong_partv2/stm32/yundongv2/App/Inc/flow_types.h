@@ -5,13 +5,14 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "route_plan.h"
 
 typedef enum {
     FLOW_OP_PREPARE=1, FLOW_OP_IMU_ZERO, FLOW_OP_STOW,
     FLOW_OP_MOVE, FLOW_OP_TURN, FLOW_OP_SCAN,
     FLOW_OP_PICK_RAW, FLOW_OP_PROCESS_PUT, FLOW_OP_PROCESS_GET,
     FLOW_OP_STORE, FLOW_OP_STACK, FLOW_OP_END, FLOW_OP_ARM,
-    FLOW_OP_ALIGN, FLOW_OP_UNALIGN
+    FLOW_OP_ALIGN, FLOW_OP_UNALIGN,FLOW_OP_MAP_PREPARE,FLOW_OP_NAV
 } FlowOp;
 typedef enum {
     FLOW_FORWARD='F', FLOW_BACKWARD='B', FLOW_LEFT='L', FLOW_RIGHT='R'
@@ -44,6 +45,8 @@ typedef struct {
 #define FLOW_ARM(group)      { .op=FLOW_OP_ARM, .arm=(group), .arm_count=sizeof(group)/sizeof((group)[0]) }
 #define FLOW_ALIGN(kind,b)   { .op=FLOW_OP_ALIGN, .vision=(kind), .batch=(b) }
 #define FLOW_UNALIGN()       { .op=FLOW_OP_UNALIGN }
+#define FLOW_MAP_PREPARE()   { .op=FLOW_OP_MAP_PREPARE }
+#define FLOW_NAV(leg)        { .op=FLOW_OP_NAV,.amount=(leg) }
 #define FLOW_COUNT(table) (sizeof(table)/sizeof((table)[0]))
 /* 返回 NULL 表示流程合法；在启动运动前调用一次。 */
 #define FLOW_MAX_STEPS 128U

@@ -10,7 +10,7 @@ const char *Flow_Check(const FlowStep *steps,size_t count)
     bool aligned=false;
     for(size_t i=0;i<count;++i) {
         const FlowStep *s=&steps[i];
-        bool movement=s->op==FLOW_OP_MOVE||s->op==FLOW_OP_TURN;
+        bool movement=s->op==FLOW_OP_MOVE||s->op==FLOW_OP_TURN||s->op==FLOW_OP_NAV;
         if(!movement&&(s->direction||s->amount)) return "FLOW_PARAMETERS";
         if(s->op!=FLOW_OP_ARM&&(s->arm||s->arm_count)) return "FLOW_PARAMETERS";
         if(s->op!=FLOW_OP_ALIGN&&s->vision) return "FLOW_PARAMETERS";
@@ -22,6 +22,14 @@ const char *Flow_Check(const FlowStep *steps,size_t count)
             reference=true;
             break;
         case FLOW_OP_STOW:
+            break;
+        case FLOW_OP_MAP_PREPARE:
+            if(!reference||aligned) return "FLOW_REFERENCE";
+            break;
+        case FLOW_OP_NAV:
+            if(aligned) return "FLOW_ALIGNMENT";
+            if(!reference) return "FLOW_REFERENCE";
+            if(s->direction||s->amount<NAV_QR||s->amount>NAV_RETURN) return "FLOW_NAV";
             break;
         case FLOW_OP_ARM:
             if(!s->arm||!s->arm_count||s->arm_count>FLOW_MAX_STEPS) return "FLOW_ARM_GROUP";

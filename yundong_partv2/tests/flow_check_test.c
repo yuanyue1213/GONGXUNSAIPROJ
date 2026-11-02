@@ -9,11 +9,11 @@ static void test_validation(void)
     unsigned moves=0,stations=0,scans=0;
     for(size_t i=0;i<FLOW_COUNT(mission_flow);++i) {
         const FlowStep *s=&mission_flow[i];
-        if(s->op==FLOW_OP_MOVE||s->op==FLOW_OP_TURN) ++moves;
+        if(s->op==FLOW_OP_NAV) ++moves;
         if(s->op>=FLOW_OP_PICK_RAW&&s->op<=FLOW_OP_STACK) ++stations;
         if(s->op==FLOW_OP_SCAN) ++scans;
     }
-    assert(moves==25&&stations==8&&scans==1);
+    assert(moves==8&&stations==8&&scans==1);
     const FlowStep simple[]={FLOW_PREPARE(),FLOW_IMU_ZERO(),FLOW_MOVE(FLOW_RIGHT,250),FLOW_END()};
     assert(!Flow_Check(simple,FLOW_COUNT(simple)));
     const FlowStep alignment[]={FLOW_PREPARE(),FLOW_ALIGN(TASK_RING,FLOW_BATCH_1),
@@ -51,7 +51,7 @@ static void test_validation(void)
         memcpy(edited,mission_flow,sizeof(edited));
         switch(variation) {
         case 0: edited[0].op=FLOW_OP_STOW; break;
-        case 1: edited[3].amount=0; break;
+        case 1: edited[4].amount=0; break;
         case 2: edited[7].direction=FLOW_FORWARD; break;
         case 3: edited[9].direction=FLOW_FORWARD; break;
         case 4: edited[5].op=FLOW_OP_STOW; break; /* 站点前未扫码。 */

@@ -56,7 +56,8 @@ def mission(start_zone):
             ('TEMP 2: stack', (3, 1), 2), ('RETURN', START_CELLS[start_zone], None)]
 
 
-def plan_mission(blocked, start_zone, forward_speed=400, backward_speed=400, turn_seconds=.8):
+def plan_mission(blocked, start_zone, forward_speed=400, backward_speed=400, turn_seconds=.8,
+                 start_heading=None):
     """Use mm/s and seconds as preview costs; assume every open cell is passable."""
     if start_zone not in START_CELLS:
         raise ValueError('Unknown start position')
@@ -85,7 +86,10 @@ def plan_mission(blocked, start_zone, forward_speed=400, backward_speed=400, tur
 
     # State = mission stage, row, column, heading. Search all arrival headings
     # jointly, so a locally short leg cannot force a worse next leg.
-    start = (0, *start_cell, 0 if start_zone == 1 else 2)
+    heading = (0 if start_zone == 1 else 2) if start_heading is None else start_heading
+    if heading not in range(4):
+        raise ValueError('Invalid start heading')
+    start = (0, *start_cell, heading)
     speed = max(forward_speed, backward_speed)
     def heuristic(state):
         stage, row, col, _ = state

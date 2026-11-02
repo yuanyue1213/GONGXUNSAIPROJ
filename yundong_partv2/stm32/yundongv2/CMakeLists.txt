@@ -21,7 +21,8 @@ add_executable(${PROJECT_NAME})
 add_subdirectory(cmake/stm32cubemx)
 option(CAMERA_UART_TEST "Build the standalone UART4 camera transmit test" OFF)
 option(GRIPPER_TEST "Build the standalone power-on gripper 15-degree test" OFF)
-if(CAMERA_UART_TEST AND GRIPPER_TEST)
+option(NAVIGATION_ONLY "Build lidar/PC navigation without camera or arm tasks" OFF)
+if((CAMERA_UART_TEST AND GRIPPER_TEST) OR (NAVIGATION_ONLY AND (CAMERA_UART_TEST OR GRIPPER_TEST)))
     message(FATAL_ERROR "Select only one standalone test firmware")
 endif()
 if(CAMERA_UART_TEST)
@@ -34,17 +35,23 @@ if(GRIPPER_TEST)
 endif()
 target_sources(${PROJECT_NAME} PRIVATE
     App/Src/zdt_motor.c App/Src/zdt_motor_uart.c
-    App/Src/lift_motor.c App/Src/servo_control.c
-    App/Src/camera_link.c App/Src/imu_link.c
-    App/Src/start_link.c App/Src/mission_runner.c App/Src/motion_control.c
-    App/Src/servo_trajectory.c
-    App/Src/flow_check.c
-    App/Src/arm_flow.c
+    App/Src/imu_link.c App/Src/start_link.c App/Src/motion_control.c
+    App/Src/route_plan.c
 )
+if(NAVIGATION_ONLY)
+    target_sources(${PROJECT_NAME} PRIVATE Tests/navigation_only.c)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NAVIGATION_ONLY=1)
+else()
+    target_sources(${PROJECT_NAME} PRIVATE
+        App/Src/lift_motor.c App/Src/servo_control.c App/Src/servo_trajectory.c
+        App/Src/camera_link.c App/Src/mission_runner.c App/Src/flow_check.c App/Src/arm_flow.c)
+endif()
 target_include_directories(${PROJECT_NAME} PRIVATE App/Inc ../../shared)
 target_link_libraries(${PROJECT_NAME} stm32cubemx m)
 # Camera requests contain floating-point coordinates; nano needs explicit printf support.
-target_link_options(${PROJECT_NAME} PRIVATE "LINKER:-u,_printf_float")
+if(NOT NAVIGATION_ONLY)
+    target_link_options(${PROJECT_NAME} PRIVATE "LINKER:-u,_printf_float")
+endif()
 set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/STM32H743xx_FLASH.ld")
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD

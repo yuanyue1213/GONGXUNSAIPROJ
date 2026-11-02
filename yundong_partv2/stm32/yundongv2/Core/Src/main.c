@@ -134,10 +134,14 @@ int main(void)
   /* 五路串口：USART1 底盘，USART2 机械臂，UART5 接收 ESP32 命令，USART3 接 JY901S，
    * UART4 PA1 接收摄像头坐标。MX 初始化失败会进入 Error_Handler。 */
   ZDT_Motor_Init(&huart1);
+#if !defined(NAVIGATION_ONLY)
   LiftMotor_Init(&huart2);
   if(!ServoControl_Init(&htim1,&htim3)) Error_Handler();
+#endif
   StartLink_Init(&huart5);
+#if !defined(NAVIGATION_ONLY)
   CameraLink_Init(&huart4, StartLink_Service);
+#endif
   ImuLink_Init(&huart3);
   ImuLink_StartConfiguration();
   Motion_Init(StartLink_Service);

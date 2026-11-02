@@ -10,7 +10,7 @@
 #include "task_protocol.h"
 
 static unsigned motion,raw_waits,pick_waits,cards,turntables,stows,references,stops,requests;
-static unsigned expected_motion;
+static unsigned expected_leg=1;
 static unsigned start_cards,stack_puts;
 static bool stowing;
 static bool fail_undo;
@@ -120,13 +120,11 @@ void Motion_Wait(uint32_t ms) { (void)ms; }
 bool Motion_Reference(void) { ++references; return true; }
 int32_t Motion_Radial(void) { ++stows; stowing=true; return 110; }
 bool ServoControl_GetAngle(char c,uint16_t *v) { assert(c=='B'); *v=248; return true; }
-static const FlowStep *next_motion(void)
+bool RoutePlan_Prepare(uint32_t id) { (void)id; return true; }
+bool RoutePlan_Run(unsigned leg)
 {
-    while(expected_motion<FLOW_COUNT(mission_flow)) {
-        const FlowStep *s=&mission_flow[expected_motion++];
-        if(s->op==FLOW_OP_MOVE||s->op==FLOW_OP_TURN) return s;
-    }
-    assert(false); return NULL;
+    assert(leg==expected_leg++&&fabsf(forward_offset)<0.001f&&fabsf(left_offset)<0.001f);
+    ++motion; return !fail_motion;
 }
 bool Motion_Move(char d,float mm,uint16_t rpm)
 {
@@ -177,15 +175,11 @@ bool Motion_Move(char d,float mm,uint16_t rpm)
         assert(rpm==(pass==0?MISSION_ALIGN_COARSE_RPM:MISSION_ALIGN_FINE_RPM));
         ++align_axes; ++alignment_moves; return true;
     }
-    const FlowStep *s=next_motion();
-    assert(s->op==FLOW_OP_MOVE&&d==(char)s->direction&&mm==s->amount&&rpm==MISSION_ROUTE_RPM);
-    ++motion; return !fail_motion;
+    assert(false); return false;
 }
 bool Motion_Turn(char d,float deg,uint16_t rpm)
 {
-    const FlowStep *s=next_motion();
-    assert(s->op==FLOW_OP_TURN&&d==(char)s->direction&&deg==s->amount&&rpm==MISSION_TURN_RPM);
-    ++motion; return true;
+    (void)d; (void)deg; (void)rpm; assert(false); return false;
 }
 bool Motion_MoveAll(int32_t r,int32_t z,uint16_t b,uint16_t rpm)
 {
@@ -225,56 +219,56 @@ int main(void)
     }
     assert(direct_gets==2);
     MissionRunner_Run(100);
-    assert(!MissionRunner_Running()&&strstr(last_report,"AUTO,100,DONE,25,3,24,24,S2"));
+    assert(!MissionRunner_Running()&&strstr(last_report,"AUTO,100,DONE,8,3,24,24,S2"));
     assert(alignment_reads==24&&alignment_moves==36);
     assert(stack_puts==3);
-    assert(motion==25&&cards==24&&raw_waits==6&&pick_waits==3&&turntables==24&&references==1&&stows==7&&stops==0);
-    expected_motion=0; fail_motion=true;
+    assert(motion==8&&cards==24&&raw_waits==6&&pick_waits==3&&turntables==24&&references==1&&stows==7&&stops==0);
+    expected_leg=1; fail_motion=true;
     MissionRunner_Run(101); assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==1);
-    expected_motion=0; fail_motion=false; fail_camera=true;
+    expected_leg=1; fail_motion=false; fail_camera=true;
     MissionRunner_Run(102); assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==2);
-    expected_motion=0; fail_camera=false; zero_offsets=true;
+    expected_leg=1; fail_camera=false; zero_offsets=true;
     unsigned reads=alignment_reads,moves=alignment_moves;
     MissionRunner_Run(103);
     assert(strstr(last_report,",DONE,")&&alignment_reads==reads+12&&alignment_moves==moves);
-    expected_motion=0; zero_offsets=false; fail_fine=true;
+    expected_leg=1; zero_offsets=false; fail_fine=true;
     MissionRunner_Run(104);
     assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==3);
-    expected_motion=0; fail_fine=false; misses=6;
+    expected_leg=1; fail_fine=false; misses=6;
     unsigned search_before=search_moves,coarse_before=coarse_queries;
     MissionRunner_Run(105);
     assert(strstr(last_report,",DONE,")&&search_moves==search_before+8&&coarse_queries==coarse_before+12);
-    expected_motion=0; misses=1; fail_search=true;
+    expected_leg=1; misses=1; fail_search=true;
     MissionRunner_Run(106);
     assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==4&&search_axis==1);
-    expected_motion=0; fail_search=false; misses=2;
+    expected_leg=1; fail_search=false; misses=2;
     search_before=search_moves;
     MissionRunner_Run(107);
     assert(strstr(last_report,",DONE,")&&search_moves==search_before+2); /* 后移后找到目标，不再走左/右。 */
     assert(requests>0);
-    expected_motion=0; fail_undo=true;
+    expected_leg=1; fail_undo=true;
     unsigned old_stops=stops;
     MissionRunner_Run(108);
     assert(!MissionRunner_Running()&&strstr(last_report,",STOPPED,")&&stops==old_stops+1);
-    expected_motion=0; fail_undo=false; fail_refresh=true;
+    expected_leg=1; fail_undo=false; fail_refresh=true;
     unsigned old_cards=cards;
     old_stops=stops;
     MissionRunner_Run(109);
     assert(strstr(last_report,",STOPPED,")&&cards==old_cards+21&&stops==old_stops+1);
-    expected_motion=0; fail_refresh=false; fine_corrections=3;
+    expected_leg=1; fail_refresh=false; fine_corrections=3;
     reads=alignment_reads; moves=alignment_moves;
     MissionRunner_Run(110);
     assert(strstr(last_report,",DONE,")&&alignment_reads==reads+30&&alignment_moves==moves+48);
-    expected_motion=0; fine_corrections=1; fine_one_axis=true;
+    expected_leg=1; fine_corrections=1; fine_one_axis=true;
     reads=alignment_reads; moves=alignment_moves;
     MissionRunner_Run(111);
     assert(strstr(last_report,",DONE,")&&alignment_reads==reads+18&&alignment_moves==moves+18);
-    expected_motion=0; fine_one_axis=false; fine_corrections=4;
+    expected_leg=1; fine_one_axis=false; fine_corrections=4;
     reads=alignment_reads; moves=alignment_moves; old_cards=cards; old_stops=stops;
     MissionRunner_Run(112);
     assert(strstr(last_report,",DONE,")&&!MissionRunner_Running()&&cards==old_cards+24&&stops==old_stops);
     /* 六组均三次后仍超差：不做第四次，继续全部取放并正常撤销净位移。 */
     assert(alignment_reads==reads+30&&alignment_moves==moves+48&&stack_puts==3);
     assert(fabsf(forward_offset)<0.001f&&fabsf(left_offset)<0.001f);
-    puts("PASS: 25 unchanged route moves, 1-pixel fine alignment, up to 3 corrections with final verification, one-axis skip, continue after nonconvergence, 24 transfers and net-offset undo");
+    puts("PASS: 8 downloaded navigation legs, 1-pixel fine alignment, up to 3 corrections with final verification, one-axis skip, continue after nonconvergence, 24 transfers and net-offset undo");
 }

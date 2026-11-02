@@ -4,7 +4,7 @@ STM32 可调参数统一在 `stm32/yundongv2/App/Inc/robot_config.h`。速度及
 
 动作顺序继续在 `mission_flow.h`、`arm_flow.h` 编写。硬件引脚和时钟拓扑由 CubeMX IOC 管理；改 PWM 周期还需同步 IOC 的 ARR，改设备波特率要与外部设备一致。App 和 ESP32 的网络配置不属于此次 STM32 参数集中。
 
-本版本参考 gcs-gold-medal 的顺序调用、预计耗时等待和多轴并行思路，保留本车的 `mission_flow.h`、UART 电机驱动、接线和视觉协议。App 只有一键启动，ESP32 只转发启动及任务状态，完整流程由 STM32 执行。
+本版本参考 gcs-gold-medal 的顺序调用、预计耗时等待和多轴并行思路，保留本车的 `mission_flow.h`、UART 电机驱动、接线和视觉协议。App只有一键启动，ESP32桥接雷达、PC路径和任务状态，完整流程由STM32执行。当前默认使用PC导航，首次使用见 [自动采样与PC导航](docs/PC_NAVIGATION.md)。
 
 ## 当前调用关系
 
@@ -37,7 +37,7 @@ TIM6 每 20 ms → 三路舵机五次曲线 → TIM1/TIM3 PWM
 - 删除舵机 Busy 查询、未使用的加速度配置、预置二维码模式、MAT 视觉模式及未使用的 CAM 入站解析。现在任务码必须来自扫码。
 - App 保留一键启动和状态显示，删除旧 CALIBRATING 状态分支、示例测试及无使用位置的预览/仪器测试依赖。ESP32 已是纯桥接代码。
 
-保留 `mission_flow.h`、25 个路线动作、8 个站点步骤、24 次取放、视觉对准和既有速度。HAL/CMSIS、CubeMX 外设初始化及正常收发所需的错误处理属于当前运行依赖。
+保留 `mission_flow.h`、8段下载导航、8 个站点步骤、24 次取放、视觉对准和既有速度。HAL/CMSIS、CubeMX 外设初始化及正常收发所需的错误处理属于当前运行依赖。
 
 ## 目录与修改入口
 
@@ -97,7 +97,7 @@ tests/                              当前顺序架构的主机回归测试
 | FLOW_END | 结束流程，必须位于末尾 |
 | FLOW_ARM(group) | 执行自定义机械臂/舵机动作数组 |
 
-当前路线仍为原来的 25 个移动/转向动作、8 个站点步骤、24 次物料转移。车载三个槽位角度为 0/120/240 度；物理左中右工位与车载槽位分别计算。原料在中位准备，等待固定抓取窗口中的目标色通过NEAR判断后夹取；两批加工均放完三件后原地直接取回，按二维码放置工位抓取，不再次校准或请求PICK；空暂存区使用与粗加工相同的圆环定位；码垛使用下层三色物块OCCUPIED校准，刷新工位后逐件用PICK查询同色物料所在位置。
+当前路线为PC下发的8段导航、8 个站点步骤、24 次物料转移。车载三个槽位角度为 0/120/240 度；物理左中右工位与车载槽位分别计算。原料在中位准备，等待固定抓取窗口中的目标色通过NEAR判断后夹取；两批加工均放完三件后原地直接取回，按二维码放置工位抓取，不再次校准或请求PICK；空暂存区使用与粗加工相同的圆环定位；码垛使用下层三色物块OCCUPIED校准，刷新工位后逐件用PICK查询同色物料所在位置。
 
 机械臂左/中/右姿态和取放动作统一放在 `App/Inc/arm_flow.h`，编写方法见 [机械臂动作编写](docs/ARM_FLOW.md)：r 单位 0.1 mm，z 单位 mm，底座角度单位度。启动前机械臂应处于约定初始姿态；上电姿态视为逻辑零点，不读取编码器建立原点，也没有限位开关回零。
 
@@ -127,7 +127,7 @@ tests/                              当前顺序架构的主机回归测试
 
 ## 启动与通信
 
-App 连接热点 `RobotCar-ESP32S3`，密码 `robotcar123`，TCP `192.168.4.1:3333`。唯一外部命令为 `START,<非零uint32>\n`。运行中返回 BUSY；本次上电内拒绝重复或更小编号。App 仅显示 AUTO/TASK 状态，不提供速度设置或调试操作。
+App 连接热点 `RobotCar-ESP32S3`，密码 `robotcar123`，TCP `192.168.4.1:3333`。App命令仍为 `START,<非零uint32>\n`。运行中返回 BUSY；本次上电内拒绝重复或更小编号。App 仅显示 AUTO/TASK 状态，不提供速度设置或调试操作。
 
 手机断开后 STM32 仍执行；App 通信超时会显示状态未知。无手机远程停止入口，现场使用硬件急停或断电。
 
@@ -156,7 +156,7 @@ cmake --build --preset Release
 
 输出位于 `build/Debug` 和 `build/Release`：`yundongv2.elf/.hex/.bin`。遇到旧缓存可用 CMake 3.24+ 执行 `cmake --fresh --preset Debug`。TIM1/TIM3 只由 CubeMX 初始化，当前定时器时钟为 240 MHz，PSC=239、ARR=19999，得到 1 MHz 计数和 50 Hz PWM；IOC 已同步。`ServoControl_Init(&htim1,&htim3)` 只绑定 PWM 句柄、检查参数并启动 TIM6 轨迹时钟，不重新初始化 PWM。CubeMX 重新生成后需保留 App 源文件清单、shared 包含路径、TIM6 由舵机模块管理的初始化及中断入口和链接脚本的 DTCM/8 KB 栈配置。
 
-主机测试在 v2 根目录执行 `python tests/run_tests.py`，需要 Python 3 和 GCC。共 11 组，覆盖总流程嵌入及重复调用自定义动作组、机械臂动作表、流程表校验、完整路线和取放、相机顺序问答、多轴预计耗时、启动入口、舵机插值、Emm/X 相对位置帧、实际底盘接收缓冲及 IMU 初始化/配置/保存。未连接实车，主机测试及固件编译不代表机械可达性和预计耗时已经标定。
+主机测试在 v2 根目录执行 `python tests/run_tests.py`，需要 Python 3 和 GCC。共13组，覆盖总流程嵌入及重复调用自定义动作组、机械臂动作表、流程表校验、完整路线和取放、相机顺序问答、多轴预计耗时、启动入口、舵机插值、Emm/X 相对位置帧、实际底盘接收缓冲及 IMU 初始化/配置/保存。未连接实车，主机测试及固件编译不代表机械可达性和预计耗时已经标定。
 
 ESP32 使用 ESP-IDF 6.0，在 `esp32s3/hello_world` 执行 `idf.py build`。目标为 ESP32-S3、8 MB Flash；按 `build/flash_args` 烧录，不将应用 BIN 直接写到地址 0。
 
@@ -165,3 +165,5 @@ Android 使用 JDK 21、Android SDK 36.1，在 `application` 执行 `./gradlew.b
 固定等待参数（ms）：MISSION_MOTION_SETTLE_MS=50、MISSION_STEP_SETTLE_MS=20、ARM_GRIP_SETTLE_MS=100、ARM_RELEASE_SETTLE_MS=50，均在robot_config.h。
 
 机械臂Emm估时与底盘一样，将加速度档位换算为RPM/s；X固件继续按实际下发的200 RPM/s估时。运动RPM保持1500，收臂1000；夹紧后停100 ms，释放后停50 ms。
+
+纯底盘导航固件：选择 `NavigationOnly` 预设，输出 `stm32/yundongv2/build/NavigationOnly/yundongv2.hex`；不执行相机识别、机械臂或舵机任务。PC仍用 `--robot`，App启动后自动采样规划并走完八段路线。完整任务固件仍为Debug。

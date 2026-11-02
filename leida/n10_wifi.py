@@ -88,12 +88,12 @@ def map_cloud_points(points, zone, pose=None):
 
 
 def render(cloud, now, args, view, zone, bad, error="", recording=None, points=None,
-           player=None, start_zone=None):
+           player=None, start_zone=None, robot=None):
     import cv2
     import numpy as np
     image = np.full((980, 900, 3), (26, 22, 19), dtype=np.uint8)
     start_zone = zone if start_zone is None else start_zone
-    pose = vehicle_pose(player, start_zone)
+    pose = robot.pose if robot else vehicle_pose(player, start_zone)
     points = cloud.points(now) if points is None else points
     origin, size = 60, 780
     def map_pixel(x, y):
@@ -124,7 +124,7 @@ def render(cloud, now, args, view, zone, bad, error="", recording=None, points=N
             if 0 <= x < 2400 and 0 <= y < 2400:
                 cv2.circle(image, map_pixel(x, y), 2, (60, 210, 255), -1)
         draw_route(image, player, start_zone, map_pixel, pose)
-        title = f"Car + radar | X {pose[0]:.0f} Y {pose[1]:.0f} mm | heading {pose[2]:.0f} deg | preview pose"
+        title = f"Car + radar | X {pose[0]:.0f} Y {pose[1]:.0f} mm | heading {pose[2]:.0f} deg | " + ('command pose' if robot else 'preview pose')
     else:
         center = (450, 450)
         for radius in range(1, 5):
@@ -149,9 +149,10 @@ def render(cloud, now, args, view, zone, bad, error="", recording=None, points=N
     cv2.putText(image, f"{status} | frames {cloud.frames} | points {len(points)} | lost {cloud.lost} | bad {bad}",
                 (20, 50), 0, .52, (90, 160, 255) if stale else (100, 255, 150), 1)
     count = len(recording.snapshots) if recording else 0
-    draw_toolbar(image, player, start_zone)
-    cv2.putText(image, f"Saved {count}/2 | Click MAP: capture | P: plan | SPACE: pause | R: reset | 1/2: car + radar", (20, 915), 0, .48, (220, 220, 220), 1)
-    cv2.putText(image, player.status() if player else 'Virtual car preview | no commands sent to robot',
+    draw_toolbar(image, player, start_zone, hardware=robot is not None)
+    help_text = 'Robot mode: select start before App START; scans and planning are automatic' if robot else f"Saved {count}/2 | Click MAP: capture | P: plan | SPACE: pause | R: reset | 1/2: car + radar"
+    cv2.putText(image, help_text, (20, 915), 0, .48, (220, 220, 220), 1)
+    cv2.putText(image, robot.status if robot else player.status() if player else 'Virtual car preview | no commands sent to robot',
                 (20, 940), 0, .48, (100, 240, 220), 1)
     if error: cv2.putText(image, error[:115], (20, 965), 0, .43, (90, 90, 255), 1)
     return image
@@ -179,9 +180,12 @@ def main():
     parser.add_argument("--range-mm", type=int, default=6000)
     parser.add_argument("--max-age", type=float, default=.35, help="point expiry in seconds")
     parser.add_argument("--demo", action="store_true", help="synthetic data, no ESP needed")
+    parser.add_argument("--robot", action="store_true", help="automatic real robot scans/planning over TCP3335")
     parser.add_argument("--save-dir", type=Path, default=Path(__file__).parent / 'captures',
                         help="directory for two-click point-cloud/grid JSON records")
     args = parser.parse_args()
+    if args.robot and args.demo:
+        parser.error('--robot cannot use synthetic data')
     if args.range_mm <= 0 or args.max_age <= 0 or not 1 <= args.port <= 65535:
         parser.error("range, max-age and port must be positive (port <= 65535)")
     import cv2
@@ -189,6 +193,10 @@ def main():
     player = RoutePlayer()
     start_zone = args.zone
     recording = TwoSnapshots(args.save_dir, args.demo)
+    robot = None
+    if args.robot:
+        from n10_robot import RobotLink
+        robot = RobotLink(args.esp, start_zone, recording, player)
     view, zone, bad, demo_seq = args.view, args.zone, 0, 0
     last_subscribe, next_demo, error = 0, time.monotonic(), ""
     target = (socket.gethostbyname(args.esp), args.port)
@@ -205,6 +213,12 @@ def main():
         def control(key):
             nonlocal start_zone, zone, view, capture_message
             try:
+                if robot:
+                    if key not in ('top', 'bottom'):
+                        raise ValueError('Automatic flow: start from App')
+                    robot.set_zone(2 if key == 'top' else 1)
+                    start_zone = zone = robot.zone
+                    return
                 start_zone = handle_control(key, recording, player, start_zone, time.monotonic())
                 zone = start_zone
                 if key in ('plan', 'top', 'bottom', 'replay'):
@@ -221,6 +235,8 @@ def main():
             button = control_at(x, y)
             if button:
                 control(button)
+                return
+            if robot:
                 return
             if not (0 <= x < 900 and 60 <= y < 840):
                 return
@@ -246,6 +262,8 @@ def main():
         try:
             while True:
                 now = time.monotonic()
+                if robot:
+                    robot.poll(now)
                 if args.demo:
                     while next_demo <= now:
                         cloud.accept(decode_packet(demo_packet(demo_seq)), now)
@@ -270,17 +288,23 @@ def main():
                             break
                         if source != target: continue
                         try:
-                            cloud.accept(decode_packet(packet), now)
-                        except ValueError:
+                            frame = decode_packet(packet)
+                            if cloud.accept(frame, now) and robot:
+                                robot.feed_scan(frame, list(polar_points(frame)), now)
+                        except (ValueError, OSError) as exc:
                             bad += 1
+                            if robot:
+                                robot.status = f'Scan/plan: {exc}'
                 shown_points = cloud.points(now)
-                player.update(time.monotonic())
+                if not robot:
+                    player.update(time.monotonic())
                 displayed = dict(points=list(shown_points), zone=zone, view=view,
-                                 pose=vehicle_pose(player, start_zone),
+                                 pose=robot.pose if robot else vehicle_pose(player, start_zone),
                                  sequence=cloud.last_seq, frames=cloud.frames, lost=cloud.lost,
                                  range_mm=args.range_mm)
-                cv2.imshow(title, render(cloud, now, args, view, zone, bad,
-                                        error or capture_message, recording, shown_points, player, start_zone))
+                render_args = (cloud, now, args, view, zone, bad,
+                               error or capture_message, recording, shown_points, player, start_zone)
+                cv2.imshow(title, render(*render_args, robot=robot) if robot else render(*render_args))
                 key = cv2.waitKey(16) & 255
                 if key in (27, ord('q')) or cv2.getWindowProperty(title, cv2.WND_PROP_VISIBLE) < 1:
                     break
@@ -288,6 +312,9 @@ def main():
                 if key == ord('p'): control('plan')
                 if key == ord(' '): control('pause')
                 if key == ord('r'):
+                    if robot:
+                        capture_message = 'Robot mode: restart at start area for new scan pair'
+                        continue
                     recording.reset()
                     player.clear()
                     capture_message = 'New pair started; previous JSON kept'
@@ -298,6 +325,8 @@ def main():
         except KeyboardInterrupt:
             pass
         finally:
+            if robot:
+                robot.close()
             cv2.destroyAllWindows()
 
 

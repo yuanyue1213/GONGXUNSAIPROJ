@@ -6,6 +6,8 @@ app = root / 'stm32/yundongv2/App'
 out = root / 'tests/build'
 out.mkdir(exist_ok=True)
 cases = {
+    'navigation_only_test': [],
+    'route_plan_test': ['route_plan.c'],
     'mission_arm_test': ['flow_check.c', 'arm_flow.c'],
     'arm_flow_test': ['arm_flow.c'],
     'sequential_mission_test': ['mission_runner.c', 'flow_check.c', 'arm_flow.c'],

@@ -7,7 +7,16 @@
 static UART_HandleTypeDef uart;
 static uint8_t *rx;
 static unsigned runs;
-static bool running;
+static bool running,pc_ready;
+static unsigned route_commands;
+void RoutePlan_Init(void) { pc_ready=false; }
+bool RoutePlan_CanStart(void) { return pc_ready; }
+bool RoutePlan_Command(const char *frame)
+{
+    if(!strcmp(frame,"PC_HELLO,1")) { pc_ready=true; return true; }
+    if(!strncmp(frame,"NAV_",4)) { ++route_commands; return true; }
+    return false;
+}
 static char published[192];
 HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *u,uint8_t *p,uint16_t count)
 { assert(u==&uart&&count==1); rx=p; return HAL_OK; }
@@ -27,6 +36,7 @@ void MissionRunner_Run(uint32_t id)
 {
     assert(id==10||id==11); running=true; ++runs;
     feed("START,99\n"); assert(strstr(published,",BUSY,"));
+    feed("NAV_END,99\n"); assert(route_commands==runs);
     StartLink_Tick(); assert(runs==(id==10?1U:2U)); /* 等待服务不得递归重入流程。 */
     running=false;
 }
@@ -35,10 +45,12 @@ int main(void)
     StartLink_Init(&uart);
     feed("EXEC,10,TURN\nAUTO_CFG,10,1\nSTART,0\nSTART,4294967296\n");
     StartLink_Tick(); assert(!runs);
+    feed("START,9\n"); StartLink_Tick(); assert(!runs&&strstr(published,"PC_NOT_READY"));
+    feed("PC_HELLO,1\n");
     feed("START,10\n"); StartLink_Tick(); assert(runs==1);
     feed("START,10\n"); StartLink_Tick(); assert(runs==1&&strstr(published,"DUPLICATE_START"));
     feed("START,11\n"); StartLink_Tick(); assert(runs==2);
-    for(unsigned i=0;i<50;++i) { *rx='A'; HAL_UART_RxCpltCallback(&uart); }
+    for(unsigned i=0;i<160;++i) { *rx='A'; HAL_UART_RxCpltCallback(&uart); }
     feed("START,12\n"); StartLink_Tick(); assert(runs==2);
     puts("PASS: start-only UART boundary, duplicate suppression, BUSY during sequential waits, no recursive mission and oversized-frame rejection");
 }

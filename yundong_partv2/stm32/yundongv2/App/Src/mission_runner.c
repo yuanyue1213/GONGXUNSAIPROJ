@@ -1,6 +1,7 @@
 /* mission_flow.h -> 顺序 switch -> 直接动作函数。
  * 站点按三件物料顺序执行，不再通过字符串动作协议或分阶段任务状态机中转。 */
 #include "mission_runner.h"
+#include "route_plan.h"
 #include "mission_flow.h"
 #include "arm_flow.h"
 #include "motion_control.h"
@@ -224,6 +225,15 @@ void MissionRunner_Run(uint32_t id)
             break;
         case FLOW_OP_STOW:
             ok=ArmFlow_Stow();
+            break;
+        case FLOW_OP_MAP_PREPARE:
+            report("RUNNING","MAP_SCAN");
+            ok=RoutePlan_Prepare(run);
+            break;
+        case FLOW_OP_NAV:
+            report("RUNNING","NAV");
+            ok=RoutePlan_Run(step->amount);
+            if(ok) ++node;
             break;
         case FLOW_OP_ALIGN:
             ok=align_station((TaskVisionKind)step->vision,(unsigned)step->batch-1U);

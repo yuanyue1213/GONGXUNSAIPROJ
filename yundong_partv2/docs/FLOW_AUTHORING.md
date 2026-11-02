@@ -221,3 +221,7 @@ static const FlowStep mission_flow[] = {
 | `tests/` 与本约定 | 更新相应行为验证和使用说明 |
 
 只在 `mission_flow.h` 写一个新的宏名称，不会自动增加动作能力。
+
+## PC导航入口
+
+默认流程先执行 `FLOW_MAP_PREPARE()`：固定起步、两次雷达扫描、等待PC完整路线。之后用 `FLOW_NAV(NAV_QR)`、`NAV_RAW_1`、`NAV_COARSE_1`、`NAV_TEMP_1`、`NAV_RAW_2`、`NAV_COARSE_2`、`NAV_STACK`、`NAV_RETURN` 依次导航。视觉、机械臂和收臂/撤销仍在头文件中独立编写。手写MOVE/TURN仍支持，但不要在同一段重复执行旧固定路线和下载路线。详见 [PC导航](PC_NAVIGATION.md)。

@@ -1,7 +1,9 @@
 # N10 → ESP32-S3 → Wi-Fi → 电脑实时点云
 
 `n10.py` 保留为原始串口/地图/A*参考，新程序不依赖它，也不需要 pyserial。
-`hello_world` 是独立雷达固件，烧录会替换该 ESP 上原有应用；这里尚未合并运动控制固件。
+`hello_world` 已与运动工程共用同一份ESP32-S3合并桥源码：雷达UDP3334、App TCP3333、PC TCP3335。实车自动采样/规划用 `python n10_wifi.py --robot --zone 1`（1右下、2右上），操作和协议见 [PC导航说明](../yundong_partv2/docs/PC_NAVIGATION.md)。
+
+不带 `--robot` 的下述操作仍是手动查看/虚拟预览，不会驱动车辆。
 
 ## 接线
 
@@ -13,7 +15,7 @@
 | VCC（红线） | 稳定 5V 电源，不能接 3.3V |
 
 串口为 230400、8N1、3.3V TTL。确认开发板 GPIO15/16 已引出且无其他硬件占用。
-UART0 保留日志，UART1 未使用。程序不会自动启动已被指令停转的雷达。
+UART0保留日志，UART1使用TX17/RX18与STM32通信。程序不会自动启动已被指令停转的雷达。
 
 ## 编译与烧录
 
@@ -26,7 +28,7 @@ idf.py -p COMx flash monitor
 ```
 
 `sdkconfig.defaults` 默认目标 ESP32-S3；若目录已有其他芯片的 sdkconfig/build，先运行 `idf.py set-target esp32s3`。
-烧录后 ESP 创建热点 **N10-LiDAR**，密码 **n10lidar123**，地址 `192.168.4.1`。
+烧录后 ESP 创建热点 **RobotCar-ESP32S3**，密码 **robotcar123**，地址 `192.168.4.1`。
 
 ## 电脑显示
 

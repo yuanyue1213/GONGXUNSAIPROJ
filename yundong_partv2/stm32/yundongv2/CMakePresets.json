@@ -6,8 +6,15 @@
             "hidden": true,
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build/${presetName}",
-		    "toolchainFile": "${sourceDir}/cmake/gcc-arm-none-eabi.cmake",
+            "toolchainFile": "${sourceDir}/cmake/gcc-arm-none-eabi.cmake",
+            "cacheVariables": {}
+        },
+        {
+            "name": "NavigationOnly",
+            "inherits": "default",
             "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "NAVIGATION_ONLY": "ON"
             }
         },
         {
@@ -42,6 +49,10 @@
         }
     ],
     "buildPresets": [
+        {
+            "name": "NavigationOnly",
+            "configurePreset": "NavigationOnly"
+        },
         {
             "name": "GripperTest",
             "configurePreset": "GripperTest"

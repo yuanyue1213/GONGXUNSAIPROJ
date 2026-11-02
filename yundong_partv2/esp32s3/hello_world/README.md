@@ -1,10 +1,7 @@
-# ESP32-S3 start bridge
+# ESP32-S3雷达和控制桥
 
-ESP-IDF 6.0. Only START commands are forwarded to STM32; AUTO/TASK status is returned to the phone.
-No autonomous scheduler or manual debug interface runs on ESP32.
+`main/start_bridge.c`合并N10 UART2→UDP3334、App TCP3333→STM32、PC TCP3335→STM32。热点RobotCar-ESP32S3，密码robotcar123，同时支持PC和手机。雷达RX16/TX15，STM32 TX17/RX18。
 
-Build: idf.py build
+在ESP-IDF终端使用 `idf.py -B build_route build`，烧录 `idf.py -B build_route -p COMx flash`。输出 `build_route/robot_start_bridge.bin` 是应用镜像，完整烧录须使用构建目录flash_args或idf.py flash。
 
-Output: build/robot_start_bridge.bin. Flash using build/flash_args.
-
-See ../../README.md for wiring, configuration and all three build instructions.
+PC运行 `python F:/GONGXUNSAIPROJ/leida/n10_wifi.py --robot --zone 1`，再从App启动。参见 [PC导航说明](../../docs/PC_NAVIGATION.md)。

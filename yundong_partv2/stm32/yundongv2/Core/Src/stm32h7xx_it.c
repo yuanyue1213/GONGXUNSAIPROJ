@@ -200,7 +200,9 @@ void SysTick_Handler(void)
 
 /* USER CODE BEGIN 1 */
 #include "servo_control.h"
+#if !defined(NAVIGATION_ONLY)
 void TIM6_DAC_IRQHandler(void) { ServoControl_TimerIRQ(); }
+#endif
 extern UART_HandleTypeDef huart1;
 void USART1_IRQHandler(void) { HAL_UART_IRQHandler(&huart1); }
 extern UART_HandleTypeDef huart3;

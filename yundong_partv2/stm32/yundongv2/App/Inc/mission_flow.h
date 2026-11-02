@@ -12,7 +12,7 @@
  * 例如 FLOW_MOVE(FLOW_FORWARD,500), FLOW_ARM(arm_ready), ... */
 
 /* Edit the mission here, then rebuild/flash STM32.
- * Body coordinates: tail initially faces the other start/stop area.
+ * Body coordinates: front initially faces the other start/stop area.
  * Each station action handles all three materials in the selected QR batch.
  * Process PUT and GET are separate entries: place all three before retrieval.
  */
@@ -22,22 +22,18 @@ static const FlowStep mission_flow[] = {
     FLOW_IMU_ZERO(),
     FLOW_STOW(),
 
-    /* 出发并读取任务二维码，然后驶向第一批原料区。 */
-    FLOW_MOVE(FLOW_LEFT,      125), /* 01 */
-    FLOW_MOVE(FLOW_BACKWARD, 1050), /* 02 */
+    /* 起步125/165、两次雷达采样，等待PC完整路径；之后按段执行导航。 */
+    FLOW_MAP_PREPARE(),
+    FLOW_NAV(NAV_QR),
     FLOW_SCAN_TASK(),
-    FLOW_MOVE(FLOW_FORWARD,   885), /* 03 */
-    FLOW_TURN(FLOW_LEFT,       90), /* 04 */
-    FLOW_MOVE(FLOW_FORWARD,  925), /* 05 */
+    FLOW_NAV(NAV_RAW_1),
     FLOW_ALIGN(TASK_TABLE,FLOW_BATCH_1),
     FLOW_PICK_RAW(FLOW_BATCH_1),
     FLOW_STOW(),
     FLOW_UNALIGN(),
 
     /* 第一批加工：放完原地取回，最后统一收臂、撤销校准。 */
-    FLOW_TURN(FLOW_LEFT,       90), /* 06 */
-    FLOW_MOVE(FLOW_FORWARD,  1735), /* 07 */
-    FLOW_TURN(FLOW_LEFT,       90), /* 08 */
+    FLOW_NAV(NAV_COARSE_1),
     FLOW_ALIGN(TASK_RING,FLOW_BATCH_1),
     FLOW_PROCESS_PUT(FLOW_BATCH_1),
     FLOW_PROCESS_GET(FLOW_BATCH_1),
@@ -45,27 +41,21 @@ static const FlowStep mission_flow[] = {
     FLOW_UNALIGN(),
 
     /* 第一批送往暂存区。 */
-    FLOW_MOVE(FLOW_BACKWARD,  850), /* 09 */
-    FLOW_TURN(FLOW_RIGHT,      90), /* 10 */
-    FLOW_MOVE(FLOW_BACKWARD,  850), /* 11 */
+    FLOW_NAV(NAV_TEMP_1),
     FLOW_ALIGN(TASK_RING,FLOW_BATCH_1),
     FLOW_STORE(FLOW_BATCH_1),
     FLOW_STOW(),
     FLOW_UNALIGN(),
 
     /* 返回原料区，开始第二批物料。 */
-    FLOW_MOVE(FLOW_BACKWARD,  885), /* 12 */
-    FLOW_TURN(FLOW_RIGHT,      90), /* 13 */
-    FLOW_MOVE(FLOW_BACKWARD,  850), /* 14 */
+    FLOW_NAV(NAV_RAW_2),
     FLOW_ALIGN(TASK_TABLE,FLOW_BATCH_2),
     FLOW_PICK_RAW(FLOW_BATCH_2),
     FLOW_STOW(),
     FLOW_UNALIGN(),
 
     /* 第二批加工：放完原地取回，最后统一收臂、撤销校准。 */
-    FLOW_TURN(FLOW_LEFT,       90), /* 15 */
-    FLOW_MOVE(FLOW_FORWARD,  1750), /* 16 */
-    FLOW_TURN(FLOW_LEFT,       90), /* 17 */
+    FLOW_NAV(NAV_COARSE_2),
     FLOW_ALIGN(TASK_RING,FLOW_BATCH_2),
     FLOW_PROCESS_PUT(FLOW_BATCH_2),
     FLOW_PROCESS_GET(FLOW_BATCH_2),
@@ -73,20 +63,14 @@ static const FlowStep mission_flow[] = {
     FLOW_UNALIGN(),
 
     /* 第二批送往码垛区，用下层三色物块定位。 */
-    FLOW_MOVE(FLOW_BACKWARD,  850), /* 18 */
-    FLOW_TURN(FLOW_RIGHT,      90), /* 19 */
-    FLOW_MOVE(FLOW_BACKWARD,  850), /* 20 */
+    FLOW_NAV(NAV_STACK),
     FLOW_ALIGN(TASK_OCCUPIED,FLOW_BATCH_2),
     FLOW_STACK(FLOW_BATCH_2),
     FLOW_STOW(),
     FLOW_UNALIGN(),
 
     /* 完成所有取放后返回终点，END 将全流程置为完成。 */
-    FLOW_TURN(FLOW_LEFT,       90), /* 21 */
-    FLOW_MOVE(FLOW_FORWARD,  1775), /* 22 */
-    FLOW_TURN(FLOW_RIGHT,      90), /* 23 */
-    FLOW_MOVE(FLOW_FORWARD,  1050), /* 24 */
-    FLOW_MOVE(FLOW_LEFT,      125), /* 25 */
+    FLOW_NAV(NAV_RETURN),
     FLOW_END(),
 };
 #endif

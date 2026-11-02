@@ -32,7 +32,7 @@ def ui_font():
     return ImageFont.load_default(size=17)
 
 
-def draw_toolbar(image, player, start_zone):
+def draw_toolbar(image, player, start_zone, hardware=False):
     import cv2
     import numpy as np
     from PIL import Image, ImageDraw
@@ -43,7 +43,9 @@ def draw_toolbar(image, player, start_zone):
     rgb = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(rgb)
     for key, (x0, y0, x1, y1), label in BUTTONS:
-        if key == 'pause':
+        if hardware and key in ('plan','pause','replay'):
+            label = {'plan':'自动采样规划','pause':'App一键启动','replay':'执行状态回传'}[key]
+        if key == 'pause' and not hardware:
             label = '继续 / RESUME' if player and player.paused else '暂停 / PAUSE'
         draw.text(((x0+x1)/2, (y0+y1)/2), label, font=ui_font(), fill=(240, 240, 240), anchor='mm')
     image[:] = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
