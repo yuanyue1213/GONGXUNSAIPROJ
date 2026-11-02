@@ -2,6 +2,21 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "STM32: Configure GripperTest",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "GripperTest",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build GripperTest",
+      "type": "cmake",
+      "command": "build",
+      "preset": "GripperTest",
+      "dependsOn": "STM32: Configure GripperTest",
+      "problemMatcher": ["$gcc"]
+    },
+    {
       "label": "STM32: Configure CameraUartTest",
       "type": "cmake",
       "command": "configure",

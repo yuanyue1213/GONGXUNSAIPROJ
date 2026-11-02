@@ -202,25 +202,22 @@ class ReferenceTests(unittest.TestCase):
         self.assertIn("Load configuration / HSV", error.args[0])
         self.assertIn("ValueError: bad config", error.args[0])
 
-    def test_idle_single_material_preview_does_not_prime_task(self):
-        preview = v.IdleMaterialPreview(self.engine.detector)
+    def test_idle_does_not_detect_or_prime_task(self):
         img = blocks([(2, (256, 160))])
-        for _ in range(5):
-            preview.draw(img.copy())
-        self.assertEqual(len(preview.objects), 1)
-        self.assertEqual(preview.objects[0]["color"], 2)
-        self.assertIsNone(self.engine.request)
+        with patch.object(self.engine.detector, "materials") as detect:
+            for _ in range(5):
+                self.assertIsNone(self.engine.process(img))
+            self.engine.select((79, "IDLE", 0))
+            self.assertIsNone(self.engine.process(img))
+            detect.assert_not_called()
         self.engine.select((80, "TABLE", 156))
         for _ in range(2):
             self.assertEqual(self.engine.process(img), "VISION,80,NONE\n")
         self.assertIn("VISION,80,TABLE,156,", self.engine.process(img))
 
 
-    def test_preview_and_table_display_only_selected_yellow(self):
+    def test_table_displays_only_selected_yellow(self):
         img = blocks([(1, (140, 130)), (2, (256, 160)), (3, (372, 270))])
-        preview = v.IdleMaterialPreview(self.engine.detector)
-        preview.draw(img.copy())
-        self.assertEqual([obj["color"] for obj in preview.objects], [2])
         self.engine.select((90, "TABLE", 156))  # Yellow need not be in the batch.
         self.assertIn("VISION,90,TABLE,156,", stable(self.engine, img))
         self.assertEqual([obj["color"] for obj in self.engine.objects], [2])
@@ -431,10 +428,18 @@ class ReferenceTests(unittest.TestCase):
         self.engine.select((24, "PICK", 6))
         self.assertEqual(stable(self.engine, remaining), "VISION,24,NONE\n")
 
-    def test_occupied_rejects_two_or_non_row(self):
+    def test_occupied_accepts_non_row_but_requires_three_colors(self):
         self.engine.select((20, "OCCUPIED", 156))
-        self.assertEqual(stable(self.engine, table(), count=5), "VISION,20,NONE\n")
-        self.assertEqual(stable(self.engine, blocks([(1, (140, 190)), (5, (256, 190))])), "VISION,20,NONE\n")
+        # 物块既不共线，水平间距也不均匀；仍应接受并按X排序。
+        img = blocks([(1, (100, 110)), (5, (190, 245)), (6, (420, 140))])
+        result = stable(self.engine, img)
+        self.assertIn("VISION,20,OCCUPIED,156,", result)
+        self.assertLess(np.linalg.norm(self.engine.anchors[1]-(190, 245)), 2.)
+        self.engine.select((21, "IDLE", 0))
+        self.engine.select((22, "PICK", 6))
+        self.assertEqual(stable(self.engine, blocks([(6, (420, 140))])), "VISION,22,PICK,6,3\n")
+        self.engine.select((23, "OCCUPIED", 156))
+        self.assertEqual(stable(self.engine, blocks([(1, (140, 190)), (5, (256, 190))])), "VISION,23,NONE\n")
 
     def test_final_pose_refresh_before_pick(self):
         # OCCUPIED 粗/精调的坐标不能直接用于车体移动后的 PICK。
@@ -515,6 +520,47 @@ class ReferenceTests(unittest.TestCase):
         # Solid black disks are not concentric ring targets.
         img = blocks([(5, (135, 180)), (5, (256, 180)), (5, (377, 180))])
         self.assertEqual(stable(self.engine, img), "VISION,30,NONE\n")
+
+    def test_dense_six_rings_with_station_numbers(self):
+        # 密集细环经过缩小+高斯模糊会粘连，原先三条宽间距环的测试覆盖不到。
+        for ratio in (.9, .7, .5):
+            img = canvas()
+            for index, x in enumerate((120, 256, 392)):
+                for radius in (24, 27, 30, 34, 39, 44):
+                    cv2.ellipse(img, (x, 180), (radius, round(radius*ratio)),
+                                0, 0, 360, (10, 10, 10), 1)
+                cv2.putText(img, str(3-index), (x-4, 184),
+                            cv2.FONT_HERSHEY_SIMPLEX, .4, (10, 10, 10), 1)
+            for position, x in enumerate((120, 256, 392), 1):
+                self.engine.select((40+position, "RING", position))
+                result = stable(self.engine, img)
+                self.assertIn(",RING,%d," % position, result)
+                center = list(map(float, result.strip().split(",")[-2:]))
+                self.assertLess(np.linalg.norm(np.array(center)-(x, 180)), 2.)
+            # 三个工位必须同时完整识别，缺一个时不能把剩余工位重新编号。
+            img[:, 335:] = 235
+            self.engine.select((50, "RING", 2))
+            self.assertEqual(stable(self.engine, img), "VISION,50,NONE\n")
+            self.assertEqual(self.engine.state, "RING / WAIT 3 TARGETS")
+
+    def test_ring_centers_are_drawn_and_cleared_on_next_task(self):
+        img = canvas()
+        points = np.array([[120., 180.], [256., 180.], [392., 180.]])
+        self.engine.select((60, "RING", 2))
+        with patch.object(self.engine.detector, "rings", return_value=points):
+            self.assertIn(",RING,2,", stable(self.engine, img))
+        with patch.object(cv2, "putText", wraps=cv2.putText) as draw_text, \
+                patch.object(cv2, "drawMarker", wraps=cv2.drawMarker) as draw_marker:
+            v.draw_status(img.copy(), self.engine, 10, "TEST")
+        labels = [call.args[1] for call in draw_text.call_args_list]
+        for label in ("L(120.0,180.0)", "M(256.0,180.0)", "R(392.0,180.0)"):
+            self.assertIn(label, labels)
+        self.assertEqual([call.args[1] for call in draw_marker.call_args_list],
+                         [(120, 180), (256, 180), (392, 180)])
+        self.engine.select((60, "ACK", 0))
+        np.testing.assert_array_equal(self.engine.ring_points, points)
+        self.engine.select((61, "IDLE", 0))
+        self.assertIsNone(self.engine.ring_points)
 
     def test_black_material_on_ring_background(self):
         for thickness in (1, 2):
@@ -621,7 +667,7 @@ class ReferenceTests(unittest.TestCase):
         self.assertIsNone(self.engine.process(canvas()))
 
     def test_maix_main_uart_lifecycle_and_idle_silence(self):
-        count, current, sent, closed = [0], ["QR"], [], []
+        count, current, sent, closed = [-2], ["IDLE"], [], []
         schedule = {0: "CAM,1,QR\n", 3: "ACK,1\n", 5: "CAM,2,TABLE,156,256.0,160.0\n",
                     10: "CAM,3,IDLE\n", 11: "CAM,4,NEAR,1\n",
                     19: "CAM,5,OCCUPIED,156,256.0,160.0\n", 22: "CAM,6,IDLE\n",
@@ -665,11 +711,11 @@ class ReferenceTests(unittest.TestCase):
         camera = types.SimpleNamespace(read=read_camera, close=lambda: closed.append("camera"))
         displayed = []
         display = types.SimpleNamespace(show=lambda img: displayed.append(img))
-        original_preview_draw = v.IdleMaterialPreview.draw
-        def draw_preview(preview, img):
-            result = original_preview_draw(preview, img)
-            img[200, 20] = (12, 34, 56)  # 预览层的绘制必须到达最终显示帧。
-            return result
+        def active_only(method):
+            def checked(*args, **kwargs):
+                self.assertNotEqual(current[0], "IDLE", "空闲、ACK后不得运行识别")
+                return method(*args, **kwargs)
+            return checked
         maix = types.ModuleType("maix")
         maix.camera = types.SimpleNamespace(Camera=lambda w, h: camera)
         maix.display = types.SimpleNamespace(Display=lambda: display)
@@ -689,7 +735,12 @@ class ReferenceTests(unittest.TestCase):
                     corners=lambda: [(100, 100), (300, 100), (300, 300), (100, 300)])])
             return img
         maix.image = types.SimpleNamespace(image2cv=lambda f, **kw: f.img.copy(), cv2image=cv2image)
-        with patch.dict(sys.modules, {"maix": maix}), patch.object(v, "load_config", return_value=(self.cfg, "TEST")), patch.object(v.time, "monotonic", monotonic), patch.object(v.IdleMaterialPreview, "draw", draw_preview), patch.object(v.cv2, "VideoCapture", return_value=usb) as capture:
+        with patch.dict(sys.modules, {"maix": maix}), patch.object(v, "load_config", return_value=(self.cfg, "TEST")), patch.object(v.time, "monotonic", monotonic), \
+                patch.object(v.Engine, "process", active_only(v.Engine.process)), \
+                patch.object(v.Detector, "materials", active_only(v.Detector.materials)), \
+                patch.object(v.Detector, "rings", active_only(v.Detector.rings)), \
+                patch.object(v.NearPickup, "detect", active_only(v.NearPickup.detect)), \
+                patch.object(v.cv2, "VideoCapture", return_value=usb) as capture:
             v.main()
         capture.assert_called_once_with(0)
         self.assertEqual(usb_settings, [(cv2.CAP_PROP_FPS, 30), (cv2.CAP_PROP_FRAME_WIDTH, 640), (cv2.CAP_PROP_FRAME_HEIGHT, 480)])
@@ -700,7 +751,6 @@ class ReferenceTests(unittest.TestCase):
         self.assertFalse(any(line.startswith(("VISION,3,", "VISION,6,", "VISION,8,")) for line in sent))
         self.assertEqual(closed, ["usb", "uart", "camera"])
         self.assertGreaterEqual(len(displayed), 23)
-        self.assertTrue(any(np.array_equal(img[200, 20], (12, 34, 56)) for img in displayed))
         self.assertTrue(any(img.shape[0] == v.HEIGHT + v.FOOTER_HEIGHT for img in displayed))
         # USB 全分辨率二维码框缩放到屏幕，证明显示的是该摄像头的内容。
         self.assertTrue(any(np.array_equal(img[100, 80], (0, 0, 255)) for img in displayed))

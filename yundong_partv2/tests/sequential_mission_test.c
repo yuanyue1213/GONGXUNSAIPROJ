@@ -11,6 +11,7 @@
 
 static unsigned motion,raw_waits,pick_waits,cards,turntables,stows,references,stops,requests;
 static unsigned expected_motion;
+static unsigned start_cards,stack_puts;
 static bool stowing;
 static bool fail_undo;
 static bool undoing;
@@ -18,16 +19,19 @@ static float forward_offset,left_offset;
 static int32_t arm_r,arm_z;
 static uint16_t arm_base;
 static bool fail_camera,fail_motion,zero_offsets,fail_fine,fail_refresh,aligning,searching,fail_search;
-static unsigned align_samples,align_axes,alignment_reads,alignment_moves,required_samples;
+static unsigned align_samples,align_axes,alignment_reads,alignment_moves,required_samples,expected_axes;
+static unsigned fine_corrections=2;
+static bool fine_one_axis;
+static float align_dx,align_dy;
 static unsigned misses,search_axis,search_step,search_moves,coarse_queries;
 static TaskVisionKind alignment_kind;
-static unsigned alignment_target;
 static char last_report[160];
 void StartLink_Publish(const char *line)
 {
     snprintf(last_report,sizeof(last_report),"%s",line);
     if(strstr(line,"CARD_DONE")) ++cards;
     if(strstr(line,",STARTING,")) {
+        start_cards=cards; stack_puts=0;
         aligning=false; searching=false; undoing=false;
         forward_offset=left_offset=0;
     }
@@ -43,7 +47,7 @@ void StartLink_Publish(const char *line)
     }
     if(strstr(line,",PICK\n")||strstr(line,",PUT\n")) {
         assert(align_samples==required_samples);
-        assert(align_axes==(required_samples==3?0U:zero_offsets?0U:2U));
+        assert(align_axes==0); /* 最后复核后没有再移动，包括超差继续的情况。 */
         aligning=false;
     }
 }
@@ -60,23 +64,39 @@ bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *result)
         assert(arm_r==110&&arm_z==0&&arm_base==180); /* 先等到位，再伸出下降。 */
         ++raw_waits; snprintf(frame,sizeof(frame),"VISION,999,NEAR,%u,2",target); break;
     case TASK_PICK:
-        assert(arm_base==180);
-        ++pick_waits; snprintf(frame,sizeof(frame),"VISION,999,PICK,%u,2",target); break;
+        assert(arm_base==180&&cards-start_cards>=21U&&cards-start_cards<24U);
+        ++pick_waits;
+        /* 模拟下层5/1/6位于图像位置3/1/2，区别于二维码推断位置。 */
+        snprintf(frame,sizeof(frame),"VISION,999,PICK,%u,%u",target,target==5U?3U:target==1U?1U:2U);
+        break;
     default: {
-        assert(aligning&&align_samples<3);
-        if(!align_samples) required_samples=kind==TASK_OCCUPIED?3U:2U;
-        alignment_kind=kind; alignment_target=target;
-        assert(align_samples<required_samples);
-        if(align_samples) assert(align_axes==(zero_offsets?0U:2U));
-        if(fail_fine&&align_samples==1) return false;
-        if(fail_refresh&&align_samples==2) return false;
-        const char *name=kind==TASK_TABLE?"TABLE":kind==TASK_OCCUPIED?"OCCUPIED":"RING";
-        unsigned x=zero_offsets?256:align_samples==0?286:254;
-        unsigned y=zero_offsets?160:align_samples==0?150:163;
-        if(!zero_offsets&&kind==TASK_TABLE&&align_samples==0&&target==516U) {
-            x=226; y=170; /* 第二批原料验证相反方向的固定粗调。 */
+        assert(aligning&&align_samples<=MISSION_ALIGN_FINE_MAX_MOVES+1U);
+        if(!align_samples) {
+            unsigned corrections=fine_corrections>MISSION_ALIGN_FINE_MAX_MOVES?
+                MISSION_ALIGN_FINE_MAX_MOVES:fine_corrections;
+            required_samples=zero_offsets?2U:corrections+2U;
         }
-        snprintf(frame,sizeof(frame),"VISION,999,%s,%u,%u,%u",name,target,x,y);
+        alignment_kind=kind;
+        assert(align_samples<required_samples);
+        if(align_samples) assert(align_axes==expected_axes);
+        if(fail_fine&&align_samples==1) return false;
+        if(fail_refresh&&kind==TASK_OCCUPIED&&align_samples==fine_corrections+1U) return false;
+        const char *name=kind==TASK_TABLE?"TABLE":kind==TASK_OCCUPIED?"OCCUPIED":"RING";
+        int dx=0,dy=0;
+        if(!zero_offsets) {
+            if(align_samples==0) { dx=30; dy=-10; }
+            else if(align_samples<=fine_corrections) {
+                dx=align_samples%2U?-2:4;
+                dy=fine_one_axis?1:align_samples%2U?3:-2;
+            } else { dx=1; dy=-1; } /* 误差恰好1像素也应通过。 */
+        }
+        if(!zero_offsets&&kind==TASK_TABLE&&align_samples==0&&target==516U) {
+            dx=-30; dy=10; /* 第二批原料验证相反方向的固定粗调。 */
+        }
+        align_dx=(float)dx; align_dy=(float)dy;
+        float tolerance=align_samples?MISSION_ALIGN_FINE_TOLERANCE_PX:0;
+        expected_axes=(fabsf(align_dx)>tolerance)+(fabsf(align_dy)>tolerance);
+        snprintf(frame,sizeof(frame),"VISION,999,%s,%u,%d,%d",name,target,256+dx,160+dy);
         ++align_samples; ++alignment_reads; align_axes=0; break;
     }
     }
@@ -145,19 +165,15 @@ bool Motion_Move(char d,float mm,uint16_t rpm)
         if(d=='R') left_offset-=mm;
     }
     if(aligning) {
-        assert(!zero_offsets&&align_samples>=1&&align_samples<=2&&align_axes<2);
-        static const char directions[2][2]={{'B','R'},{'F','L'}};
-        static const float pixels[2][2]={{30,10},{2,3}};
+        assert(!zero_offsets&&align_samples>=1&&align_axes<expected_axes);
         unsigned pass=align_samples-1U;
-        if(alignment_kind==TASK_TABLE&&pass==0) {
-            static const char raw_directions[2][2]={{'B','R'},{'F','L'}};
-            assert(d==raw_directions[alignment_target==516U?1:0][align_axes]);
-            float fixed=align_axes==0?RAW_COARSE_FORWARD_MM:RAW_COARSE_LATERAL_MM;
-            assert(mm==fixed);
-        } else {
-            assert(d==directions[pass][align_axes]);
-            assert(fabsf(mm-pixels[pass][align_axes]*MISSION_ALIGN_MM_PER_PIXEL)<0.001f);
-        }
+        float tolerance=pass?MISSION_ALIGN_FINE_TOLERANCE_PX:0;
+        bool x_axis=fabsf(align_dx)>tolerance&&align_axes==0;
+        float pixels=x_axis?align_dx:align_dy;
+        assert(d==(x_axis?(pixels>0?'B':'F'):(pixels>0?'L':'R')));
+        float distance=alignment_kind==TASK_TABLE&&pass==0?
+            (x_axis?RAW_COARSE_FORWARD_MM:RAW_COARSE_LATERAL_MM):fabsf(pixels)*MISSION_ALIGN_MM_PER_PIXEL;
+        assert(fabsf(mm-distance)<0.001f);
         assert(rpm==(pass==0?MISSION_ALIGN_COARSE_RPM:MISSION_ALIGN_FINE_RPM));
         ++align_axes; ++alignment_moves; return true;
     }
@@ -174,6 +190,14 @@ bool Motion_Turn(char d,float deg,uint16_t rpm)
 bool Motion_MoveAll(int32_t r,int32_t z,uint16_t b,uint16_t rpm)
 {
     assert(r>=0&&r<=1850&&z<=0&&b<=360&&rpm==(stowing?MOTION_STOW_RPM:MOTION_ARM_RPM));
+    if(cards-start_cards>=21U&&cards-start_cards<24U&&z<0&&r!=ARM_SLOT_R) {
+        static const StationPose poses[]=ARM_STACK_POSES;
+        /* 跟随PICK实际返回的3/1/2，不按二维码推断下层位置。 */
+        static const unsigned positions[]={2,0,1};
+        const StationPose *p=&poses[positions[cards-start_cards-21U]];
+        assert(r==p->put_r&&z==p->z+ARM_STACK_HEIGHT&&b==p->base);
+        ++stack_puts;
+    }
     arm_r=r; arm_z=z; arm_base=b;
     return true;
 }
@@ -191,10 +215,20 @@ bool Motion_Servo(char c,uint16_t a,uint16_t dps)
 void Motion_Stop(void) { ++stops; }
 int main(void)
 {
+    unsigned direct_gets=0;
+    for(size_t i=0;i<FLOW_COUNT(mission_flow);++i) {
+        if(mission_flow[i].op!=FLOW_OP_PROCESS_PUT) continue;
+        assert(i+3<FLOW_COUNT(mission_flow));
+        assert(mission_flow[i+1].op==FLOW_OP_PROCESS_GET&&mission_flow[i+1].batch==mission_flow[i].batch);
+        assert(mission_flow[i+2].op==FLOW_OP_STOW&&mission_flow[i+3].op==FLOW_OP_UNALIGN);
+        ++direct_gets;
+    }
+    assert(direct_gets==2);
     MissionRunner_Run(100);
     assert(!MissionRunner_Running()&&strstr(last_report,"AUTO,100,DONE,25,3,24,24,S2"));
-    assert(alignment_reads==19&&alignment_moves==32);
-    assert(motion==25&&cards==24&&raw_waits==6&&pick_waits==9&&turntables==24&&references==1&&stows==9&&stops==0);
+    assert(alignment_reads==24&&alignment_moves==36);
+    assert(stack_puts==3);
+    assert(motion==25&&cards==24&&raw_waits==6&&pick_waits==3&&turntables==24&&references==1&&stows==7&&stops==0);
     expected_motion=0; fail_motion=true;
     MissionRunner_Run(101); assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==1);
     expected_motion=0; fail_motion=false; fail_camera=true;
@@ -202,14 +236,14 @@ int main(void)
     expected_motion=0; fail_camera=false; zero_offsets=true;
     unsigned reads=alignment_reads,moves=alignment_moves;
     MissionRunner_Run(103);
-    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+19&&alignment_moves==moves);
+    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+12&&alignment_moves==moves);
     expected_motion=0; zero_offsets=false; fail_fine=true;
     MissionRunner_Run(104);
     assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==3);
     expected_motion=0; fail_fine=false; misses=6;
     unsigned search_before=search_moves,coarse_before=coarse_queries;
     MissionRunner_Run(105);
-    assert(strstr(last_report,",DONE,")&&search_moves==search_before+8&&coarse_queries==coarse_before+14);
+    assert(strstr(last_report,",DONE,")&&search_moves==search_before+8&&coarse_queries==coarse_before+12);
     expected_motion=0; misses=1; fail_search=true;
     MissionRunner_Run(106);
     assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==4&&search_axis==1);
@@ -226,6 +260,21 @@ int main(void)
     unsigned old_cards=cards;
     old_stops=stops;
     MissionRunner_Run(109);
-    assert(strstr(last_report,",STOPPED,")&&cards==old_cards+6&&stops==old_stops+1);
-    puts("PASS: unchanged 25 route moves, raw fixed 1000/5 mm coarse moves in both directions, two raw samples, occupied refresh, 24 transfers, fixed-origin NONE search and net-offset undo");
+    assert(strstr(last_report,",STOPPED,")&&cards==old_cards+21&&stops==old_stops+1);
+    expected_motion=0; fail_refresh=false; fine_corrections=3;
+    reads=alignment_reads; moves=alignment_moves;
+    MissionRunner_Run(110);
+    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+30&&alignment_moves==moves+48);
+    expected_motion=0; fine_corrections=1; fine_one_axis=true;
+    reads=alignment_reads; moves=alignment_moves;
+    MissionRunner_Run(111);
+    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+18&&alignment_moves==moves+18);
+    expected_motion=0; fine_one_axis=false; fine_corrections=4;
+    reads=alignment_reads; moves=alignment_moves; old_cards=cards; old_stops=stops;
+    MissionRunner_Run(112);
+    assert(strstr(last_report,",DONE,")&&!MissionRunner_Running()&&cards==old_cards+24&&stops==old_stops);
+    /* 六组均三次后仍超差：不做第四次，继续全部取放并正常撤销净位移。 */
+    assert(alignment_reads==reads+30&&alignment_moves==moves+48&&stack_puts==3);
+    assert(fabsf(forward_offset)<0.001f&&fabsf(left_offset)<0.001f);
+    puts("PASS: 25 unchanged route moves, 1-pixel fine alignment, up to 3 corrections with final verification, one-axis skip, continue after nonconvergence, 24 transfers and net-offset undo");
 }

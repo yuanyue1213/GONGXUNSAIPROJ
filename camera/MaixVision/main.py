@@ -28,7 +28,7 @@ import numpy as np
 WIDTH, HEIGHT = 512, 320
 WORK_WIDTH = 384                 # 56% of full-resolution pixels
 PROCESS_INTERVAL = 0.10          # target ceiling 10 Hz, NOT a measured speed
-VISION_BUILD = "20261029-raw-single"
+VISION_BUILD = "20261101-occupied-no-row"
 ERROR_LOG_PATH = os.path.expanduser("~/vision_error.log")
 FOOTER_HEIGHT = 100              # 状态区放在图像外，不遮挡物料和识别标记。
 CAMERA_UART_DEVICE = "/dev/ttyS2"  # must match the installed TX/RX wiring
@@ -259,7 +259,8 @@ class Detector:
 
     def crop(self, bgr, mode):
         x0, y0, x1, y1 = (0, 0, WIDTH, HEIGHT) if mode == "TABLE" else self.cfg["rois"][mode]
-        scale = min(1., WORK_WIDTH/(x1-x0))
+        # 圆环细线间隔小，保留原始像素，避免缩小后相邻环线粘连。
+        scale = 1. if mode == "RING" else min(1., WORK_WIDTH/(x1-x0))
         crop = bgr[y0:y1, x0:x1]
         width, height = max(1, round((x1-x0)*scale)), max(1, round((y1-y0)*scale))
         return cv2.resize(crop, (width, height), interpolation=cv2.INTER_AREA), (x0, y0), ((x1-x0)/width, (y1-y0)/height)
@@ -329,7 +330,8 @@ class Detector:
 
     def rings(self, bgr):
         crop, origin, scale = self.crop(bgr, "RING")
-        gray = cv2.GaussianBlur(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (3, 3), 0)
+        # 不模糊密集同心环；否则白色间隙消失，只剩最内、最外两个轮廓。
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
         contours = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)[-2]
         eligible = [c for c in contours if 30 <= abs(cv2.contourArea(c))*scale[0]*scale[1] <= 20000]
@@ -810,23 +812,6 @@ def calibrate_table_colors(cam, dis, ts, table, colors, poll=None):
     calibrate_colors(colors)
 
 
-class IdleMaterialPreview:
-    """本地单物块预览；不发送视觉结果，不影响正式任务采样。"""
-    def __init__(self, detector):
-        self.detector = detector
-        self.reset()
-
-    def reset(self):
-        self.state = "WAITING"
-        self.objects = []
-
-    def draw(self, img):
-        obj = single_material(self.detector, img, RAW_PICK_POINT)
-        self.objects = [obj] if obj is not None else []
-        self.state = "SINGLE " + COLORS[obj["color"]] if obj is not None else "NO MATERIAL / HOLD 1.5s HSV"
-        cv2.drawMarker(img, tuple(int(v) for v in RAW_PICK_POINT), (0,255,255), cv2.MARKER_CROSS, 14, 1)
-
-
 class Engine:
     """One task per frame, request-scoped stability, station-scoped pose anchors."""
     def __init__(self, cfg):
@@ -844,6 +829,7 @@ class Engine:
         self.station_colors = ()
         self.state = "IDLE / HOLD 1.5s HSV"
         self.objects = []
+        self.ring_points = None
 
     def select(self, request):
         if request[1] == "ACK":
@@ -867,6 +853,7 @@ class Engine:
         if request[1] in ("QR", "TABLE", "RING", "OCCUPIED"):
             self.anchors = None
             self.station_colors = ()
+        self.ring_points = None
 
     def process(self, bgr, qr_codes=()):
         if self.stopped:
@@ -911,6 +898,8 @@ class Engine:
         elif mode == "RING":
             points = self.detector.rings(bgr)
             value = self.stable.update(points)
+            self.ring_points = value if value is not None else points
+            self.state = "RING / WAIT 3 TARGETS" if points is None else "RING / STABILIZING"
             if value is not None:
                 self.state = "RING / STABLE"
                 return "VISION,%d,RING,%d,%.1f,%.1f\n" % (req, target, *value[target-1])
@@ -926,9 +915,8 @@ class Engine:
             if mode == "OCCUPIED":
                 group = unique_triple(self.objects, colors)
                 if group:
-                    points = np.array(sorted((o["center"] for o in group), key=lambda p: p[0]))
-                    if row_valid(points):
-                        value = points
+                    # 堆叠按实际X位置编号，不要求三物块共线或水平间距均匀。
+                    value = np.array(sorted((o["center"] for o in group), key=lambda p: p[0]))
             elif mode == "PICK":
                 if self.anchors is None or target not in self.station_colors:
                     self.state = "PICK / NEED OCCUPIED FIRST"
@@ -982,6 +970,15 @@ def draw_status(img, engine, elapsed_ms, config_state):
         x, y = (int(round(v)) for v in obj["center"])
         cv2.drawMarker(img, (x, y), (0, 255, 0), cv2.MARKER_CROSS, 10, 1)
         cv2.putText(img, COLORS[obj["color"]], (x+5, y), cv2.FONT_HERSHEY_SIMPLEX, .35, (0, 255, 0), 1)
+    if engine.ring_points is not None:
+        # 图像左/中/右，不是比赛场地上的数字编号；坐标为原始512x320像素。
+        for name, point in zip(("L", "M", "R"), engine.ring_points):
+            x, y = (int(round(v)) for v in point)
+            cv2.drawMarker(img, (x, y), (0, 255, 255), cv2.MARKER_CROSS, 14, 1)
+            label = "%s(%.1f,%.1f)" % (name, *point)
+            width = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, .35, 1)[0][0]
+            cv2.putText(img, label, (max(0, min(x+6, WIDTH-width-1)), max(66, y-10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, .35, (0, 255, 255), 1)
 
 
 def open_camera_uart():
@@ -1124,7 +1121,6 @@ def main():
         print("CAM UART ready:", CAMERA_UART_DEVICE, "115200; waiting for CAM request", flush=True)
         stage = "Open material camera / display"
         cam, disp = camera.Camera(WIDTH, HEIGHT), display.Display()
-        preview = IdleMaterialPreview(engine.detector)
         rx_bytes = 0
         last_request = "NONE"
         qr_camera = UsbQrCamera()
@@ -1172,7 +1168,6 @@ def main():
                     command_changed = True
                     print("CAM RX:", request, flush=True)
                     last_process = 0.
-                    preview.reset()
                 engine.select(request)
                 light.update(request)
                 if request[1] != "IDLE":
@@ -1210,9 +1205,9 @@ def main():
                     capture_ok = False
                     img = np.zeros((HEIGHT, WIDTH, 3), np.uint8)
                     engine.objects = []
+                    engine.ring_points = None
                     engine.stable.reset()
                     engine.near.reset()
-                    preview.reset()
                     time.sleep(PROCESS_INTERVAL)
             idle = active_request is None or active_request[1] == "IDLE"
             now = time.monotonic()
@@ -1244,15 +1239,10 @@ def main():
                 elapsed_ms = (time.monotonic()-start)*1000
                 last_process = time.monotonic()
             elif idle:
-                if not engine.stopped and now-last_process >= PROCESS_INTERVAL:
-                    stage = "Idle preview"
-                    start = time.monotonic()
-                    # Original local-only preview: samples never prime a formal task.
-                    preview.draw(img)
-                    elapsed_ms = (time.monotonic()-start)*1000
-                    last_process = time.monotonic()
-                engine.state = "ACK RECEIVED / WAIT NEXT COMMAND" if engine.stopped else "IDLE / " + preview.state
-                engine.objects = [] if engine.stopped else preview.objects
+                # 空闲只显示摄像头画面和串口状态，不运行颜色/圆环/二维码识别。
+                engine.state = "ACK RECEIVED / WAIT NEXT COMMAND" if engine.stopped else "IDLE / HOLD 1.5s HSV"
+                engine.objects = []
+                elapsed_ms = 0.
             if touch is not None and idle and capture_ok:
                 stage = "Touch / HSV calibration"
                 _, _, pressed = touch.read()
@@ -1270,7 +1260,6 @@ def main():
                         engine.table.centers, engine.table.tolerances, engine.table.calibrated = load_hsv_thresholds(engine.table.path)
                     finally:
                         light.update(None if engine.stopped else engine.request)
-                    preview.reset()
                     last_process = 0.
                     engine.near.reset()
                     engine.anchors = None

@@ -54,12 +54,12 @@ static bool align_xy(float x,float y,uint16_t rpm)
         return align_axis(x,MISSION_IMAGE_RIGHT_DIRECTION,rpm)&&align_axis(y,MISSION_IMAGE_DOWN_DIRECTION,rpm);
     return align_axis(y,MISSION_IMAGE_DOWN_DIRECTION,rpm)&&align_axis(x,MISSION_IMAGE_RIGHT_DIRECTION,rpm);
 }
-static bool align_once(TaskVisionKind kind,unsigned target,uint16_t rpm,bool search)
+static bool align_coarse(TaskVisionKind kind,unsigned target,uint16_t rpm)
 {
     unsigned search_step=0;
     float search_forward=0,search_left=0;
     for(;;) {
-        bool ok=search?CameraLink_Observe(kind,target,&reply):CameraLink_Wait(kind,target,&reply);
+        bool ok=CameraLink_Observe(kind,target,&reply);
         if(!ok) return false;
         CameraLink_Idle();
         if(reply.kind!=TASK_NONE) break;
@@ -80,7 +80,7 @@ static bool align_once(TaskVisionKind kind,unsigned target,uint16_t rpm,bool sea
     /* 同一帧算出两轴距离，依次移动；完成后由下一次请求重新识别。 */
     float x=(reply.center.x-MISSION_TARGET_X)*MISSION_ALIGN_MM_PER_PIXEL;
     float y=(reply.center.y-MISSION_TARGET_Y)*MISSION_ALIGN_MM_PER_PIXEL;
-    if(kind==TASK_TABLE&&search) {
+    if(kind==TASK_TABLE) {
         /* 原料粗调：图像偏差只决定方向，车体前后/左右使用固定步长。
          * 精调及其他站点仍按像素偏差换算距离。 */
         bool x_forward=MISSION_IMAGE_RIGHT_DIRECTION=='F'||MISSION_IMAGE_RIGHT_DIRECTION=='B';
@@ -88,6 +88,23 @@ static bool align_once(TaskVisionKind kind,unsigned target,uint16_t rpm,bool sea
         if(y!=0.0f) y=copysignf(x_forward?RAW_COARSE_LATERAL_MM:RAW_COARSE_FORWARD_MM,y);
     }
     return align_xy(x,y,rpm);
+}
+static bool align_fine(TaskVisionKind kind,unsigned target)
+{
+    /* 每次修正后重新识别，包括最后一次；末帧同时刷新码垛工位锚点。
+     * 两轴达标提前结束；达到修正次数上限后，沿当前位置继续任务。 */
+    for(unsigned moves=0;;++moves) {
+        if(!CameraLink_Wait(kind,target,&reply)) return false;
+        CameraLink_Idle();
+        float x=reply.center.x-MISSION_TARGET_X;
+        float y=reply.center.y-MISSION_TARGET_Y;
+        if(fabsf(x)<=MISSION_ALIGN_FINE_TOLERANCE_PX) x=0;
+        if(fabsf(y)<=MISSION_ALIGN_FINE_TOLERANCE_PX) y=0;
+        if(x==0&&y==0) return true;
+        if(moves>=MISSION_ALIGN_FINE_MAX_MOVES) return true;
+        if(!align_xy(x*MISSION_ALIGN_MM_PER_PIXEL,y*MISSION_ALIGN_MM_PER_PIXEL,
+                     MISSION_ALIGN_FINE_RPM)) return false;
+    }
 }
 static bool align_station(TaskVisionKind kind,unsigned batch)
 {
@@ -101,16 +118,9 @@ static bool align_station(TaskVisionKind kind,unsigned batch)
     report("WORK","ALIGN");
     target=kind==TASK_RING?2U:code.colors[batch][0]*100U+code.colors[batch][1]*10U+code.colors[batch][2];
     if(!Motion_Servo('B',ARM_ALIGN_BASE,MOTION_BASE_ALIGN_DPS)) return false;
-    /* 参考项目的粗调 + 精调：各取一帧、各修正两轴；不循环追逐像素阈值。
-     * 保留本车相机分辨率和比例，两轮分别使用路线速度与微调速度。 */
-    if(!align_once(kind,target,MISSION_ALIGN_COARSE_RPM,true)) return false;
-    if(!align_once(kind,target,MISSION_ALIGN_FINE_RPM,false)) return false;
-    /* 加工区最后一次移动后刷新三工位锚点；原料抓取直接看固定像素位置。 */
-    if(kind==TASK_OCCUPIED) {
-        if(!CameraLink_Wait(kind,target,&reply)) return false;
-        CameraLink_Idle();
-    }
-    return true;
+    /* 粗调一次，精调最多修正三次；达标提前结束，超次则按最后位置继续。 */
+    if(!align_coarse(kind,target,MISSION_ALIGN_COARSE_RPM)) return false;
+    return align_fine(kind,target);
 }
 static bool unalign(void)
 {
@@ -155,14 +165,15 @@ static bool station(const FlowStep *step)
     for(item=0;item<3;++item) {
         unsigned color=code.colors[batch][item],position;
         if(raw) position=1U;
-        else if(pick||step->op==FLOW_OP_STACK) {
-            /* 上一次取放会改变底座方向，每次识别都回到约定观察姿态。 */
+        else if(step->op==FLOW_OP_STACK) {
+            /* 下层物料的三色定位完成后，逐件查询目标色所在左/中/右工位。 */
             if(!Motion_Servo('B',ARM_ALIGN_BASE,MOTION_BASE_ALIGN_DPS)) return false;
             if(!CameraLink_Wait(TASK_PICK,color,&reply)) return false;
             position=reply.position-1U;
             CameraLink_Idle();
         } else {
-            /* 工位的物理左/中/右编号为 3/2/1；与车载槽位分开。 */
+            /* 加工取回沿用刚才放置的工位，不再次识别或校准。
+             * 工位的物理左/中/右编号为 3/2/1；与车载槽位分开。 */
             position=3U-code.places[batch][item];
         }
         static const uint16_t slots[]=ARM_SLOT_ANGLES;

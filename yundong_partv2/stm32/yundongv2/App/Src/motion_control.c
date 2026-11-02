@@ -66,6 +66,14 @@ static bool wheels_stop(void)
         if(ZDT_Motor_Stop(id)!=HAL_OK) ok=false;
     return ok;
 }
+/* Emm加速度是0..255档位，不能直接作为RPM/s；0表示无加减速。 */
+static uint32_t emm_duration(double revolutions,uint16_t rpm,uint8_t acceleration)
+{
+    if(revolutions<=0.0) return 0;
+    return acceleration==0U?
+        (uint32_t)ceil(revolutions*60000.0/rpm)+MISSION_MOTION_SETTLE_MS:
+        Motion_EstimateMs(revolutions,rpm,20000.0/(256.0-acceleration));
+}
 bool Motion_Move(char direction,float mm,uint16_t rpm)
 {
     if(mm<0||!rpm||rpm>STEPPER_MAX_SPEED_RPM) return false;
@@ -86,9 +94,7 @@ bool Motion_Move(char direction,float mm,uint16_t rpm)
     double revolutions=(double)pulses/MISSION_WHEEL_PPR;
     /* Emm档位不是RPM/s：每(256-acc)*50us改变1RPM，acc=0为无加减速。
      * 见X42S手册Emm相对位置控制章节；不能把档位10当成10RPM/s。 */
-    uint32_t duration=MISSION_WHEEL_ACCEL==0U?
-        (uint32_t)ceil(revolutions*60000.0/rpm)+MISSION_MOTION_SETTLE_MS:
-        Motion_EstimateMs(revolutions,rpm,20000.0/(256.0-MISSION_WHEEL_ACCEL));
+    uint32_t duration=emm_duration(revolutions,rpm,MISSION_WHEEL_ACCEL);
     Motion_Wait(duration);
     return true;
 }
@@ -109,16 +115,20 @@ bool Motion_Turn(char direction,float degrees,uint16_t rpm)
             s=wait_imu();
         }
         float error=heading-s.yaw;
-        if(fabsf(error)<=TURN_ANGLE_TOLERANCE&&fabsf(s.rate)<=TURN_RATE_TOLERANCE) {
+        if(fabsf(error)<=TURN_ANGLE_TOLERANCE) {
             if(!stable) {
                 if(!wheels_stop()) return false;
                 stable_since=HAL_GetTick();
                 stable=true;
             }
-            if((uint32_t)(HAL_GetTick()-stable_since)>=TURN_STABLE_MS) return true;
+            /* 进入角度窗口先停车；角速度尚大时保持停车并重新计稳定时间。 */
+            if(fabsf(s.rate)>TURN_RATE_TOLERANCE) stable_since=HAL_GetTick();
+            else if((uint32_t)(HAL_GetTick()-stable_since)>=TURN_STABLE_MS) return true;
         } else {
             stable=false;
-            float output=fmaxf(-(float)rpm,fminf(rpm,TURN_KP*error-TURN_KD*s.rate));
+            /* 大误差高速、小误差低速；越过目标窗口后按误差方向修正。 */
+            uint16_t speed_rpm=fabsf(error)<=TURN_SLOW_ANGLE&&rpm>TURN_SLOW_RPM?TURN_SLOW_RPM:rpm;
+            float output=copysignf((float)speed_rpm,error);
             double target[4]; int16_t speed[4];
             RobotChassis_WheelTargets(0,0,-output,target);
             for(unsigned i=0;i<4;++i) speed[i]=(int16_t)lround(target[i]);
@@ -152,10 +162,12 @@ bool Motion_MoveAll(int32_t r,int32_t z,uint16_t base,uint16_t rpm)
     if(r_angle&&ArmMotor_MoveAngle(dr>0?'E':'C',r_angle,rpm,ARM_PULSES_PER_REV)!=HAL_OK) return false;
     if(z_angle&&LiftMotor_MoveAngle(dz>0?'U':'D',z_angle,rpm,ARM_PULSES_PER_REV)!=HAL_OK) return false;
     if(!servo_start('B',base,MOTION_BASE_TRANSFER_DPS,&base_ms)) return false;
-    double ra=LiftMotor_FirmwareCode(2U)=='X'?ARM_X_ACCEL_RPM_S:MISSION_ARM_EMM_ACCEL;
-    double za=LiftMotor_FirmwareCode(1U)=='X'?ARM_X_ACCEL_RPM_S:MISSION_ARM_EMM_ACCEL;
-    uint32_t r_ms=Motion_EstimateMs(r_angle/3600.0,rpm,ra);
-    uint32_t z_ms=Motion_EstimateMs(z_angle/3600.0,rpm,za);
+    uint32_t r_ms=LiftMotor_FirmwareCode(2U)=='X'?
+        Motion_EstimateMs(r_angle/3600.0,rpm,ARM_X_ACCEL_RPM_S):
+        emm_duration(r_angle/3600.0,rpm,MISSION_ARM_EMM_ACCEL);
+    uint32_t z_ms=LiftMotor_FirmwareCode(1U)=='X'?
+        Motion_EstimateMs(z_angle/3600.0,rpm,ARM_X_ACCEL_RPM_S):
+        emm_duration(z_angle/3600.0,rpm,MISSION_ARM_EMM_ACCEL);
     uint32_t duration=r_ms>z_ms?r_ms:z_ms;
     if(base_ms+SERVO_UPDATE_MS>duration) duration=base_ms+SERVO_UPDATE_MS;
     Motion_Wait(duration);

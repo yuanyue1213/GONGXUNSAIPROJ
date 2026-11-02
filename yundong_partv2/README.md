@@ -1,6 +1,6 @@
 # yundong_partv2：顺序执行全流程
 
-STM32 可调参数统一在 `stm32/yundongv2/App/Inc/robot_config.h`。速度及上限、区域姿态、槽位角度、初始化/收臂角度、夹爪动作时间、视觉校准和搜索、传动比例、转向 PD、串口波特率/应答时间、IMU 方向和 PWM 参数均从此处读取。旧 `mission_config.h`、`motion_speed.h` 和 shared 的速度上限头只保留转发包含，不再定义参数。
+STM32 可调参数统一在 `stm32/yundongv2/App/Inc/robot_config.h`。速度及上限、区域姿态、槽位角度、初始化/收臂角度、夹爪动作时间、视觉校准和搜索、传动比例、转向判定、串口波特率/应答时间、IMU 方向和 PWM 参数均从此处读取。旧 `mission_config.h`、`motion_speed.h` 和 shared 的速度上限头只保留转发包含，不再定义参数。
 
 动作顺序继续在 `mission_flow.h`、`arm_flow.h` 编写。硬件引脚和时钟拓扑由 CubeMX IOC 管理；改 PWM 周期还需同步 IOC 的 ARR，改设备波特率要与外部设备一致。App 和 ESP32 的网络配置不属于此次 STM32 参数集中。
 
@@ -97,7 +97,7 @@ tests/                              当前顺序架构的主机回归测试
 | FLOW_END | 结束流程，必须位于末尾 |
 | FLOW_ARM(group) | 执行自定义机械臂/舵机动作数组 |
 
-当前路线仍为原来的 25 个移动/转向动作、8 个站点步骤、24 次物料转移。车载三个槽位角度为 0/120/240 度；物理左中右工位与车载槽位分别计算。原料在中位准备，等待固定抓取窗口中的目标色通过NEAR判断后夹取；加工取回及码垛使用PICK获取颜色所在位置。
+当前路线仍为原来的 25 个移动/转向动作、8 个站点步骤、24 次物料转移。车载三个槽位角度为 0/120/240 度；物理左中右工位与车载槽位分别计算。原料在中位准备，等待固定抓取窗口中的目标色通过NEAR判断后夹取；两批加工均放完三件后原地直接取回，按二维码放置工位抓取，不再次校准或请求PICK；空暂存区使用与粗加工相同的圆环定位；码垛使用下层三色物块OCCUPIED校准，刷新工位后逐件用PICK查询同色物料所在位置。
 
 机械臂左/中/右姿态和取放动作统一放在 `App/Inc/arm_flow.h`，编写方法见 [机械臂动作编写](docs/ARM_FLOW.md)：r 单位 0.1 mm，z 单位 mm，底座角度单位度。启动前机械臂应处于约定初始姿态；上电姿态视为逻辑零点，不读取编码器建立原点，也没有限位开关回零。
 
@@ -106,8 +106,8 @@ tests/                              当前顺序架构的主机回归测试
 - 底盘：四轮位置命令同步触发，根据距离、转速和加速度参数估计运行时间，等时间结束再执行下一步。
 - 多轴：`Motion_MoveAll(r,z,base,rpm)` 依次发出伸缩、升降和底座舵机命令，三个执行器并行运行，等待三者预计耗时的最大值。
 - 舵机：TIM6 中断持续更新独立轨迹，前台等待不阻止舵机插值。默认夹爪 300 度/秒，底座和转盘 360 度/秒；五次曲线按峰值速度计算时长。
-- 转向：IMU 反馈驱动前台 PD 控制，等待角度稳定后继续。与参考项目一样保留姿态闭环，不以固定延时替代转向控制。
-- 视觉：原料TABLE从已HSV标定六色中选择单块，3帧位置稳定后返回整像素中心，避免亚像素抖动触发固定粗步；按误差方向固定粗调前后1000 mm、左右5 mm，再重新识别并按像素距离精调一次，不做第三次TABLE刷新。抓取时NEAR只检查目标像素周围半径12像素方框，目标色覆盖至少50%、连续3帧才通过。其他站点仍按像素距离粗调/精调，OCCUPIED额外刷新工位锚点。所有结果按请求编号、种类和目标接收并回复ACK。
+- 转向：IMU反馈决定正反方向，大误差使用设定RPM，误差≤10°切换100 RPM，进入0.01°窗口后停车，角速度≤3°/s并稳定200 ms后继续。与参考项目一样保留姿态闭环，不以固定延时替代转向控制。
+- 视觉：原料TABLE从已HSV标定六色中选择单块，3帧位置稳定后返回整像素中心，避免亚像素抖动触发固定粗步；按误差方向固定粗调前后100 mm、左右5 mm，再循环识别、按像素距离精调，最多修正3次，每次移动后复核，两轴误差都≤1像素时提前结束；达到3次修正上限仍超差，也按最后位置继续取放。抓取时NEAR只检查目标像素周围半径12像素方框，目标色覆盖至少50%、连续3帧才通过。其他站点仍按像素距离粗调/精调，OCCUPIED最终识别同时刷新工位锚点。所有结果按请求编号、种类和目标接收并回复ACK。
 - 所有等待期间均服务 UART5、相机和 IMU。START 只登记待运行任务，由主循环进入完整流程，等待服务不会递归启动另一轮。
 
 按本次要求取消了步进到位轮询、多轴反馈完成屏障、动作总超时、视觉总超时及停车重试状态机。相机无串口回复或转向条件不满足时会继续等待；粗调的 NONE 回复会触发下一段搜索，精调的 NONE 仍继续等待；精调后不再检查残余像素误差，直接进入取放；预计时间结束并不证明步进实际到位。相对位置按指令更新逻辑坐标。
@@ -117,7 +117,7 @@ tests/                              当前顺序架构的主机回归测试
 ## 参数
 
 - 步进软件上限1500 RPM，在 `robot_config.h` 定义，`shared/stepper_limits.h`仅转发包含。
-- 当前默认路线1500 RPM、视觉精调1000 RPM、转向上限1500 RPM、机械臂1500 RPM、收臂1000 RPM，在 `stm32/yundongv2/App/Inc/robot_config.h` 修改。转向按角度误差调整实际速度，短行程还受加减速影响。
+- 当前默认路线1500 RPM、视觉精调1000 RPM、转向上限1500 RPM、机械臂1500 RPM、收臂1000 RPM，在 `stm32/yundongv2/App/Inc/robot_config.h` 修改。转向误差大于10°下发1500 RPM，0.01°～10°下发100 RPM，进入0.01°窗口后停车，角速度不超过3°/s并稳定200 ms才继续；实际转速仍受加减速影响。
 - 距离换算：前后 12585 脉冲/米、横移 13228 脉冲/米、每圈 3200 脉冲。
 - 机械臂：伸缩每转 127 mm，升降每转 40 mm；保持本车既有方向。
 - 时间估算采用三角形/梯形计算方法。底盘Emm加速度档位按手册换算：acc非0时为20000/(256-acc) RPM/s，acc=0按匀速估算；不再把档位10当作10 RPM/s。参数在 `stm32/yundongv2/App/Inc/robot_config.h`。机械臂估时参数沿用原值，X固件按200 RPM/s估算；默认额外等待50 ms。不同驱动固件的参数含义、负载及机械阻力会影响实际时间，需要实车标定。
@@ -152,6 +152,8 @@ cmake --preset Release
 cmake --build --preset Release
 ```
 
+独立夹爪15°测试：执行 `cmake --preset GripperTest`、`cmake --build --preset GripperTest`，烧录 `build/GripperTest/yundongv2.hex`。上电直接在PC8（TIM3_CH3，夹爪G）输出15°并保持，不等待App，不启动底座、转盘或比赛流程。测试入口为 `Tests/gripper_test.c`；测试后烧回 `build/Debug/yundongv2.hex` 恢复正常流程。GripperTest与CameraUartTest使用独立构建目录，不能同时启用。
+
 输出位于 `build/Debug` 和 `build/Release`：`yundongv2.elf/.hex/.bin`。遇到旧缓存可用 CMake 3.24+ 执行 `cmake --fresh --preset Debug`。TIM1/TIM3 只由 CubeMX 初始化，当前定时器时钟为 240 MHz，PSC=239、ARR=19999，得到 1 MHz 计数和 50 Hz PWM；IOC 已同步。`ServoControl_Init(&htim1,&htim3)` 只绑定 PWM 句柄、检查参数并启动 TIM6 轨迹时钟，不重新初始化 PWM。CubeMX 重新生成后需保留 App 源文件清单、shared 包含路径、TIM6 由舵机模块管理的初始化及中断入口和链接脚本的 DTCM/8 KB 栈配置。
 
 主机测试在 v2 根目录执行 `python tests/run_tests.py`，需要 Python 3 和 GCC。共 11 组，覆盖总流程嵌入及重复调用自定义动作组、机械臂动作表、流程表校验、完整路线和取放、相机顺序问答、多轴预计耗时、启动入口、舵机插值、Emm/X 相对位置帧、实际底盘接收缓冲及 IMU 初始化/配置/保存。未连接实车，主机测试及固件编译不代表机械可达性和预计耗时已经标定。
@@ -160,4 +162,6 @@ ESP32 使用 ESP-IDF 6.0，在 `esp32s3/hello_world` 执行 `idf.py build`。目
 
 Android 使用 JDK 21、Android SDK 36.1，在 `application` 执行 `./gradlew.bat :app:assembleDebug :app:testDebugUnitTest`。APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
 
-固定等待参数（ms）：MISSION_MOTION_SETTLE_MS=50、MISSION_STEP_SETTLE_MS=20、ARM_GRIP_SETTLE_MS=200、ARM_RELEASE_SETTLE_MS=100，均在robot_config.h。
+固定等待参数（ms）：MISSION_MOTION_SETTLE_MS=50、MISSION_STEP_SETTLE_MS=20、ARM_GRIP_SETTLE_MS=100、ARM_RELEASE_SETTLE_MS=50，均在robot_config.h。
+
+机械臂Emm估时与底盘一样，将加速度档位换算为RPM/s；X固件继续按实际下发的200 RPM/s估时。运动RPM保持1500，收臂1000；夹紧后停100 ms，释放后停50 ms。

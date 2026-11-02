@@ -126,6 +126,10 @@ int main(void)
   /* 独立串口测试固件：不会进入下方比赛初始化和主循环。 */
   extern void CameraUartTest_Run(UART_HandleTypeDef *uart);
   CameraUartTest_Run(&huart4);
+#elif defined(GRIPPER_TEST)
+  /* 独立夹爪测试：上电直接输出15度，不启动比赛、串口任务或其他舵机。 */
+  extern _Noreturn void GripperTest_Run(TIM_HandleTypeDef *tim1,TIM_HandleTypeDef *tim3);
+  GripperTest_Run(&htim1,&htim3);
 #endif
   /* 五路串口：USART1 底盘，USART2 机械臂，UART5 接收 ESP32 命令，USART3 接 JY901S，
    * UART4 PA1 接收摄像头坐标。MX 初始化失败会进入 Error_Handler。 */

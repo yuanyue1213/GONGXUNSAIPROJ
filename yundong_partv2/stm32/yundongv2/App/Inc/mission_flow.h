@@ -34,15 +34,12 @@ static const FlowStep mission_flow[] = {
     FLOW_STOW(),
     FLOW_UNALIGN(),
 
-    /* 第一批加工：先放完三件，再按流程取回三件。 */
+    /* 第一批加工：放完原地取回，最后统一收臂、撤销校准。 */
     FLOW_TURN(FLOW_LEFT,       90), /* 06 */
     FLOW_MOVE(FLOW_FORWARD,  1735), /* 07 */
     FLOW_TURN(FLOW_LEFT,       90), /* 08 */
     FLOW_ALIGN(TASK_RING,FLOW_BATCH_1),
     FLOW_PROCESS_PUT(FLOW_BATCH_1),
-    FLOW_STOW(),
-    FLOW_UNALIGN(),
-    FLOW_ALIGN(TASK_OCCUPIED,FLOW_BATCH_1),
     FLOW_PROCESS_GET(FLOW_BATCH_1),
     FLOW_STOW(),
     FLOW_UNALIGN(),
@@ -65,20 +62,17 @@ static const FlowStep mission_flow[] = {
     FLOW_STOW(),
     FLOW_UNALIGN(),
 
-    /* 第二批加工，同样将放置与取回分成两个站点步骤。 */
+    /* 第二批加工：放完原地取回，最后统一收臂、撤销校准。 */
     FLOW_TURN(FLOW_LEFT,       90), /* 15 */
     FLOW_MOVE(FLOW_FORWARD,  1750), /* 16 */
     FLOW_TURN(FLOW_LEFT,       90), /* 17 */
     FLOW_ALIGN(TASK_RING,FLOW_BATCH_2),
     FLOW_PROCESS_PUT(FLOW_BATCH_2),
-    FLOW_STOW(),
-    FLOW_UNALIGN(),
-    FLOW_ALIGN(TASK_OCCUPIED,FLOW_BATCH_2),
     FLOW_PROCESS_GET(FLOW_BATCH_2),
     FLOW_STOW(),
     FLOW_UNALIGN(),
 
-    /* 第二批送往码垛区。 */
+    /* 第二批送往码垛区，用下层三色物块定位。 */
     FLOW_MOVE(FLOW_BACKWARD,  850), /* 18 */
     FLOW_TURN(FLOW_RIGHT,      90), /* 19 */
     FLOW_MOVE(FLOW_BACKWARD,  850), /* 20 */

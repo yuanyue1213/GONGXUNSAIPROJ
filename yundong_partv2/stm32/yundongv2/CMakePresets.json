@@ -26,6 +26,14 @@
             }
         },
         {
+            "name": "GripperTest",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "GRIPPER_TEST": "ON"
+            }
+        },
+        {
             "name": "Release",
             "inherits": "default",
             "cacheVariables": {
@@ -34,6 +42,10 @@
         }
     ],
     "buildPresets": [
+        {
+            "name": "GripperTest",
+            "configurePreset": "GripperTest"
+        },
         {
             "name": "CameraUartTest",
             "configurePreset": "CameraUartTest"
