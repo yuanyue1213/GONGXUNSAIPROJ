@@ -42,6 +42,9 @@ void Motion_Stop(void) { ++stops; }
 int32_t Motion_Radial(void) { assert(false); return 0; }
 bool ServoControl_GetAngle(char c,uint16_t *v) { (void)c; (void)v; assert(false); return false; }
 bool Motion_Turn(char d,float deg,uint16_t rpm) { (void)d; (void)deg; (void)rpm; assert(false); return false; }
+bool Motion_TurnPulses(int32_t p,uint16_t rpm) { (void)p; (void)rpm; assert(false); return false; }
+bool Motion_TurnFine(float degrees,uint16_t rpm) { (void)degrees; (void)rpm; assert(false); return false; }
+float Motion_Yaw(void) { assert(false); return 0; }
 void CameraLink_Idle(void) {}
 bool CameraLink_Wait(TaskVisionKind k,unsigned t,TaskVision *v)
 {

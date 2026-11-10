@@ -9,6 +9,13 @@ X_EDGES = (150, 550, 1000, 1400, 1850, 2400)
 Y_FROM_TOP = (80, 550, 1000, 1400, 1850, 2250)
 WIDTHS = (400, 450, 400, 450, 550)
 HEIGHTS = (470, 450, 400, 450, 400)
+# 沿用外框左下角坐标；红线导航区不是2400×2400的正方形。
+FIELD_SIZE_MM = 2400
+GRID_LEFT_MM, GRID_RIGHT_MM = X_EDGES[0], X_EDGES[-1]
+GRID_BOTTOM_MM = FIELD_SIZE_MM-Y_FROM_TOP[-1]
+GRID_TOP_MM = FIELD_SIZE_MM-Y_FROM_TOP[0]
+GRID_WIDTH_MM = GRID_RIGHT_MM-GRID_LEFT_MM
+GRID_HEIGHT_MM = GRID_TOP_MM-GRID_BOTTOM_MM
 FIXED_BLOCKED = frozenset({(2, 2), (2, 4), (4, 2), (4, 4)})
 START_CELLS = {1: (5, 5), 2: (1, 5)}  # Viewer keys: 1 bottom-right, 2 top-right.
 
@@ -18,15 +25,15 @@ def cell_at(x, y):
 
     Internal boundaries belong to the right/lower cell; outside the grid is ignored.
     """
-    down = 2400 - y
+    down = FIELD_SIZE_MM - y
     if not (150 <= x < 2400 and 80 <= down < 2250):
         return None
     return bisect_right(Y_FROM_TOP, down), bisect_right(X_EDGES, x)
 
 
 def cell_rect(row, col):
-    return (X_EDGES[col-1], 2400-Y_FROM_TOP[row],
-            X_EDGES[col], 2400-Y_FROM_TOP[row-1])
+    return (X_EDGES[col-1], FIELD_SIZE_MM-Y_FROM_TOP[row],
+            X_EDGES[col], FIELD_SIZE_MM-Y_FROM_TOP[row-1])
 
 
 class TwoSnapshots:

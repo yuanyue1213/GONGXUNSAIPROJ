@@ -28,7 +28,7 @@ import numpy as np
 WIDTH, HEIGHT = 512, 320
 WORK_WIDTH = 384                 # 56% of full-resolution pixels
 PROCESS_INTERVAL = 0.10          # target ceiling 10 Hz, NOT a measured speed
-VISION_BUILD = "20261101-occupied-no-row"
+VISION_BUILD = "20261107-vision-cleanup"
 ERROR_LOG_PATH = os.path.expanduser("~/vision_error.log")
 FOOTER_HEIGHT = 100              # 状态区放在图像外，不遮挡物料和识别标记。
 CAMERA_UART_DEVICE = "/dev/ttyS2"  # must match the installed TX/RX wiring
@@ -47,12 +47,18 @@ DEFAULT_ROIS = {"OCCUPIED": [12, 12, 500, 308], "PICK": [12, 12, 500, 308],
                 "RING": [12, 12, 500, 308]}
 KERNEL = np.ones((3, 3), np.uint8)
 BLACK_KERNEL = np.ones((5, 5), np.uint8)
+# circle_v2同心环算法参数；斜视时允许轴比0.4，保留原图细线。
+RING_MIN_DIAMETER = 12
+RING_MAX_DIAMETER = 150
+RING_MIN_AXIS_RATIO = .40
+RING_MAX_FIT_ERROR = .09
+RING_MIN_LEVELS = 3
+RING_MIN_RADIUS_SPAN = 1.20
 
 
 def defaults():
     return {"version": 1,
-            "rois": {k: list(v) for k, v in DEFAULT_ROIS.items()},
-            "material_offset": [0.0, 0.0]}
+            "rois": {k: list(v) for k, v in DEFAULT_ROIS.items()}}
 
 
 def validate_config(cfg):
@@ -63,15 +69,9 @@ def validate_config(cfg):
         if (any(type(v) is not int for v in (x0, y0, x1, y1)) or
                 not 0 <= x0 < x1 <= WIDTH or not 0 <= y0 < y1 <= HEIGHT):
             raise ValueError("ROI " + mode)
-    for key in ("material_offset",):
-        if len(cfg[key]) != 2 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in cfg[key]):
-            raise ValueError(key)
-    if any(abs(v) > 80 for v in cfg["material_offset"]):
-        raise ValueError("material offset")
-    # 旧 HSV、TABLE/NEAR 固定窗口等字段忽略；颜色统一读取 HSV 标定文件。
+    # 忽略旧material_offset及旧HSV字段，坐标直接使用原图像识别结果。
     return {"version": 1,
-            "rois": {mode: cfg["rois"][mode] for mode in DEFAULT_ROIS},
-            "material_offset": cfg["material_offset"]}
+            "rois": {mode: cfg["rois"][mode] for mode in DEFAULT_ROIS}}
 
 
 def load_config(path=CONFIG_PATH):
@@ -80,15 +80,6 @@ def load_config(path=CONFIG_PATH):
     # An invalid saved config stops startup; never silently replace a tuned gate.
     with open(path, "r", encoding="utf-8") as handle:
         return validate_config(json.load(handle)), "SAVED ROI / SHARED HSV"
-
-
-def save_config(cfg, path=CONFIG_PATH):
-    validate_config(cfg)
-    with open(path + ".tmp", "w", encoding="utf-8") as handle:
-        json.dump(cfg, handle)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(path + ".tmp", path)
 
 
 def valid_code(text):
@@ -120,10 +111,10 @@ def parse_request(line):
     if not re.match(r"^[0-9]{1,3}$", f[3]):
         return None
     target = int(f[3])
-    if mode in ("TABLE", "OCCUPIED"):
+    if mode in ("TABLE", "OCCUPIED") or (mode == "PARALLEL" and target != 2):
         if triple(target) is None:
             return None
-    elif mode not in ("PICK", "NEAR", "RING") or not 1 <= target <= (3 if mode == "RING" else 6):
+    elif mode not in ("PICK", "NEAR", "RING", "PARALLEL") or not 1 <= target <= (3 if mode in ("RING", "PARALLEL") else 6):
         return None
     if len(f) == 4:
         return req, mode, target
@@ -251,9 +242,121 @@ def base_center(contour):
     return min(fits, key=lambda item: item[0])[1] if fits else None
 
 
+# 来自circle_v2：完整椭圆筛选、同心层分组、原灰度图亚像素边缘细化。
+def ring_refine_edge(gray, ellipse, contour):
+    """在灰度原图沿椭圆法线插值边缘，再用浮点边缘点拟合。"""
+    (cx,cy),(a,b),angle=ellipse
+    points=contour.reshape(-1,2).astype(np.float32)
+    points=points[::max(1,int(np.ceil(len(points)/96)))]
+    co,si=np.cos(np.deg2rad(angle)),np.sin(np.deg2rad(angle))
+    delta=points-np.array([cx,cy])
+    u=delta[:,0]*co+delta[:,1]*si
+    v=-delta[:,0]*si+delta[:,1]*co
+    nx,ny=u/(a*a),v/(b*b)
+    normals=np.column_stack((nx*co-ny*si,nx*si+ny*co))
+    normals/=np.maximum(np.linalg.norm(normals,axis=1)[:,None],1e-6)
+    # 环线较密，只搜索邻近边缘，避免跳到相邻环线。
+    offsets=np.arange(-2.0,2.01,0.5,dtype=np.float32)
+    locations=points[:,None,:]+normals[:,None,:]*offsets[None,:,None]
+    valid=(locations[:,:,0].min(axis=1)>=0)&(locations[:,:,1].min(axis=1)>=0)
+    valid&=(locations[:,:,0].max(axis=1)<gray.shape[1]-1)&(locations[:,:,1].max(axis=1)<gray.shape[0]-1)
+    samples=cv2.remap(gray,locations[:,:,0].astype(np.float32),
+                     locations[:,:,1].astype(np.float32),cv2.INTER_LINEAR).astype(np.float32)
+    gradients=np.abs(samples[:,2:]-samples[:,:-2])
+    peak=np.argmax(gradients,axis=1)
+    valid&=(peak>0)&(peak<gradients.shape[1]-1)
+    rows=np.arange(len(points)); safe=np.clip(peak,1,gradients.shape[1]-2)
+    left=gradients[rows,safe-1]; middle=gradients[rows,safe]; right=gradients[rows,safe+1]
+    denominator=left-2*middle+right
+    valid&=(middle>=8)&(denominator<-1e-3)
+    correction=np.clip(0.5*(left-right)/np.minimum(denominator,-1e-3),-0.5,0.5)
+    shift=offsets[safe+1]+0.5*correction
+    refined=(points+normals*shift[:,None])[valid].astype(np.float32)
+    if len(refined)<12:
+        return ellipse
+    # 保留原来的完整环线覆盖要求。
+    bins=np.floor((np.arctan2(v[valid]/b,u[valid]/a)+np.pi)*16/(2*np.pi)).astype(int)%16
+    if len(np.unique(bins))<14:
+        return ellipse
+    fitted=cv2.fitEllipse(refined.reshape(-1,1,2))
+    (fx,fy),(fa,fb),_=fitted
+    if np.hypot(fx-cx,fy-cy)>1.5 or not 0.9<fa/a<1.1 or not 0.9<fb/b<1.1:
+        return ellipse
+    return fitted
+
+
+def ring_candidate(contour):
+    """只接受覆盖完整椭圆且拟合误差较小的轮廓，过滤数字/胶带。"""
+    if len(contour) < 12:
+        return None
+    ellipse = cv2.fitEllipse(contour)
+    (cx, cy), (a, b), angle = ellipse
+    minor, major = min(a, b), max(a, b)
+    if not RING_MIN_DIAMETER <= minor <= major <= RING_MAX_DIAMETER:
+        return None
+    if minor / major < RING_MIN_AXIS_RATIO:
+        return None
+    area = abs(cv2.contourArea(contour))
+    fill = area / (np.pi * a * b / 4.0)
+    if not 0.78 <= fill <= 1.18:
+        return None
+    points = contour.reshape(-1, 2).astype(np.float32)
+    delta = points - np.array([cx, cy], dtype=np.float32)
+    theta = np.deg2rad(angle)
+    u = (delta[:, 0] * np.cos(theta) + delta[:, 1] * np.sin(theta)) / (a / 2)
+    v = (-delta[:, 0] * np.sin(theta) + delta[:, 1] * np.cos(theta)) / (b / 2)
+    error = float(np.mean(np.abs(np.sqrt(u * u + v * v) - 1)))
+    if error > RING_MAX_FIT_ERROR:
+        return None
+    # 至少覆盖 16 个角度区间中的 14 个，拒绝局部圆弧拟合出的假椭圆。
+    bins = np.floor((np.arctan2(v, u) + np.pi) * 16 / (2 * np.pi)).astype(int) % 16
+    if len(np.unique(bins)) < 14:
+        return None
+    return {"center": np.array([cx, cy]), "radius": (a + b) / 4,
+            "ellipse": ellipse, "error": error, "ratio": minor / major,
+            "contour":contour}
+
+
+def ring_groups(candidates):
+    groups = []
+    for candidate in sorted(candidates, key=lambda item: item["error"]):
+        matched = None
+        for group in groups:
+            anchor = group[0]
+            tolerance = max(3.0, min(anchor["radius"], candidate["radius"]) * 0.12)
+            if (np.linalg.norm(candidate["center"] - anchor["center"]) <= tolerance
+                    and abs(candidate["ratio"] - anchor["ratio"]) <= 0.15):
+                matched = group
+                break
+        if matched is None:
+            groups.append([candidate])
+        else:
+            matched.append(candidate)
+    targets = []
+    for group in groups:
+        # 内外边界距离很近，不将同一条粗线的两侧算作两层环。
+        levels = []
+        for candidate in sorted(group, key=lambda item: item["radius"]):
+            if not levels or candidate["radius"] - levels[-1]["radius"] >= max(2.0, candidate["radius"] * 0.06):
+                levels.append(candidate)
+            elif candidate["error"] < levels[-1]["error"]:
+                levels[-1] = candidate
+        if len(levels) < RING_MIN_LEVELS:
+            continue
+        if levels[-1]["radius"] / levels[0]["radius"] < RING_MIN_RADIUS_SPAN:
+            continue
+        weights = np.array([1 / (0.02 + item["error"]) for item in levels])
+        center = np.average([item["center"] for item in levels], axis=0, weights=weights)
+        targets.append({"center": center, "radius": levels[-1]["radius"],
+                        "levels": levels, "score": len(levels)})
+    return targets
+
+
+
 class Detector:
     def __init__(self, cfg, hsv_source=None):
         self.cfg = cfg
+        self.ring_centers = []
         # 与 TABLE/NEAR 共用同一对象，触屏修改和中断后的重新加载立即生效。
         self.hsv_source = hsv_source if hsv_source is not None else ColorThresholds()
 
@@ -263,7 +366,9 @@ class Detector:
         scale = 1. if mode == "RING" else min(1., WORK_WIDTH/(x1-x0))
         crop = bgr[y0:y1, x0:x1]
         width, height = max(1, round((x1-x0)*scale)), max(1, round((y1-y0)*scale))
-        return cv2.resize(crop, (width, height), interpolation=cv2.INTER_AREA), (x0, y0), ((x1-x0)/width, (y1-y0)/height)
+        if crop.shape[:2] != (height, width):
+            crop = cv2.resize(crop, (width, height), interpolation=cv2.INTER_AREA)
+        return crop, (x0, y0), ((x1-x0)/width, (y1-y0)/height)
 
     def materials(self, bgr, mode, colors):
         crop, origin, scale = self.crop(bgr, mode)
@@ -321,8 +426,7 @@ class Detector:
                 center = base_center(contour)
                 if center is None:
                     continue
-                offset = (0., 0.) if mode == "TABLE" else self.cfg["material_offset"]
-                center = (origin[0]+center[0]*scale[0]+offset[0], origin[1]+center[1]*scale[1]+offset[1])
+                center = (origin[0]+center[0]*scale[0], origin[1]+center[1]*scale[1])
                 if not 0 <= center[0] < WIDTH or not 0 <= center[1] < HEIGHT:
                     continue
                 objects.append({"color": color, "center": center, "area": area})
@@ -330,53 +434,42 @@ class Detector:
 
     def rings(self, bgr):
         crop, origin, scale = self.crop(bgr, "RING")
-        # 不模糊密集同心环；否则白色间隙消失，只剩最内、最外两个轮廓。
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-        contours = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)[-2]
-        eligible = [c for c in contours if 30 <= abs(cv2.contourArea(c))*scale[0]*scale[1] <= 20000]
-        candidates = []
-        for contour in sorted(eligible, key=lambda c: abs(cv2.contourArea(c)), reverse=True)[:64]:
-            fit = ellipse_fit(contour)
-            if fit is None:
-                continue
-            ((x, y), (a, b), angle), error = fit
-            area = abs(cv2.contourArea(contour))/(math.pi*a*b/4)
-            if error > .08 or min(a, b)/max(a, b) < .45 or not .78 <= area <= 1.18:
-                continue
-            center = (origin[0]+x*scale[0], origin[1]+y*scale[1])
-            radius = (a*scale[0]+b*scale[1])/4
-            if 5 <= radius <= 78:
-                candidates.append((center, radius))
-        groups = []
-        for center, radius in candidates:
-            group = next((g for g in groups if np.linalg.norm(np.array(center)-g[0][0]) <= 3), None)
-            if group is None:
-                groups.append([(center, radius)])
-            else:
-                group.append((center, radius))
-        targets = []
-        for group in groups:
-            levels = []
-            for center, radius in sorted(group, key=lambda c: c[1]):
-                if not levels or radius-levels[-1][1] >= max(2.5, radius*.09):
-                    levels.append((center, radius))
-            if len(levels) >= 3 and levels[-1][1]/levels[0][1] >= 1.3:
-                targets.append(np.mean([p for p, r in levels], axis=0))
-        # More than three credible targets is ambiguous; do not pick a random row.
-        if len(targets) != 3:
+        # circle_v2的两种分割独立分组，不混合重复轮廓；不模糊原图密集细环。
+        masks = (cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1],
+                 cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, 31, 7))
+        self.ring_centers = []
+        best, best_score = None, -1
+        for mask in masks:
+            contours = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)[-2]
+            eligible = [c for c in contours if 30 <= abs(cv2.contourArea(c)) <= 20000]
+            candidates = []
+            for contour in sorted(eligible, key=lambda c: abs(cv2.contourArea(c)), reverse=True)[:128]:
+                candidate = ring_candidate(contour)
+                if candidate is not None:
+                    candidates.append(candidate)
+            targets = sorted(ring_groups(candidates), key=lambda t: t["center"][0])
+            centers = [np.array(origin)+t["center"]*scale for t in targets]
+            if len(centers) > len(self.ring_centers):
+                self.ring_centers = centers
+            # 不恢复circle_v2的共线/等间距检查；多于三个仍视为歧义。
+            score = sum(t["score"] for t in targets)
+            if len(targets) == 3 and score > best_score:
+                best, best_score = targets, score
+        if best is None:
             return None
-        points = np.array(sorted(targets, key=lambda p: p[0]))
-        return points if row_valid(points) else None
+        # 只细化最终三个靶标，避免对全部背景轮廓做插值。
+        centers = []
+        for target in best:
+            levels = target["levels"]
+            refined = [ring_refine_edge(gray, level["ellipse"], level["contour"])[0] for level in levels]
+            weights = [1/(.02+level["error"]) for level in levels]
+            center = np.average(refined, axis=0, weights=weights)
+            centers.append(np.array(origin)+center*scale)
+        self.ring_centers = centers
+        return np.array(centers)
 
-
-def row_valid(points):
-    left, middle, right = np.asarray(points)
-    gaps = np.diff(np.asarray(points)[:, 0])
-    if min(gaps) < 12 or max(gaps) > min(gaps)*1.8:
-        return False
-    predicted = left[1]+(middle[0]-left[0])/(right[0]-left[0])*(right[1]-left[1])
-    return abs(middle[1]-predicted) <= max(6., (right[0]-left[0])*.1)
 
 
 def unique_triple(objects, colors):
@@ -396,7 +489,6 @@ def unique_triple(objects, colors):
 
 
 # ===== QR and shared HSV calibration =====
-ORIGINAL_COLORS = {name: value for value, name in COLORS.items()}
 DEFAULT_CONFIG_PATH = os.path.join(os.path.expanduser("~"), "hsv_thresholds.json")
 
 # OpenCV uint8 HSV预设值：H=0..179，S/V=0..255；不代表已经完成标定。
@@ -410,16 +502,6 @@ DEFAULT_HSV_TOL = {
     "yellow": (10, 60, 60), "green": (10, 60, 60),
     "black": (90, 255, 40), "red": (10, 60, 60),
 }
-
-DRAW_COLORS_BGR = {
-    "light_blue": (255, 255, 0),
-    "blue": (255, 0, 0),
-    "yellow": (0, 255, 255),
-    "green": (0, 255, 0),
-    "black": (180, 180, 180),
-    "red": (0, 0, 255),
-}
-
 
 def hsv_mask(hsv, center, tolerance):
     """H按180环绕，S/V按0..255判断；红色可跨越H=0。"""
@@ -587,29 +669,6 @@ class NearPickup:
         return self.stable.update("2" if ratio >= RAW_PICK_MIN_RATIO else None)
 
 
-class OriginalStableTarget:
-    def __init__(self):
-        self.samples = []
-        self.text = None
-
-    def update(self, result):
-        if result is None:
-            self.samples = []
-            self.text = None
-            return None
-        if isinstance(result, str):
-            if result != self.text:
-                self.samples = []
-            self.text = result
-        elif self.samples and np.linalg.norm(np.array(result) - np.mean(self.samples, axis=0)) > 1.5:
-            self.samples = []
-        self.samples.append(result)
-        self.samples = self.samples[-3:]
-        if len(self.samples) < 3:
-            return None
-        return result if isinstance(result, str) else tuple(np.mean(self.samples, axis=0))
-
-
 def calibrate_table_colors(cam, dis, ts, table, colors, poll=None):
     """Touch HSV workflow, available only while no task is active."""
     from maix import app, image, time
@@ -661,9 +720,8 @@ def calibrate_table_colors(cam, dis, ts, table, colors, poll=None):
         blur = cv2.GaussianBlur(bgr_image, (5, 5), 0)
         hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
         mask = hsv_mask(hsv, HSV_CENTER[color], HSV_TOL[color])
-        kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.erode(mask, kernel, iterations=2)
-        return cv2.dilate(mask, kernel, iterations=2)
+        mask = cv2.erode(mask, KERNEL, iterations=2)
+        return cv2.dilate(mask, KERNEL, iterations=2)
 
     def sample_hsv_center(color):
         """双击进入确认模式，在画面中心对颜色取样；SKIP 不覆盖旧值。"""
@@ -823,7 +881,6 @@ class Engine:
         self.stopped = False
         self.responded = False
         self.stable = Stable()
-        self.qr_stable = OriginalStableTarget()
         self.near = NearPickup()
         self.anchors = None
         self.station_colors = ()
@@ -841,16 +898,15 @@ class Engine:
         self.request = request
         self.stopped = False
         self.responded = False
-        self.stable = Stable()
-        self.qr_stable = OriginalStableTarget()
+        self.stable.reset()
         self.raw_color = None
-        if request[1] in ("TABLE", "OCCUPIED", "RING", "QR"):
+        if request[1] in ("TABLE", "OCCUPIED", "RING", "PARALLEL", "QR"):
             point = request[3:] if request[1] == "TABLE" and len(request) == 5 else RAW_PICK_POINT
             self.near = NearPickup(point)
         if request[1] == "NEAR":
             self.near.reset()
         self.objects = []
-        if request[1] in ("QR", "TABLE", "RING", "OCCUPIED"):
+        if request[1] in ("QR", "TABLE", "RING", "PARALLEL", "OCCUPIED"):
             self.anchors = None
             self.station_colors = ()
         self.ring_points = None
@@ -870,11 +926,14 @@ class Engine:
             self.state = "IDLE / HOLD 1.5s HSV"
             return None
         req, mode, target = self.request[:3]
+        parallel = mode == "PARALLEL"
+        if parallel:
+            mode = "RING" if target == 2 else "OCCUPIED"
         value = None
         self.state = mode + " / NOT FOUND OR AMBIGUOUS"
         if mode == "QR":
             codes = {code.strip() for code in qr_codes if valid_code(code.strip())}
-            result = self.qr_stable.update(codes.pop() if len(codes) == 1 else None)
+            result = self.stable.update(codes.pop() if len(codes) == 1 else None)
             self.state = "QR / STABLE" if result else "QR / WAITING"
             return "VISION,%d,QR,%s\n" % (req, result) if result else "VISION,%d,NONE\n" % req
         elif mode == "TABLE":
@@ -897,11 +956,18 @@ class Engine:
             return "VISION,%d,NEAR,%d,%s\n" % (req, target, result) if result else "VISION,%d,NONE\n" % req
         elif mode == "RING":
             points = self.detector.rings(bgr)
-            value = self.stable.update(points)
+            value = points if parallel else self.stable.update(points)
             self.ring_points = value if value is not None else points
-            self.state = "RING / WAIT 3 TARGETS" if points is None else "RING / STABILIZING"
+            if points is None:
+                centers = getattr(self.detector, "ring_centers", [])
+                self.ring_points = np.array(centers) if len(centers) else None
+                self.state = "RING / WAIT 3 TARGETS (%d/3)" % len(centers)
+            else:
+                self.state = "RING / STABILIZING"
             if value is not None:
                 self.state = "RING / STABLE"
+                if parallel:
+                    return "VISION,%d,PARALLEL,2,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f\n" % (req, *[v for point in value for v in point])
                 return "VISION,%d,RING,%d,%.1f,%.1f\n" % (req, target, *value[target-1])
             return "VISION,%d,NONE\n" % req
         else:
@@ -926,7 +992,7 @@ class Engine:
                     spacing = min(np.linalg.norm(self.anchors[index]-p) for i, p in enumerate(self.anchors) if i != index)
                     if distances[index] <= spacing*.28:
                         value = str(index+1)
-        result = self.stable.update(value)
+        result = value if parallel else self.stable.update(value)
         if result is None:
             if value is not None:
                 self.state = mode + " / STABILIZING"
@@ -935,6 +1001,8 @@ class Engine:
         if mode == "OCCUPIED":
             self.anchors = np.array(result, copy=True)
             self.station_colors = colors
+            if parallel:
+                return "VISION,%d,PARALLEL,%d,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f\n" % (req, target, *[v for point in result for v in point])
             result = result[1]
         if mode == "PICK":
             return "VISION,%d,PICK,%d,%s\n" % (req, target, result)
@@ -972,7 +1040,9 @@ def draw_status(img, engine, elapsed_ms, config_state):
         cv2.putText(img, COLORS[obj["color"]], (x+5, y), cv2.FONT_HERSHEY_SIMPLEX, .35, (0, 255, 0), 1)
     if engine.ring_points is not None:
         # 图像左/中/右，不是比赛场地上的数字编号；坐标为原始512x320像素。
-        for name, point in zip(("L", "M", "R"), engine.ring_points):
+        names = ("L", "M", "R") if len(engine.ring_points) == 3 else tuple(
+            "C%d" % (i+1) for i in range(len(engine.ring_points)))
+        for name, point in zip(names, engine.ring_points):
             x, y = (int(round(v)) for v in point)
             cv2.drawMarker(img, (x, y), (0, 255, 255), cv2.MARKER_CROSS, 14, 1)
             label = "%s(%.1f,%.1f)" % (name, *point)
@@ -1140,38 +1210,32 @@ def main():
     elapsed_ms = 0.
     capture_fault = False
     started = time.monotonic()
-    def poll_calibration():
-        # 比赛任务优先：标定期间也接收串口，收到任务立即退出标定。
-        nonlocal rx_bytes, last_request
+    def receive_commands():
+        # 正常运行与标定共用接收入口；补发不重置稳定帧，ACK不切换任务。
+        nonlocal rx_bytes, last_request, last_process
         incoming = serial.read()
         rx_bytes += len(incoming or b"")
-        requests = receiver.feed(incoming)
-        for request in requests:
-            engine.select(request)
+        changed = False
+        for request in receiver.feed(incoming):
             if request[1] != "ACK":
                 last_request = "%s#%d" % (request[1], request[0])
+                if request != engine.request:
+                    changed = True
+                    print("CAM RX:", request, flush=True)
+                    last_process = 0.
+            engine.select(request)
+        return changed
+
+    def poll_calibration():
+        # 比赛任务优先：收到任务立即退出标定。
+        receive_commands()
         if engine.request is not None and engine.request[1] != "IDLE" and not engine.stopped:
             raise InterruptedError("CAM task received")
     stage = "Main loop"
     try:
         while not app.need_exit():
             stage = "UART receive"
-            incoming = serial.read()
-            rx_bytes += len(incoming or b"")
-            command_changed = False
-            for request in receiver.feed(incoming):
-                if request[1] == "ACK":
-                    engine.select(request)
-                    continue
-                last_request = "%s#%d" % (request[1], request[0])
-                if request != engine.request:
-                    command_changed = True
-                    print("CAM RX:", request, flush=True)
-                    last_process = 0.
-                engine.select(request)
-                light.update(request)
-                if request[1] != "IDLE":
-                    press_start = None
+            command_changed = receive_commands()
             if command_changed:
                 stage = "Command display"
                 # 先确认收包，再打开/读取USB；即使USB阻塞也能看到指令已收到。
@@ -1265,7 +1329,6 @@ def main():
                     engine.anchors = None
                     engine.station_colors = ()
                     engine.stable.reset()
-                    engine.qr_stable = OriginalStableTarget()
                     press_start = None
                     config_state = "SHARED HSV CALIBRATION"
             else:

@@ -68,7 +68,7 @@ static inline bool TaskProtocol_Code(const char *s, TaskCode *code)
     }
     return true;
 }
-typedef enum { TASK_QR, TASK_RING, TASK_NONE, TASK_TABLE, TASK_OCCUPIED, TASK_PICK, TASK_NEAR } TaskVisionKind;
+typedef enum { TASK_QR, TASK_RING, TASK_NONE, TASK_TABLE, TASK_OCCUPIED, TASK_PICK, TASK_NEAR, TASK_PARALLEL } TaskVisionKind;
 /* Three distinct task-code color IDs, e.g. 156 = red, black, light_blue. */
 static inline bool TaskProtocol_TableColors(uint32_t target)
 {
@@ -77,6 +77,7 @@ static inline bool TaskProtocol_TableColors(uint32_t target)
 }
 static inline bool TaskProtocol_Target(TaskVisionKind kind,uint32_t target)
 {
+    if(kind==TASK_PARALLEL) return target==2U||TaskProtocol_TableColors(target);
     return (kind==TASK_TABLE||kind==TASK_OCCUPIED)?TaskProtocol_TableColors(target):
         target>=1U&&target<=((kind==TASK_PICK||kind==TASK_NEAR)?6U:3U);
 }
@@ -84,6 +85,7 @@ typedef struct {
     uint32_t request, target, position;
     TaskVisionKind kind;
     TaskPoint center;
+    TaskPoint rings[3]; /* PARALLEL：同一帧、从左到右的三个圆心。 */
     TaskCode code;
     char text[16];
 } TaskVision;
@@ -98,6 +100,14 @@ static inline bool TaskProtocol_Vision(const char *s, TaskVision *v)
         memcpy(v->text,p,16U); return true;
     }
     if(strcmp(p,"NONE")==0) { v->kind=TASK_NONE; return true; }
+    if(strncmp(p,"PARALLEL,",9U)==0) {
+        v->kind=TASK_PARALLEL; p+=9;
+        if(!TaskProtocol_U32(&p,&v->target,',')||!TaskProtocol_Target(v->kind,v->target)) return false;
+        for(unsigned i=0;i<3U;++i)
+            if(!TaskProtocol_Pixel(&p,&v->rings[i].x,',',512U)||
+               !TaskProtocol_Pixel(&p,&v->rings[i].y,i==2U?'\0':',',320U)) return false;
+        return true;
+    }
     if(strncmp(p,"PICK,",5U)==0||strncmp(p,"NEAR,",5U)==0) {
         v->kind=p[0]=='N'?TASK_NEAR:TASK_PICK; p+=5U;
         return TaskProtocol_U32(&p,&v->target,',')&&TaskProtocol_Target(TASK_PICK,v->target)&&

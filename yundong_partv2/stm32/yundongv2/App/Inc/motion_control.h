@@ -9,8 +9,11 @@ void Motion_Init(MotionService service);
 void Motion_Wait(uint32_t ms);
 uint32_t Motion_EstimateMs(double revolutions, uint16_t rpm, double acceleration);
 bool Motion_Reference(void);
+float Motion_Yaw(void); /* 新鲜IMU航向，单位度；无数据时沿用现有等待策略。 */
 bool Motion_Move(char direction, float mm, uint16_t rpm);
 bool Motion_Turn(char direction, float degrees, uint16_t rpm);
+bool Motion_TurnFine(float degrees,uint16_t rpm); /* 相对当前IMU航向，顺时针为正。 */
+bool Motion_TurnPulses(int32_t pulses,uint16_t rpm); /* 左转为正，车轮相对脉冲。 */
 bool Motion_Servo(char channel, uint16_t target, uint16_t dps);
 /* r 使用 0.1 mm，z 使用 mm，base 使用度；三轴同时启动，等待预计最长时间。 */
 bool Motion_MoveAll(int32_t r, int32_t z, uint16_t base, uint16_t rpm);

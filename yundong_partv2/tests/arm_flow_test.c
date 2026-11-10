@@ -46,7 +46,7 @@ int main(void)
         assert(radial==ARM_READY_R&&height==0&&base==raw_poses[i].base&&grip==30);
         unsigned before=waits; uint32_t before_ms=waited;
         assert(ArmFlow_Run(finish,ARM_COUNT(finish)));
-        assert(radial==110&&height==0&&base==180&&grip==30);
+        assert(radial==ARM_SLOT_R&&height==0&&base==180&&grip==30);
         assert(waits==before+2&&waited==before_ms+ARM_GRIP_SETTLE_MS+ARM_RELEASE_SETTLE_MS);
         for(unsigned stack=0;stack<2;++stack) {
             ArmArea area=stack?ARM_AREA_STACK:ARM_AREA_PROCESS;

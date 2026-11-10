@@ -6,7 +6,8 @@ import socket
 import struct
 import time
 from pathlib import Path
-from n10_grid import TwoSnapshots, FIXED_BLOCKED, X_EDGES, Y_FROM_TOP, cell_rect
+from n10_grid import (TwoSnapshots, FIXED_BLOCKED, X_EDGES, Y_FROM_TOP, cell_rect,
+                      FIELD_SIZE_MM, GRID_WIDTH_MM, GRID_HEIGHT_MM)
 from n10_planner import RoutePlayer, handle_control, vehicle_pose, lidar_to_pose
 from n10_plan_ui import control_at, draw_route, draw_toolbar
 
@@ -97,7 +98,8 @@ def render(cloud, now, args, view, zone, bad, error="", recording=None, points=N
     points = cloud.points(now) if points is None else points
     origin, size = 60, 780
     def map_pixel(x, y):
-        return round(origin + x / 2400 * size), round(origin + (2400-y) / 2400 * size)
+        return (round(origin + x / FIELD_SIZE_MM * size),
+                round(origin + (FIELD_SIZE_MM-y) / FIELD_SIZE_MM * size))
     if view == "map":
         blocked = recording.blocked if recording else set(FIXED_BLOCKED)
         for row in range(1, 6):
@@ -119,12 +121,12 @@ def render(cloud, now, args, view, zone, bad, error="", recording=None, points=N
                     x, y = point['x_mm'], point['y_mm']
                     if 0 <= x < 2400 and 0 <= y < 2400:
                         cv2.circle(image, map_pixel(x, y), 3, (200, 160, 70), 1)
-        for point in map_cloud_points(points, start_zone, pose):
+        for point in map_cloud_points(points, start_zone, robot.radar_pose if robot else pose):
             x, y = point['x_mm'], point['y_mm']
             if 0 <= x < 2400 and 0 <= y < 2400:
                 cv2.circle(image, map_pixel(x, y), 2, (60, 210, 255), -1)
-        draw_route(image, player, start_zone, map_pixel, pose)
-        title = f"Car + radar | X {pose[0]:.0f} Y {pose[1]:.0f} mm | heading {pose[2]:.0f} deg | " + ('command pose' if robot else 'preview pose')
+        draw_route(image, player, start_zone, map_pixel, pose, robot.radar_pose if robot else None)
+        title = f"Grid {GRID_WIDTH_MM}x{GRID_HEIGHT_MM} mm | X {pose[0]:.0f} Y {pose[1]:.0f} | heading {pose[2]:.0f} deg | " + ('command pose' if robot else 'preview pose')
     else:
         center = (450, 450)
         for radius in range(1, 5):

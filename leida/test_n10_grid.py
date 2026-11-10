@@ -4,11 +4,16 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from n10_grid import TwoSnapshots, cell_at, cell_rect, FIXED_BLOCKED, WIDTHS, HEIGHTS
+from n10_grid import (TwoSnapshots, cell_at, cell_rect, FIXED_BLOCKED, WIDTHS, HEIGHTS,
+                      GRID_LEFT_MM, GRID_RIGHT_MM, GRID_BOTTOM_MM, GRID_TOP_MM,
+                      GRID_WIDTH_MM, GRID_HEIGHT_MM)
 
 
 class GridTests(unittest.TestCase):
     def test_confirmed_geometry_and_all_centers(self):
+        self.assertEqual((GRID_WIDTH_MM, GRID_HEIGHT_MM), (2250, 2170))
+        self.assertEqual((GRID_LEFT_MM, GRID_RIGHT_MM, GRID_BOTTOM_MM, GRID_TOP_MM),
+                         (150, 2400, 150, 2320))
         self.assertEqual(sum(WIDTHS), 2250)
         self.assertEqual(sum(HEIGHTS), 2170)
         for r in range(1, 6):

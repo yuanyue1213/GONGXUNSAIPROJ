@@ -1,5 +1,7 @@
 # yundong_partv2：顺序执行全流程
 
+视觉校准：原料区仅对图像中心；粗加工、暂存和堆叠先中心搜索/对准，再平行校准，目标均为(256,160)。识别坐标不加偏移，旧material_offset配置被忽略。每个平行校准步骤按atan(三中心拟合斜率)计算剩余倾角，IMU闭环修正（每次限幅±15°、容差0.05°），最多修正3次，完成或达到3次后直接继续，不追加视觉复核、不因未达标停止。安装比例通过PARALLEL_ANGLE_GAIN调整，默认1.0；实际三次收敛能力需结合相机安装角度验证。平行由STM32使用当前帧计算，不等待连续三帧稳定；中心识别仍由相机判断稳定。任务后收臂并撤销校准平移，旋转后按IMU航向差换算位移坐标。`mission_flow.h`在`FLOW_ALIGN`之后写`FLOW_PARALLEL(TASK_RING,批次)`或`FLOW_PARALLEL(TASK_OCCUPIED,批次)`，参数集中在`robot_config.h`的`PARALLEL_*`。需同步更新STM32 Debug固件和`camera/MaixVision/main.py`；相机端测试：`python -B yundong_partv2/tests/parallel_vision_test.py`。
+
 STM32 可调参数统一在 `stm32/yundongv2/App/Inc/robot_config.h`。速度及上限、区域姿态、槽位角度、初始化/收臂角度、夹爪动作时间、视觉校准和搜索、传动比例、转向判定、串口波特率/应答时间、IMU 方向和 PWM 参数均从此处读取。旧 `mission_config.h`、`motion_speed.h` 和 shared 的速度上限头只保留转发包含，不再定义参数。
 
 动作顺序继续在 `mission_flow.h`、`arm_flow.h` 编写。硬件引脚和时钟拓扑由 CubeMX IOC 管理；改 PWM 周期还需同步 IOC 的 ARR，改设备波特率要与外部设备一致。App 和 ESP32 的网络配置不属于此次 STM32 参数集中。
@@ -106,7 +108,7 @@ tests/                              当前顺序架构的主机回归测试
 - 底盘：四轮位置命令同步触发，根据距离、转速和加速度参数估计运行时间，等时间结束再执行下一步。
 - 多轴：`Motion_MoveAll(r,z,base,rpm)` 依次发出伸缩、升降和底座舵机命令，三个执行器并行运行，等待三者预计耗时的最大值。
 - 舵机：TIM6 中断持续更新独立轨迹，前台等待不阻止舵机插值。默认夹爪 300 度/秒，底座和转盘 360 度/秒；五次曲线按峰值速度计算时长。
-- 转向：IMU反馈决定正反方向，大误差使用设定RPM，误差≤10°切换100 RPM，进入0.01°窗口后停车，角速度≤3°/s并稳定200 ms后继续。与参考项目一样保留姿态闭环，不以固定延时替代转向控制。
+- 转向：恢复旧版IMU PD调速，转速=0.8×角度误差−0.18×角速度，并限制在设定RPM内。误差≤1°、角速度≤3°/s时停车，稳定200 ms后继续。
 - 视觉：原料TABLE从已HSV标定六色中选择单块，3帧位置稳定后返回整像素中心，避免亚像素抖动触发固定粗步；按误差方向固定粗调前后100 mm、左右5 mm，再循环识别、按像素距离精调，最多修正3次，每次移动后复核，两轴误差都≤1像素时提前结束；达到3次修正上限仍超差，也按最后位置继续取放。抓取时NEAR只检查目标像素周围半径12像素方框，目标色覆盖至少50%、连续3帧才通过。其他站点仍按像素距离粗调/精调，OCCUPIED最终识别同时刷新工位锚点。所有结果按请求编号、种类和目标接收并回复ACK。
 - 所有等待期间均服务 UART5、相机和 IMU。START 只登记待运行任务，由主循环进入完整流程，等待服务不会递归启动另一轮。
 
@@ -116,11 +118,11 @@ tests/                              当前顺序架构的主机回归测试
 
 ## 参数
 
-- 步进软件上限1500 RPM，在 `robot_config.h` 定义，`shared/stepper_limits.h`仅转发包含。
-- 当前默认路线1500 RPM、视觉精调1000 RPM、转向上限1500 RPM、机械臂1500 RPM、收臂1000 RPM，在 `stm32/yundongv2/App/Inc/robot_config.h` 修改。转向误差大于10°下发1500 RPM，0.01°～10°下发100 RPM，进入0.01°窗口后停车，角速度不超过3°/s并稳定200 ms才继续；实际转速仍受加减速影响。
+- 步进软件上限2000 RPM，在 `robot_config.h` 定义，`shared/stepper_limits.h`仅转发包含。
+- 当前默认路线1500 RPM、视觉精调1000 RPM、转向上限150 RPM、机械臂2000 RPM、收臂1500 RPM，在 `stm32/yundongv2/App/Inc/robot_config.h` 修改。转向使用PD连续调速，150 RPM是上限；实际转速仍受角度误差、角速度反馈和加减速影响。
 - 距离换算：前后 12585 脉冲/米、横移 13228 脉冲/米、每圈 3200 脉冲。
 - 机械臂：伸缩每转 127 mm，升降每转 40 mm；保持本车既有方向。
-- 时间估算采用三角形/梯形计算方法。底盘Emm加速度档位按手册换算：acc非0时为20000/(256-acc) RPM/s，acc=0按匀速估算；不再把档位10当作10 RPM/s。参数在 `stm32/yundongv2/App/Inc/robot_config.h`。机械臂估时参数沿用原值，X固件按200 RPM/s估算；默认额外等待50 ms。不同驱动固件的参数含义、负载及机械阻力会影响实际时间，需要实车标定。
+- 时间估算采用三角形/梯形计算方法。底盘Emm加速度档位按手册换算：acc非0时为20000/(256-acc) RPM/s，acc=0按匀速估算；不再把档位10当作10 RPM/s。参数在 `stm32/yundongv2/App/Inc/robot_config.h`。机械臂Emm使用128档（约156.25 RPM/s），X固件加减速均为400 RPM/s；估时与实际下发参数共用；默认额外等待50 ms。不同驱动固件的参数含义、负载及机械阻力会影响实际时间，需要实车标定。
 - 视觉参数：512×320图像，目标点(256,160)，精调及其他站点比例1.090819 mm/像素，图像右方映射B、下方映射L；先前后后左右，零差轴不动。粗调/撤销1500 RPM、精调1000 RPM，均在 `robot_config.h`。
 
 搜索距离在 `mission_config.h` 的 `MISSION_ALIGN_SEARCH_FORWARD_MM` / `MISSION_ALIGN_SEARCH_LATERAL_MM` 中，当前为前后每段 100 mm、左右每段 50 mm。固定按车体前、后、左、右循环，到达每个目标点后先重新识别；仍未找到才执行下一段，每个站点从前移开始。搜索目标均相对同一个起点，每轮结束停在起点右侧50 mm，下一轮仍使用原起点，不会自动扩大搜索范围。为避免把稳定帧尚未积累完成时的 NONE 当作目标丢失，每次粗调请求先留出 1500 ms 识别窗口；窗口后收到新的 NONE 才移动。没有回复不会因时间经过而触发搜索。搜索持续到取得坐标，没有总次数限制。
@@ -154,9 +156,13 @@ cmake --build --preset Release
 
 独立夹爪15°测试：执行 `cmake --preset GripperTest`、`cmake --build --preset GripperTest`，烧录 `build/GripperTest/yundongv2.hex`。上电直接在PC8（TIM3_CH3，夹爪G）输出15°并保持，不等待App，不启动底座、转盘或比赛流程。测试入口为 `Tests/gripper_test.c`；测试后烧回 `build/Debug/yundongv2.hex` 恢复正常流程。GripperTest与CameraUartTest使用独立构建目录，不能同时启用。
 
+独立循环抓取测试：执行 `cmake --preset GrabTest`、`cmake --build --preset GrabTest`，烧录 `build/GrabTest/yundongv2.hex`。VS Code选择“STM32 · 循环抓取测试（上电执行）”。上电设置初始舵机姿态、等待1500ms并收臂，然后循环执行原料中间位抓取→放入0°车载槽位→底座回180°→等待1000ms；不等待App、视觉、雷达或IMU，底盘不运动。复用`arm_flow.h`的抓取动作和正常机械臂速度；两项等待时间在`robot_config.h`的`ARM_GRAB_TEST_*`中设置。启动前将伸缩、升降放在约定零位，物料放在R110mm/Z−40mm/B180°对应的实际抓取位置，车载槽位姿态为R15mm/Z−10mm/B60°；循环中及时取走槽位物料并补料。电机命令失败时停止机械臂，不自动重试。各独立测试选项互斥；测试后烧回原任务固件。
+
+独立循环放置测试：执行 `cmake --preset PlaceTest`、`cmake --build --preset PlaceTest`，烧录 `build/PlaceTest/yundongv2.hex`。VS Code选择“STM32 · 循环放置测试（上电执行）”。上电准备、等待1500ms并收臂，然后循环执行0°车载槽位取料→粗加工中间位放下→回准备位→等待1000ms；不等待App、视觉、雷达或IMU，底盘不运动。复用`ARM_PUT_STEPS(ARM_AREA_PROCESS,ARM_CENTER)`，放置姿态R120mm、Z−126mm、底座170°；等待时间在`robot_config.h`的`ARM_PLACE_TEST_*`中设置。启动前伸缩、升降位于约定零位，每轮向0°槽位补料并清空放置位置。电机命令失败时停止机械臂，不自动重试。与其他独立测试选项互斥。
+
 输出位于 `build/Debug` 和 `build/Release`：`yundongv2.elf/.hex/.bin`。遇到旧缓存可用 CMake 3.24+ 执行 `cmake --fresh --preset Debug`。TIM1/TIM3 只由 CubeMX 初始化，当前定时器时钟为 240 MHz，PSC=239、ARR=19999，得到 1 MHz 计数和 50 Hz PWM；IOC 已同步。`ServoControl_Init(&htim1,&htim3)` 只绑定 PWM 句柄、检查参数并启动 TIM6 轨迹时钟，不重新初始化 PWM。CubeMX 重新生成后需保留 App 源文件清单、shared 包含路径、TIM6 由舵机模块管理的初始化及中断入口和链接脚本的 DTCM/8 KB 栈配置。
 
-主机测试在 v2 根目录执行 `python tests/run_tests.py`，需要 Python 3 和 GCC。共13组，覆盖总流程嵌入及重复调用自定义动作组、机械臂动作表、流程表校验、完整路线和取放、相机顺序问答、多轴预计耗时、启动入口、舵机插值、Emm/X 相对位置帧、实际底盘接收缓冲及 IMU 初始化/配置/保存。未连接实车，主机测试及固件编译不代表机械可达性和预计耗时已经标定。
+主机测试在 v2 根目录执行 `python tests/run_tests.py`，需要 Python 3 和 GCC。共15组，覆盖总流程嵌入及重复调用自定义动作组、机械臂动作表、流程表校验、完整路线和取放、固定任务码固件、App启动堆叠测试、相机顺序问答、多轴预计耗时、启动入口、舵机插值、Emm/X 相对位置帧、实际底盘接收缓冲及 IMU 初始化/配置/保存。未连接实车，主机测试及固件编译不代表机械可达性和预计耗时已经标定。
 
 ESP32 使用 ESP-IDF 6.0，在 `esp32s3/hello_world` 执行 `idf.py build`。目标为 ESP32-S3、8 MB Flash；按 `build/flash_args` 烧录，不将应用 BIN 直接写到地址 0。
 
@@ -164,6 +170,13 @@ Android 使用 JDK 21、Android SDK 36.1，在 `application` 执行 `./gradlew.b
 
 固定等待参数（ms）：MISSION_MOTION_SETTLE_MS=50、MISSION_STEP_SETTLE_MS=20、ARM_GRIP_SETTLE_MS=100、ARM_RELEASE_SETTLE_MS=50，均在robot_config.h。
 
-机械臂Emm估时与底盘一样，将加速度档位换算为RPM/s；X固件继续按实际下发的200 RPM/s估时。运动RPM保持1500，收臂1000；夹紧后停100 ms，释放后停50 ms。
+机械臂Emm估时与底盘一样，将加速度档位换算为RPM/s；X固件按实际下发的400 RPM/s估时；Emm使用128档。机械臂运动2000 RPM，收臂1500 RPM；夹紧后停100 ms，释放后停50 ms。
 
 纯底盘导航固件：选择 `NavigationOnly` 预设，输出 `stm32/yundongv2/build/NavigationOnly/yundongv2.hex`；不执行相机识别、机械臂或舵机任务。PC仍用 `--robot`，App启动后自动采样规划并走完八段路线。完整任务固件仍为Debug。
+
+免扫码完整任务固件：执行 `cmake --preset FixedQr`、`cmake --build --preset FixedQr`，输出 `stm32/yundongv2/build/FixedQr/yundongv2.hex`。VS Code选择“STM32 · 固定任务码（跳过扫码）”。仍由App启动并等待PC规划路线，走到二维码区后直接加载 `123+321+132+312` 并通知App，不请求相机扫码。第一批颜色123、放置321；第二批颜色132、放置312。后续原料识别、中心/平行校准和机械臂任务照常执行，因此仍需运行视觉程序。任务码集中在 `robot_config.h` 的 `MISSION_FIXED_QR_TEXT`；正常Debug/Release固件仍实际扫码。
+
+
+独立堆叠任务固件：选择`StackTest`预设，输出`stm32/yundongv2/build/StackTest/yundongv2.hex`，VS Code选择“STM32 · 堆叠测试（App启动）”。现有App通过ESP发送START后执行一轮：准备/建立IMU参考/收臂→载入固定任务码→下层三色物块中心校准→平行校准（最多修正3次）→按第一批任务码的同色工位直接堆叠→收臂→撤销校准平移→完成。校准后不再发PICK查询或视觉复核；平行最多修正3次，结束后直接执行夹取。无需PC规划、雷达或扫码，App/ESP协议不变；需要当前视觉程序与IMU，底盘仍参与校准、搜索和回原位。
+
+测试前手动将车放到暂存区附近，伸缩/升降处于约定零位。沿用`MISSION_FIXED_QR_TEXT=123+321+132+312`的第二批顺序：车载0°槽位放红色1，120°槽位放蓝色3，240°槽位放黄色2；下层按第一批放置顺序摆好：图像左红、中黄、右蓝，相机需完成对应HSV标定。执行时直接按任务码将同色物块放到下层上方，堆叠高度沿用`ARM_STACK_HEIGHT=60mm`。本固件点击一次启动只执行一轮，不自动循环；再次启动前重新补料并恢复约定初始姿态。

@@ -2,6 +2,8 @@
 
 唯一实现与上传入口是 `main.py`，MaixVision 安装时只包含此文件。`vision_reference.py` 仅为旧入口转发，不再复制算法。其他历史脚本不参与当前应用，不能同时运行。
 
+圆环识别已借鉴 `circle_v2.py`：Otsu与局部阈值分别筛选完整椭圆、同心分组，按拟合质量加权并细化边缘。保留原图细环，不要求三个中心共线或等间距；完整三组才返回位置，按图像从左到右编号，不读取印刷数字。未找齐时显示 `RING / WAIT 3 TARGETS (n/3)` 和已找到的 `C1/C2` 圆心坐标，找齐后显示 `L/M/R` 坐标；识别任务仍由STM32指令启动，ACK后停止。上传当前 `main.py`，屏幕构建号为 `20261107-vision-cleanup`。检查命令：`python -B yundong_partv2/tests/ring_vision_test.py`。
+
 ## 比赛约定
 
 依据《附件2-1 2027年第十届中国大学生工创大赛智能+》初赛规则第4—8页：
@@ -50,7 +52,7 @@ STM32等待视觉结果期间每1000ms补发相同请求，编号不变，相机
 
 ### 扫码不切换时看哪里
 
-当前主程序构建标识 `20261101-occupied-no-row`。有效请求到达后，屏幕绿色显示 `COMMAND RECEIVED OK` 和完整指令；未收到有效指令时显示 `WAITING FOR VALID COMMAND`。确认画面先于USB打开显示，之后保留在预览画面中。屏幕右上角UP秒数持续增加才表示主循环仍在运行；异常退出会显示VISION ERROR，详细堆栈见MaixVision控制台。底部U2表示实际使用/dev/ttyS2，RX为累计接收字节，OK为有效请求数，BAD为被拒绝的非空/超长帧数，LAST为最近一次有效请求。没有有效请求时额外显示RX RAW原始字节，不能把收到噪声等同于收到扫码命令。
+有效请求到达后，屏幕绿色显示 `COMMAND RECEIVED OK` 和完整指令；未收到有效指令时显示 `WAITING FOR VALID COMMAND`。确认画面先于USB打开显示，之后保留在预览画面中。屏幕右上角UP秒数持续增加才表示主循环仍在运行；异常退出会显示VISION ERROR，详细堆栈见MaixVision控制台。底部U2表示实际使用/dev/ttyS2，RX为累计接收字节，OK为有效请求数，BAD为被拒绝的非空/超长帧数，LAST为最近一次有效请求。没有有效请求时额外显示RX RAW原始字节，不能把收到噪声等同于收到扫码命令。
 
 若App已经显示“读取任务二维码 / QR”，UP持续增加而RX始终为1、LAST:NONE，说明请求没有进入当前程序的接收流。检查STM32的PA0 TX到相机B1 RX方向；相机B0 TX到STM32 PA1 RX是返回方向，单独接通它不会让相机收到请求。两端都使用115200 8N1。RX增加且BAD增加时看RAW与控制台被拒绝帧；LAST:QR#编号后才排查USB打开/读帧或二维码内容。不要把未收到请求的问题归因于HSV标定。
 
@@ -61,16 +63,14 @@ STM32等待视觉结果期间每1000ms补发相同请求，编号不变，相机
 - TABLE/NEAR/OCCUPIED/PICK：统一使用 `~/hsv_thresholds.json` 的六色HSV阈值。空闲长按屏幕1.5秒进入标定，双击后对准中心确认采样，H/S/V按钮调整容差，NEXT保存当前颜色，所有物料模式立即共用；重启后自动读取。TABLE使用已标定颜色中的可见物块；NEAR/PICK缺少目标色标定、OCCUPIED缺少所需三色标定时返回NONE。
 - H采用OpenCV的0至179，S/V为0至255；H容差1至90，S/V容差1至255。红色跨0的区间自动环绕，采样H使用环形平均。黑色默认H容差90、S容差255，主要按亮度V筛选。
 - HSV参数格式为version=2、color_space=HSV，包含hsv_center、hsv_tol和calibrated_colors。旧 `lab_thresholds.json` 不读取、不覆盖，也不能直接作为HSV参数使用；更新后需重新触屏标定。
-- `~/vision_reference_config.json` 仍只保留ROI与material_offset；早期文件中的内嵌hsv字段、TABLE/NEAR固定ROI、near_point等旧字段忽略。RING与QR不依赖颜色标定。
+- `~/vision_reference_config.json` 只读取RING/OCCUPIED/PICK的ROI；旧material_offset、内嵌hsv字段、TABLE/NEAR固定ROI、near_point等字段忽略。RING与QR不依赖颜色标定。
 - 标定中收到新任务立即结束标定，未提交的当前颜色恢复为磁盘值；已NEXT提交的颜色保留。
 - 上电未收到任务、IDLE或当前任务收到ACK后，只显示摄像头画面和串口状态，不运行颜色、圆环或二维码识别，也不发识别结果。收到新任务指令才恢复对应识别；空闲长按1.5秒仍可手动进入HSV标定。OCCUPIED按请求三色识别。
 - 外接补光使用MaixCAM2 PW5/B3的GPIO高电平开、低电平关，任务和标定时开启。按规则只能垂直向下补光，需由实际安装保证。
 
 安装后在设备设置中选择此应用开机自启。本次原料区更新保留CAM/VISION/ACK格式，但需同时更新配套相机和STM32，以配合单块定位和固定粗调距离；多次精调由STM32控制，沿用当前相机协议。
 
-安装包1.0.11修正打包目录，视觉源码保持不变。ZIP必须包含`yyy/main.py`、`yyy/app.yaml`、`yyy/app.png`，不能把这三个文件直接放在ZIP根目录。此前直接放根目录的包不符合官方打包结构。
-
-在项目根目录执行 `python camera/MaixVision/tools/package_app.py` 生成并校验安装包。MaixVision重新打包时应打开包含main.py和app.yaml的 `camera/MaixVision` 目录，不要把dist目录或ZIP当成源码项目。
+当前部署直接上传 `main.py`；`dist` 中的历史安装包不随源码修改自动更新。
 
 ## 验证
 
@@ -84,6 +84,8 @@ STM32等待视觉结果期间每1000ms补发相同请求，编号不变，相机
 
 物料取帧/转换临时异常、空帧或图像类型错误时打印MATERIAL CAMERA retry并保留任务、工位锚点，继续接收指令和重试；失败期间不发NONE，避免误触发搜索。恢复后打印MATERIAL CAMERA recovered并重新积累稳定帧。内存耗尽等其他异常仍报错退出。
 
-圆环任务在画面中显示左/中/右圆心十字及L/M/R(x,y)，单位为原始512×320图像像素；收到ACK后保留最后坐标，切换任务后清除。两批粗加工放完后由STM32按二维码工位直接抓回，无需OCCUPIED/PICK重新定位；空暂存区使用圆环定位；码垛用下层三色物块OCCUPIED校准，随后用PICK查同色物料的实际工位。
+圆环任务在画面中显示左/中/右圆心十字及L/M/R(x,y)，单位为原始512×320图像像素；收到ACK后保留最后坐标，切换任务后清除。两批粗加工放完后由STM32按二维码工位直接抓回，无需OCCUPIED/PICK重新定位；空暂存区使用圆环定位；码垛用下层三色物块OCCUPIED校准，随后按第一批任务码确定同色工位并直接夹取堆叠，不再请求PICK确认。
 
-OCCUPIED（三色物块定位）按实际X坐标排序，不检查三物块共线、水平间距均匀或最小水平间隔。仍要求三种指定颜色各一个、定位点间距至少18像素、轮廓面积比不超过3.5以及连续3帧位置稳定。RING（空工位圆环识别）仍保留排列检查。
+OCCUPIED（三色物块定位）按实际X坐标排序，不检查三物块共线、水平间距均匀或最小水平间隔。仍要求三种指定颜色各一个、定位点间距至少18像素、轮廓面积比不超过3.5以及连续3帧位置稳定。RING同样不检查排列，仍要求三个完整同心环组。PARALLEL直接返回本帧三个中心；STM32最多修正3次，结束后直接继续，不追加视觉复核。
+
+稳定判断统一使用 `Stable`，二维码按字符串连续一致判断，坐标按像素偏差判断；不同任务切换时清空样本，同编号补发不清空。普通运行与标定共用串口接收入口。

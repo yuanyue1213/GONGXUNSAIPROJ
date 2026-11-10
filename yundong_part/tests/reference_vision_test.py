@@ -1,6 +1,5 @@
 """Synthetic images + existing CAM/VISION lifecycle, no Maix hardware needed."""
 import copy
-import ast
 import importlib.util
 import math
 import json
@@ -64,25 +63,21 @@ class ReferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = str(Path(folder) / "new.json")
             self.assertIn("DEFAULT", v.load_config(path)[1])
-            v.save_config(self.cfg, path)
+            Path(path).write_text(json.dumps(self.cfg), encoding="utf-8")
             self.assertEqual(v.load_config(path)[0], self.cfg)
             Path(path).write_text("{}")
             with self.assertRaises(ValueError):
                 v.load_config(path)
         bad = copy.deepcopy(self.cfg)
-        bad["material_offset"] = [100, 0]
+        bad["rois"]["RING"] = [0, 0, 513, 320]
         with self.assertRaises(ValueError):
             v.validate_config(bad)
 
-    def test_original_qr_stability_and_hsv_persistence(self):
-        original = ast.parse((ROOT / "camera/MaixVision/vision_original_20261025.py").read_text(encoding="utf-8"))
-        restored_text = (ROOT / "camera/MaixVision/main.py").read_text(encoding="utf-8")
-        restored = ast.parse(restored_text.replace("ORIGINAL_COLORS.items()", "COLORS.items()").replace("class OriginalStableTarget:", "class StableTarget:"))
-        def functions(tree):
-            return {n.name: ast.dump(n, include_attributes=False) for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
-        expected, actual = functions(original), functions(restored)
-        for name in ("StableTarget",):
-            self.assertEqual(actual[name], expected[name], name)
+    def test_string_stability_and_hsv_persistence(self):
+        tracker = v.Stable()
+        for value in ("first", "first", "second", "second", None, "second", "second"):
+            self.assertIsNone(tracker.update(value))
+        self.assertEqual(tracker.update("second"), "second")
         centers, tolerances, calibrated = self.hsv_data
         with tempfile.TemporaryDirectory() as folder:
             path = str(Path(folder)/"hsv_thresholds.json")
@@ -541,7 +536,7 @@ class ReferenceTests(unittest.TestCase):
             img[:, 335:] = 235
             self.engine.select((50, "RING", 2))
             self.assertEqual(stable(self.engine, img), "VISION,50,NONE\n")
-            self.assertEqual(self.engine.state, "RING / WAIT 3 TARGETS")
+            self.assertEqual(self.engine.state, "RING / WAIT 3 TARGETS (2/3)")
 
     def test_ring_centers_are_drawn_and_cleared_on_next_task(self):
         img = canvas()

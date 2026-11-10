@@ -16,6 +16,12 @@ static void test_validation(void)
     assert(moves==8&&stations==8&&scans==1);
     const FlowStep simple[]={FLOW_PREPARE(),FLOW_IMU_ZERO(),FLOW_MOVE(FLOW_RIGHT,250),FLOW_END()};
     assert(!Flow_Check(simple,FLOW_COUNT(simple)));
+    const FlowStep parallel[]={FLOW_PREPARE(),FLOW_IMU_ZERO(),FLOW_ALIGN(TASK_RING,FLOW_BATCH_1),
+        FLOW_PARALLEL(TASK_RING,FLOW_BATCH_1),FLOW_UNALIGN(),FLOW_END()};
+    assert(!Flow_Check(parallel,FLOW_COUNT(parallel)));
+    const FlowStep bad_parallel[]={FLOW_PREPARE(),FLOW_IMU_ZERO(),FLOW_PARALLEL(TASK_RING,FLOW_BATCH_1),
+        FLOW_ALIGN(TASK_RING,FLOW_BATCH_1),FLOW_UNALIGN(),FLOW_END()};
+    assert(!strcmp(Flow_Check(bad_parallel,FLOW_COUNT(bad_parallel)),"FLOW_ALIGNMENT"));
     const FlowStep alignment[]={FLOW_PREPARE(),FLOW_ALIGN(TASK_RING,FLOW_BATCH_1),
         FLOW_ARM(arm_ready),FLOW_STOW(),FLOW_UNALIGN(),FLOW_END()};
     assert(!Flow_Check(alignment,FLOW_COUNT(alignment)));

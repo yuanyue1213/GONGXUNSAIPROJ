@@ -2,6 +2,78 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "STM32 · 堆叠测试（App启动）",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "deviceName": "STM32H743ZIT6",
+      "deviceCore": "Cortex-M7",
+      "preLaunchTask": "STM32: Build StackTest",
+      "preBuild": "",
+      "runEntry": "main",
+      "serverInterface": "SWD",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${workspaceFolder}/build/StackTest/yundongv2.elf",
+          "symbolFileName": "${workspaceFolder}/build/StackTest/yundongv2.elf"
+        }
+      ]
+    },
+    {
+      "name": "STM32 · 固定任务码（跳过扫码）",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "deviceName": "STM32H743ZIT6",
+      "deviceCore": "Cortex-M7",
+      "preLaunchTask": "STM32: Build FixedQr",
+      "preBuild": "",
+      "runEntry": "main",
+      "serverInterface": "SWD",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${workspaceFolder}/build/FixedQr/yundongv2.elf",
+          "symbolFileName": "${workspaceFolder}/build/FixedQr/yundongv2.elf"
+        }
+      ]
+    },
+    {
+      "name": "STM32 · 循环放置测试（上电执行）",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "deviceName": "STM32H743ZIT6",
+      "deviceCore": "Cortex-M7",
+      "preLaunchTask": "STM32: Build PlaceTest",
+      "preBuild": "",
+      "runEntry": "main",
+      "serverInterface": "SWD",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${workspaceFolder}/build/PlaceTest/yundongv2.elf",
+          "symbolFileName": "${workspaceFolder}/build/PlaceTest/yundongv2.elf"
+        }
+      ]
+    },
+    {
+      "name": "STM32 · 循环抓取测试（上电执行）",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "deviceName": "STM32H743ZIT6",
+      "deviceCore": "Cortex-M7",
+      "preLaunchTask": "STM32: Build GrabTest",
+      "preBuild": "",
+      "runEntry": "main",
+      "serverInterface": "SWD",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${workspaceFolder}/build/GrabTest/yundongv2.elf",
+          "symbolFileName": "${workspaceFolder}/build/GrabTest/yundongv2.elf"
+        }
+      ]
+    },
+    {
       "name": "STM32 · 纯导航测试（无视觉/机械臂）",
       "type": "stlinkgdbtarget",
       "request": "launch",

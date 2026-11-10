@@ -135,6 +135,49 @@ static bool unalign(void)
     align_forward=align_left=0;
     return true;
 }
+/* 先中心搜索/对准，再校平行；旋转后把原位移换到新车体坐标，供UNALIGN撤销。 */
+static bool parallel_align(TaskVisionKind kind,unsigned batch)
+{
+    if(!aligned||!Motion_Servo('B',ARM_ALIGN_BASE,MOTION_BASE_ALIGN_DPS)) return false;
+    if(kind!=TASK_RING&&(kind!=TASK_OCCUPIED||batch>=2U)) return false;
+    unsigned target=kind==TASK_RING?2U:code.colors[batch][0]*100U+code.colors[batch][1]*10U+code.colors[batch][2];
+    float start_yaw=Motion_Yaw();
+    report("WORK","PARALLEL");
+    unsigned moves=0;
+    while(moves<PARALLEL_MAX_MOVES) {
+        if(!CameraLink_Observe(TASK_PARALLEL,target,&reply)) return false;
+        CameraLink_Idle();
+        if(reply.kind==TASK_NONE) continue;
+        const TaskPoint *p=reply.rings;
+        if(p[1].x<=p[0].x||p[2].x<=p[1].x||p[2].x-p[0].x<PARALLEL_MIN_SPAN_PX) continue;
+        double sx=0,sy=0,sxx=0,sxy=0;
+        float lo=p[0].y,hi=p[0].y;
+        for(unsigned i=0;i<3;++i) {
+            sx+=p[i].x; sy+=p[i].y; sxx+=(double)p[i].x*p[i].x; sxy+=(double)p[i].x*p[i].y;
+            lo=fminf(lo,p[i].y); hi=fmaxf(hi,p[i].y);
+        }
+        double slope=(3*sxy-sx*sy)/(3*sxx-sx*sx);
+        bool valid=true;
+        for(unsigned i=0;i<3;++i)
+            if(fabs(p[i].y-(sy/3+slope*(p[i].x-sx/3)))>PARALLEL_MAX_RESIDUAL_PX) valid=false;
+        if(!valid) continue;
+        if(hi-lo<=PARALLEL_Y_TOLERANCE_PX||slope==0) break;
+        bool fine=fabs(slope)<=PARALLEL_FINE_SLOPE;
+        /* 每次按本帧剩余倾角修正，下一次测量自然成为残差补偿；不累积旧角度。 */
+        float degrees=(float)atan(slope)*57.295779513f*PARALLEL_ANGLE_GAIN;
+        degrees=fmaxf(-PARALLEL_MAX_ANGLE_DEG,fminf(PARALLEL_MAX_ANGLE_DEG,degrees));
+        if(PARALLEL_REVERSE) degrees=-degrees;
+        if(!Motion_TurnFine(degrees,fine?PARALLEL_FINE_RPM:PARALLEL_RPM)) return false;
+        ++moves;
+        Motion_Wait(PARALLEL_SETTLE_MS);
+    }
+    /* 校准结束直接继续，不再追加视觉复核；保留回原位必需的坐标换算。 */
+    float angle=(Motion_Yaw()-start_yaw)*0.01745329252f;
+    float f=align_forward,l=align_left;
+    align_forward=cosf(angle)*f-sinf(angle)*l;
+    align_left=sinf(angle)*f+cosf(angle)*l;
+    return Motion_Reference();
+}
 static bool pick_material(ArmArea area,unsigned position,unsigned color)
 {
     const ArmStep approach[]={ARM_PICK_APPROACH(area,position)};
@@ -167,11 +210,10 @@ static bool station(const FlowStep *step)
         unsigned color=code.colors[batch][item],position;
         if(raw) position=1U;
         else if(step->op==FLOW_OP_STACK) {
-            /* 下层物料的三色定位完成后，逐件查询目标色所在左/中/右工位。 */
-            if(!Motion_Servo('B',ARM_ALIGN_BASE,MOTION_BASE_ALIGN_DPS)) return false;
-            if(!CameraLink_Wait(TASK_PICK,color,&reply)) return false;
-            position=reply.position-1U;
-            CameraLink_Idle();
+            /* 按第一批已放置的同色工位直接堆叠，不再请求PICK确认。 */
+            position=0;
+            for(unsigned i=0;i<3U;++i)
+                if(code.colors[0][i]==color) position=3U-code.places[0][i];
         } else {
             /* 加工取回沿用刚才放置的工位，不再次识别或校准。
              * 工位的物理左/中/右编号为 3/2/1；与车载槽位分开。 */
@@ -239,6 +281,9 @@ void MissionRunner_Run(uint32_t id)
             ok=align_station((TaskVisionKind)step->vision,(unsigned)step->batch-1U);
             record_alignment=false;
             break;
+        case FLOW_OP_PARALLEL:
+            ok=parallel_align((TaskVisionKind)step->vision,(unsigned)step->batch-1U);
+            break;
         case FLOW_OP_UNALIGN:
             ok=unalign();
             break;
@@ -256,7 +301,13 @@ void MissionRunner_Run(uint32_t id)
             break;
         case FLOW_OP_SCAN:
             report("SCANNING","QR");
+#ifdef FIXED_QR
+            /* 独立固件只跳过扫码，后续颜色识别和校准照常执行。 */
+            snprintf(reply.text,sizeof(reply.text),"%s",MISSION_FIXED_QR_TEXT);
+            ok=TaskProtocol_Code(reply.text,&reply.code);
+#else
             ok=CameraLink_Wait(TASK_QR,0,&reply);
+#endif
             if(ok) code=reply.code;
             if(ok) {
                 char text[96];

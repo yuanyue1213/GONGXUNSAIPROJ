@@ -16,6 +16,17 @@
  * Each station action handles all three materials in the selected QR batch.
  * Process PUT and GET are separate entries: place all three before retrieval.
  */
+#if defined(STACK_TEST)
+/* 手动摆到暂存区，预装三件物料；由App START执行一次第二批同色堆叠。 */
+static const FlowStep mission_flow[] = {
+    FLOW_PREPARE(), FLOW_IMU_ZERO(), FLOW_STOW(),
+    FLOW_SCAN_TASK(), /* StackTest使用固定任务码，不请求相机扫码。 */
+    FLOW_ALIGN(TASK_OCCUPIED,FLOW_BATCH_2),
+    FLOW_PARALLEL(TASK_OCCUPIED,FLOW_BATCH_2),
+    FLOW_STACK(FLOW_BATCH_2),
+    FLOW_STOW(), FLOW_UNALIGN(), FLOW_END(),
+};
+#else
 static const FlowStep mission_flow[] = {
     /* 起步准备：建立姿态参考并收拢机械臂，再进入路线。 */
     FLOW_PREPARE(),
@@ -35,6 +46,7 @@ static const FlowStep mission_flow[] = {
     /* 第一批加工：放完原地取回，最后统一收臂、撤销校准。 */
     FLOW_NAV(NAV_COARSE_1),
     FLOW_ALIGN(TASK_RING,FLOW_BATCH_1),
+    FLOW_PARALLEL(TASK_RING,FLOW_BATCH_1),
     FLOW_PROCESS_PUT(FLOW_BATCH_1),
     FLOW_PROCESS_GET(FLOW_BATCH_1),
     FLOW_STOW(),
@@ -43,6 +55,7 @@ static const FlowStep mission_flow[] = {
     /* 第一批送往暂存区。 */
     FLOW_NAV(NAV_TEMP_1),
     FLOW_ALIGN(TASK_RING,FLOW_BATCH_1),
+    FLOW_PARALLEL(TASK_RING,FLOW_BATCH_1),
     FLOW_STORE(FLOW_BATCH_1),
     FLOW_STOW(),
     FLOW_UNALIGN(),
@@ -57,6 +70,7 @@ static const FlowStep mission_flow[] = {
     /* 第二批加工：放完原地取回，最后统一收臂、撤销校准。 */
     FLOW_NAV(NAV_COARSE_2),
     FLOW_ALIGN(TASK_RING,FLOW_BATCH_2),
+    FLOW_PARALLEL(TASK_RING,FLOW_BATCH_2),
     FLOW_PROCESS_PUT(FLOW_BATCH_2),
     FLOW_PROCESS_GET(FLOW_BATCH_2),
     FLOW_STOW(),
@@ -65,6 +79,7 @@ static const FlowStep mission_flow[] = {
     /* 第二批送往码垛区，用下层三色物块定位。 */
     FLOW_NAV(NAV_STACK),
     FLOW_ALIGN(TASK_OCCUPIED,FLOW_BATCH_2),
+    FLOW_PARALLEL(TASK_OCCUPIED,FLOW_BATCH_2),
     FLOW_STACK(FLOW_BATCH_2),
     FLOW_STOW(),
     FLOW_UNALIGN(),
@@ -73,4 +88,5 @@ static const FlowStep mission_flow[] = {
     FLOW_NAV(NAV_RETURN),
     FLOW_END(),
 };
+#endif
 #endif

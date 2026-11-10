@@ -52,6 +52,7 @@ bool Motion_Reference(void)
     heading=wait_imu().yaw;
     return true;
 }
+float Motion_Yaw(void) { return wait_imu().yaw; }
 static bool wheels_enable(void)
 {
     for(uint8_t id=1;id<=4;++id) {
@@ -98,10 +99,18 @@ bool Motion_Move(char direction,float mm,uint16_t rpm)
     Motion_Wait(duration);
     return true;
 }
-bool Motion_Turn(char direction,float degrees,uint16_t rpm)
+bool Motion_TurnPulses(int32_t pulses,uint16_t rpm)
 {
-    if((direction!='L'&&direction!='R')||degrees<=0||degrees>360||!rpm||rpm>STEPPER_MAX_SPEED_RPM) return false;
-    heading+=direction=='L'?-degrees:degrees;
+    if(!pulses||pulses==INT32_MIN||!rpm||rpm>STEPPER_MAX_SPEED_RPM) return false;
+    double target[4]; int32_t wheel[4];
+    RobotChassis_WheelTargets(0,0,pulses,target);
+    for(unsigned i=0;i<4;++i) wheel[i]=(int32_t)target[i];
+    if(!wheels_enable()||ZDT_Motor_MoveWheelSynchronous(wheel,rpm,MISSION_WHEEL_ACCEL)!=HAL_OK) return false;
+    Motion_Wait(emm_duration(fabs((double)pulses)/MISSION_WHEEL_PPR,rpm,MISSION_WHEEL_ACCEL));
+    return true;
+}
+static bool turn_to(float target,uint16_t rpm,float tolerance,bool fine)
+{
     if(!wheels_enable()) return false;
     /* 保留参考项目的 IMU 闭环转向思想，但串口命令放在前台，避免在中断内等待 UART。
      * 等待达到目标，不设总超时，也不轮询电机状态；IMU 失联时先停轮再等待恢复。 */
@@ -114,21 +123,20 @@ bool Motion_Turn(char direction,float degrees,uint16_t rpm)
             stable=false;
             s=wait_imu();
         }
-        float error=heading-s.yaw;
-        if(fabsf(error)<=TURN_ANGLE_TOLERANCE) {
+        float error=target-s.yaw;
+        if(fabsf(error)<=tolerance&&fabsf(s.rate)<=TURN_RATE_TOLERANCE) {
             if(!stable) {
                 if(!wheels_stop()) return false;
                 stable_since=HAL_GetTick();
                 stable=true;
             }
-            /* 进入角度窗口先停车；角速度尚大时保持停车并重新计稳定时间。 */
-            if(fabsf(s.rate)>TURN_RATE_TOLERANCE) stable_since=HAL_GetTick();
-            else if((uint32_t)(HAL_GetTick()-stable_since)>=TURN_STABLE_MS) return true;
+            if((uint32_t)(HAL_GetTick()-stable_since)>=TURN_STABLE_MS) return true;
         } else {
             stable=false;
-            /* 大误差高速、小误差低速；越过目标窗口后按误差方向修正。 */
-            uint16_t speed_rpm=fabsf(error)<=TURN_SLOW_ANGLE&&rpm>TURN_SLOW_RPM?TURN_SLOW_RPM:rpm;
-            float output=copysignf((float)speed_rpm,error);
+            /* 旧版PD：误差越小转速越低，角速度项抑制过冲；rpm仅为上限。 */
+            float output=fmaxf(-(float)rpm,fminf(rpm,TURN_KP*error-TURN_KD*s.rate));
+            /* 小角度PD输出会被取整为0；未达标时至少1 RPM，正常转向保持原逻辑。 */
+            if(fine&&fabsf(error)>tolerance&&fabsf(output)<1.0f) output=copysignf(1.0f,error);
             double target[4]; int16_t speed[4];
             RobotChassis_WheelTargets(0,0,-output,target);
             for(unsigned i=0;i<4;++i) speed[i]=(int16_t)lround(target[i]);
@@ -136,6 +144,17 @@ bool Motion_Turn(char direction,float degrees,uint16_t rpm)
         }
         Motion_Wait(TURN_LOOP_MS);
     }
+}
+bool Motion_Turn(char direction,float degrees,uint16_t rpm)
+{
+    if((direction!='L'&&direction!='R')||degrees<=0||degrees>360||!rpm||rpm>STEPPER_MAX_SPEED_RPM) return false;
+    heading+=direction=='L'?-degrees:degrees;
+    return turn_to(heading,rpm,TURN_ANGLE_TOLERANCE,false);
+}
+bool Motion_TurnFine(float degrees,uint16_t rpm)
+{
+    if(!isfinite(degrees)||degrees==0||fabsf(degrees)>PARALLEL_MAX_ANGLE_DEG||!rpm||rpm>STEPPER_MAX_SPEED_RPM) return false;
+    return turn_to(wait_imu().yaw+degrees,rpm,PARALLEL_TURN_TOLERANCE_DEG,true);
 }
 #if !defined(NAVIGATION_ONLY)
 static bool servo_start(char channel,uint16_t target,uint16_t dps,uint32_t *duration)

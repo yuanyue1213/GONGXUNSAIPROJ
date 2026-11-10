@@ -2,6 +2,66 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "STM32: Configure StackTest",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "StackTest",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build StackTest",
+      "type": "cmake",
+      "command": "build",
+      "preset": "StackTest",
+      "dependsOn": "STM32: Configure StackTest",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "STM32: Configure FixedQr",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "FixedQr",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build FixedQr",
+      "type": "cmake",
+      "command": "build",
+      "preset": "FixedQr",
+      "dependsOn": "STM32: Configure FixedQr",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "STM32: Configure PlaceTest",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "PlaceTest",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build PlaceTest",
+      "type": "cmake",
+      "command": "build",
+      "preset": "PlaceTest",
+      "dependsOn": "STM32: Configure PlaceTest",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "STM32: Configure GrabTest",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "GrabTest",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build GrabTest",
+      "type": "cmake",
+      "command": "build",
+      "preset": "GrabTest",
+      "dependsOn": "STM32: Configure GrabTest",
+      "problemMatcher": ["$gcc"]
+    },
+    {
       "label": "STM32: Configure NavigationOnly",
       "type": "cmake",
       "command": "configure",

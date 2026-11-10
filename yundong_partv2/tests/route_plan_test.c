@@ -62,7 +62,8 @@ void StartLink_Publish(const char *line)
     snprintf(last,sizeof(last),"%s",line);
     unsigned long id; unsigned scan,x,h; int y;
     if(sscanf(line,"SCAN_READY,%lu,%u,%u,%d,%u",&id,&scan,&x,&y,&h)==5) {
-        assert(x==2125&&y==(zone==2?2085:315));
+        assert(x==(scan==1?2125U:2112U));
+        assert(y==(zone==2?(scan==1?2072:2085):(scan==1?398:385)));
         assert(h==(scan==1?(zone==2?180U:0U):270U));
         assert(scan==scan_count+1&&moves==2&&turns==scan-1); ++scan_count;
         char ack[64]; snprintf(ack,sizeof(ack),"SCAN_OK,%lu,%u",id,scan);

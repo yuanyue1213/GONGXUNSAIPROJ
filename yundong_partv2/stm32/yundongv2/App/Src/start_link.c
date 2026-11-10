@@ -52,7 +52,9 @@ static void command(void)
         status(id,"ERROR","DUPLICATE_START");
         return;
     }
+#if !defined(STACK_TEST)
     if(!RoutePlan_CanStart()) { status(id,"ERROR","PC_NOT_READY"); return; }
+#endif
     last_start=id;
     pending=id;
 }

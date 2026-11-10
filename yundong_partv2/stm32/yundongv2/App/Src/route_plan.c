@@ -116,15 +116,19 @@ bool RoutePlan_Command(const char *frame)
     }
     reply("NAV_ERROR","FORMAT"); return true;
 }
-static void scan(unsigned number,int y,unsigned heading)
+static void scan(unsigned number,unsigned heading)
 {
+    unsigned edge=number==1U?NAV_SCAN_1_EDGE_MM:NAV_SCAN_2_EDGE_MM;
+    unsigned right=number==1U?NAV_SCAN_1_RIGHT_MM:NAV_SCAN_2_RIGHT_MM;
+    unsigned x=NAV_GRID_LEFT_MM+NAV_GRID_WIDTH_MM-right;
+    int y=(int)(NAV_GRID_BOTTOM_MM+(run_zone==2U?NAV_GRID_HEIGHT_MM-edge:edge));
     scan_wait=number;
     uint32_t sent=HAL_GetTick()-1000U;
     while(scan_wait) {
         if((uint32_t)(HAL_GetTick()-sent)>=1000U) {
             char line[96];
             snprintf(line,sizeof(line),"SCAN_READY,%lu,%u,%u,%d,%u\n",(unsigned long)run_id,number,
-                     NAV_START_X_MM-NAV_ENTRY_LEFT_MM,y,heading);
+                     x,y,heading);
             StartLink_Publish(line); sent=HAL_GetTick();
         }
         StartLink_Service();
@@ -136,10 +140,9 @@ bool RoutePlan_Prepare(uint32_t run)
     run_id=run; run_zone=zone; ready=receiving=waiting_path=false; received=count=0;
     if(!Motion_Move(zone==2U?'R':'L',NAV_ENTRY_LEFT_MM,MISSION_ROUTE_RPM)||
        !Motion_Move('F',NAV_ENTRY_FORWARD_MM,MISSION_ROUTE_RPM)) return false;
-    int y=zone==2U?NAV_TOP_Y_MM-NAV_ENTRY_FORWARD_MM:NAV_BOTTOM_Y_MM+NAV_ENTRY_FORWARD_MM;
-    Motion_Wait(NAV_SCAN_SETTLE_MS); scan(1,y,zone==2U?180U:0U);
+    Motion_Wait(NAV_SCAN_SETTLE_MS); scan(1,zone==2U?180U:0U);
     if(!Motion_Turn(zone==2U?'R':'L',90,MISSION_TURN_RPM)) return false;
-    Motion_Wait(NAV_SCAN_SETTLE_MS); scan(2,y,270);
+    Motion_Wait(NAV_SCAN_SETTLE_MS); scan(2,270);
     uint32_t sent=HAL_GetTick()-1000U;
     while(!ready) {
         if((uint32_t)(HAL_GetTick()-sent)>=1000U) { reply("NAV_WAIT","PLAN"); sent=HAL_GetTick(); }

@@ -42,8 +42,8 @@ void CameraLink_Init(UART_HandleTypeDef *uart,CameraService service)
 /* 每个新任务使用新编号；补发保持编号，结果和确认都匹配该编号。 */
 static bool send_request(TaskVisionKind kind,unsigned target,bool repeat)
 {
-    static const char *names[]={"QR","RING","IDLE","TABLE","OCCUPIED","PICK","NEAR"};
-    if(!s_uart||(unsigned)kind>TASK_NEAR) return false;
+    static const char *names[]={"QR","RING","IDLE","TABLE","OCCUPIED","PICK","NEAR","PARALLEL"};
+    if(!s_uart||(unsigned)kind>TASK_PARALLEL) return false;
     if(kind!=TASK_QR&&kind!=TASK_NONE&&!TaskProtocol_Target(kind,target)) return false;
     if(!repeat&&++s_request==0) s_request=1;
     char frame[80]; int n;
@@ -79,7 +79,7 @@ bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *result)
 }
 bool CameraLink_Observe(TaskVisionKind kind,unsigned target,TaskVision *result)
 {
-    if(kind!=TASK_TABLE&&kind!=TASK_OCCUPIED&&kind!=TASK_RING) return false;
+    if(kind!=TASK_TABLE&&kind!=TASK_OCCUPIED&&kind!=TASK_RING&&kind!=TASK_PARALLEL) return false;
     return wait_result(kind,target,result,true);
 }
 void CameraLink_Idle(void)

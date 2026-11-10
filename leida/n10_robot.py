@@ -9,7 +9,30 @@ import time
 import zlib
 
 from n10_planner import center, lidar_to_pose, plan_mission
-from n10_grid import START_CELLS
+from n10_grid import GRID_RIGHT_MM, GRID_BOTTOM_MM, GRID_TOP_MM
+
+SCAN_EDGE_MM = (248, 235)
+SCAN_RIGHT_MM = (275, 288)
+# 两次实测点只相差一次原地转90°，雷达位于旋转中心前方13 mm。
+RADAR_FORWARD_MM = 13.
+# PC首扫位置标定：右上启动按现场调整，向地图下方修正225mm。
+# STM32报告的停车位置仍用于协议核对，修正只作用于首扫点云投影。
+SCAN1_RADAR_OFFSET_MM = {2: (0., -225.)}
+
+
+def scan_pose(zone, number):
+    edge = SCAN_EDGE_MM[number-1]
+    heading = (180. if zone == 2 else 0.) if number == 1 else 270.
+    return (float(GRID_RIGHT_MM-SCAN_RIGHT_MM[number-1]),
+            float(GRID_TOP_MM-edge if zone == 2 else GRID_BOTTOM_MM+edge), heading)
+
+
+def car_pose(radar):
+    return (*lidar_to_pose(-RADAR_FORWARD_MM, 0, radar), radar[2])
+
+
+def radar_pose(car):
+    return (*lidar_to_pose(RADAR_FORWARD_MM, 0, car), car[2])
 
 
 def initial_pose(zone):
@@ -39,7 +62,7 @@ class Step:
 
 
 def route_steps(plan, scan_pose):
-    """Connect actual scan position to grid, then return to the original start area."""
+    """Connect the car center after Scan2 to grid, then return to the start area."""
     if plan.start[2] != 3 or scan_pose[2] != 270:
         raise ValueError('Hardware plan must start facing map left')
     pose = tuple(scan_pose)
@@ -56,7 +79,7 @@ def route_steps(plan, scan_pose):
         result.append(Step(leg, kind, direction, amount, pose, index))
 
     gx, gy = center(*plan.start[:2])
-    # At heading270, body-right is map-up. Lower start315 -> grid center350.
+    # At heading270, body-right is map-up; use car center, not radar center.
     add(1, 'MOVE', 'F' if gx < pose[0] else 'B', abs(gx-pose[0]))
     add(1, 'MOVE', 'R' if gy > pose[1] else 'L', abs(gy-pose[1]))
     leg = 1
@@ -146,6 +169,14 @@ class RobotLink:
         self.sent_at = 0.
         self.frame_index = 0
 
+    @property
+    def radar_pose(self):
+        pose = radar_pose(self.pose)
+        if self.scan_key is not None and self.scan_key[1] == 1:
+            dx, dy = SCAN1_RADAR_OFFSET_MM.get(self.zone, (0., 0.))
+            return pose[0]+dx, pose[1]+dy, pose[2]
+        return pose
+
     def set_zone(self, zone):
         if zone not in (1, 2):
             raise ValueError('Invalid start zone')
@@ -204,11 +235,10 @@ class RobotLink:
                 self.pending = None
             self.active = True
             pose = tuple(map(float, fields[3:6]))
-            expected = (2125., 2085. if self.zone == 2 else 315.,
-                        (180. if self.zone == 2 else 0.) if scan == 1 else 270.)
+            expected = scan_pose(self.zone, scan)
             if not all(math.isfinite(a) and abs(a-b) <= .1 for a, b in zip(pose, expected)):
                 raise ValueError('Scan pose/start configuration mismatch')
-            self.scan_key, self.pose = key, pose
+            self.scan_key, self.pose = key, car_pose(pose)
             self.collector = FullScan(first_sequence)
             self.status = f'Scan {scan}/2: waiting for complete 360 deg'
         elif fields[0] == 'NAV_ACK' and len(fields) == 3 and int(fields[1]) == self.run and self.pending:
@@ -250,10 +280,12 @@ class RobotLink:
         mapped = []
         for angle, distance, intensity in complete:
             rad = math.radians(angle)
-            x, y = lidar_to_pose(distance*math.cos(rad), distance*math.sin(rad), self.pose)
+            x, y = lidar_to_pose(distance*math.cos(rad), distance*math.sin(rad), self.radar_pose)
             mapped.append(dict(x_mm=x, y_mm=y, angle_deg=angle, distance_mm=distance, intensity=intensity))
         self.recording.capture(mapped, dict(zone=self.zone, run=run, scan=number,
-            car_radar_pose_mm_deg=list(self.pose), first_sequence=self.collector.floor))
+            car_pose_mm_deg=list(self.pose), radar_pose_mm_deg=list(self.radar_pose),
+            reported_radar_pose_mm_deg=list(radar_pose(self.pose)),
+            radar_forward_mm=RADAR_FORWARD_MM, first_sequence=self.collector.floor))
         self.completed.add(self.scan_key)
         self.collector = None
         self.send(f'SCAN_OK,{run},{number}\n')

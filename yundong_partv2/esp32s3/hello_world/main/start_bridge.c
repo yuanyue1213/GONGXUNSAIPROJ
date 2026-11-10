@@ -86,6 +86,8 @@ static void lidar_task(void *arg)
         }
         int n=uart_read_bytes(LIDAR_UART,bytes,sizeof(bytes),pdMS_TO_TICKS(10));
         for(int i=0;i<n;++i) n10_feed(&parser,bytes[i],send_frame);
+        /* UART持续有数据时read也可能立即返回，显式阻塞让Idle任务运行。 */
+        vTaskDelay(1);
     }
 }
 void app_main(void)
@@ -132,7 +134,7 @@ void app_main(void)
                 memset(&network[k],0,sizeof(Frame));
             }
         }
-        uint8_t bytes[256]; int n=uart_read_bytes(BRIDGE_UART,bytes,sizeof(bytes),pdMS_TO_TICKS(5));
+        uint8_t bytes[256]; int n=uart_read_bytes(BRIDGE_UART,bytes,sizeof(bytes),0);
         for(int i=0;i<n;++i) if(take(&serial,(char)bytes[i])) {
             char line[224]; unsigned long id; unsigned number;
             if(sscanf(serial.data,"SCAN_READY,%lu,%u",&id,&number)==2) {
@@ -162,5 +164,8 @@ void app_main(void)
                 }
             }
         }
+        /* 100Hz下pdMS_TO_TICKS(5)==0，不能依赖5ms串口等待避免忙循环。
+         * 即使无客户端或串口持续来数据，每轮也至少休眠一个调度tick。 */
+        vTaskDelay(1);
     }
 }

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "zdt_motor.h"
+#include "robot_config.h"
 #include "zdt_motor_transport.h"
 
 static UART_HandleTypeDef uart;
@@ -39,8 +40,8 @@ int main(void)
     reset(); int16_t speed[4]={60,-60,0,1500};
     assert(ZDT_Motor_SetWheelSpeedsSynchronous(speed,240)==HAL_OK&&count==5);
     assert(frames[0][1]==0xF6&&frames[2][3]==0&&frames[2][4]==0&&frames[3][3]==5&&frames[3][4]==0xDC);
-    reset(); speed[3]=1501; assert(ZDT_Motor_SetWheelSpeedsSynchronous(speed,240)==HAL_ERROR&&count==0);
-    assert(ZDT_Motor_MoveWheelSynchronous(p,1501,10)==HAL_ERROR&&count==0);
+    reset(); speed[3]=STEPPER_MAX_SPEED_RPM+1U; assert(ZDT_Motor_SetWheelSpeedsSynchronous(speed,240)==HAL_ERROR&&count==0);
+    assert(ZDT_Motor_MoveWheelSynchronous(p,STEPPER_MAX_SPEED_RPM+1U,10)==HAL_ERROR&&count==0);
     reset(); fail_id=2; assert(ZDT_Motor_MoveWheelSynchronous(p,300,10)!=HAL_OK&&count==2);
     reset(); mode=2; assert(ZDT_Motor_Stop(1)!=HAL_OK&&count==1);
     reset(); mode=3; assert(ZDT_Motor_Enable(1)!=HAL_OK);

@@ -13,7 +13,7 @@ const char *Flow_Check(const FlowStep *steps,size_t count)
         bool movement=s->op==FLOW_OP_MOVE||s->op==FLOW_OP_TURN||s->op==FLOW_OP_NAV;
         if(!movement&&(s->direction||s->amount)) return "FLOW_PARAMETERS";
         if(s->op!=FLOW_OP_ARM&&(s->arm||s->arm_count)) return "FLOW_PARAMETERS";
-        if(s->op!=FLOW_OP_ALIGN&&s->vision) return "FLOW_PARAMETERS";
+        if(s->op!=FLOW_OP_ALIGN&&s->op!=FLOW_OP_PARALLEL&&s->vision) return "FLOW_PARAMETERS";
         switch(s->op) {
         case FLOW_OP_PREPARE:
             if(i) return "FLOW_PREPARE";
@@ -54,6 +54,12 @@ const char *Flow_Check(const FlowStep *steps,size_t count)
             if(s->vision!=TASK_TABLE&&s->vision!=TASK_OCCUPIED&&s->vision!=TASK_RING) return "FLOW_VISION";
             if(s->vision!=TASK_RING&&!scanned) return "FLOW_TASK_CODE";
             aligned=true;
+            break;
+        case FLOW_OP_PARALLEL:
+            if(!aligned) return "FLOW_ALIGNMENT";
+            if(!reference) return "FLOW_REFERENCE";
+            if(s->vision!=TASK_RING&&s->vision!=TASK_OCCUPIED) return "FLOW_VISION";
+            if(s->vision==TASK_OCCUPIED&&!scanned) return "FLOW_TASK_CODE";
             break;
         case FLOW_OP_UNALIGN:
             if(!aligned) return "FLOW_ALIGNMENT";

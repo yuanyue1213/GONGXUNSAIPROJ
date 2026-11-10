@@ -11,6 +11,8 @@ cases = {
     'mission_arm_test': ['flow_check.c', 'arm_flow.c'],
     'arm_flow_test': ['arm_flow.c'],
     'sequential_mission_test': ['mission_runner.c', 'flow_check.c', 'arm_flow.c'],
+    'fixed_qr_mission_test': ['mission_runner.c', 'flow_check.c', 'arm_flow.c'],
+    'stack_mission_test': ['mission_runner.c', 'flow_check.c', 'arm_flow.c', 'start_link.c'],
     'sequential_motion_test': ['motion_control.c'],
     'start_link_test': ['start_link.c'],
     'camera_link_test': ['camera_link.c'],
@@ -21,9 +23,14 @@ cases = {
     'imu_link_test': ['imu_link.c'],
 }
 for name, modules in cases.items():
-    sources = [root/'tests'/f'{name}.c', *[app/'Src'/f for f in modules]]
+    source = 'sequential_mission_test' if name == 'fixed_qr_mission_test' else name
+    flags = ['-DFIXED_QR=1'] if name == 'fixed_qr_mission_test' else []
+    if name == 'stack_mission_test':
+        flags = ['-DSTACK_TEST=1', '-DFIXED_QR=1']
+    sources = [root/'tests'/f'{source}.c', *[app/'Src'/f for f in modules]]
     exe = out/f'{name}.exe'
     subprocess.run(['gcc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    *flags,
                     '-I'+str(root/'tests'), '-I'+str(app/'Inc'), '-I'+str(root/'shared'),
                     *map(str, sources), '-lm', '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True, timeout=30)

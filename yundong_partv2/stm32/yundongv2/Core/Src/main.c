@@ -130,6 +130,14 @@ int main(void)
   /* 独立夹爪测试：上电直接输出15度，不启动比赛、串口任务或其他舵机。 */
   extern _Noreturn void GripperTest_Run(TIM_HandleTypeDef *tim1,TIM_HandleTypeDef *tim3);
   GripperTest_Run(&htim1,&htim3);
+#elif defined(GRAB_TEST)
+  /* 独立抓取测试：上电循环抓取并存入0度槽位，不等待App或视觉。 */
+  extern _Noreturn void GrabTest_Run(UART_HandleTypeDef *uart,TIM_HandleTypeDef *tim1,TIM_HandleTypeDef *tim3);
+  GrabTest_Run(&huart2,&htim1,&htim3);
+#elif defined(PLACE_TEST)
+  /* 独立放置测试：上电循环从0度槽位取料，放到粗加工中间位。 */
+  extern _Noreturn void PlaceTest_Run(UART_HandleTypeDef *uart,TIM_HandleTypeDef *tim1,TIM_HandleTypeDef *tim3);
+  PlaceTest_Run(&huart2,&htim1,&htim3);
 #endif
   /* 五路串口：USART1 底盘，USART2 机械臂，UART5 接收 ESP32 命令，USART3 接 JY901S，
    * UART4 PA1 接收摄像头坐标。MX 初始化失败会进入 Error_Handler。 */

@@ -51,7 +51,7 @@ def draw_toolbar(image, player, start_zone, hardware=False):
     image[:] = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
 
 
-def draw_route(image, player, start_zone, map_pixel, pose=None):
+def draw_route(image, player, start_zone, map_pixel, pose=None, radar_pose=None):
     import cv2
     import numpy as np
     if player and player.plan:
@@ -77,11 +77,12 @@ def draw_route(image, player, start_zone, map_pixel, pose=None):
     corners = np.array([middle+forward*a+right*b for a, b in [(17, 12), (17, -12), (-17, -12), (-17, 12)]], dtype=np.int32)
     cv2.fillConvexPoly(image, corners, (70, 220, 100), cv2.LINE_AA)
     cv2.polylines(image, [corners], True, (230, 255, 230), 1, cv2.LINE_AA)
-    # Cyan side is the car's right; concentric center marks its rigidly mounted radar.
+    # Cyan side is the car's right; radar can be offset from the rotation center.
     right_a, right_b = middle-forward*12+right*13, middle+forward*12+right*13
     cv2.line(image, tuple(right_a.astype(int)), tuple(right_b.astype(int)), (255, 220, 70), 3, cv2.LINE_AA)
-    cv2.circle(image, (cx, cy), 5, (30, 30, 30), -1, cv2.LINE_AA)
-    cv2.circle(image, (cx, cy), 5, (255, 230, 80), 1, cv2.LINE_AA)
+    radar_center = map_pixel(*(pose if radar_pose is None else radar_pose)[:2])
+    cv2.circle(image, radar_center, 5, (30, 30, 30), -1, cv2.LINE_AA)
+    cv2.circle(image, radar_center, 5, (255, 230, 80), 1, cv2.LINE_AA)
     # Bright arrow marks the front, including while the vehicle reverses.
     nose = middle+forward*25
     cv2.arrowedLine(image, (cx, cy), tuple(nose.astype(int)), (50, 60, 250), 3, cv2.LINE_AA, tipLength=.4)

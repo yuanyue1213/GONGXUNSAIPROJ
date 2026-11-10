@@ -11,6 +11,11 @@
 
 static unsigned motion,raw_waits,pick_waits,cards,turntables,stows,references,stops,requests;
 static unsigned expected_leg=1;
+static unsigned parallel_reads,parallel_turns;
+static bool parallel_not_converging;
+static bool parallel_converging;
+static unsigned parallel_sample;
+static unsigned yaw_reads;
 static unsigned start_cards,stack_puts;
 static bool stowing;
 static bool fail_undo;
@@ -26,10 +31,21 @@ static float align_dx,align_dy;
 static unsigned misses,search_axis,search_step,search_moves,coarse_queries;
 static TaskVisionKind alignment_kind;
 static char last_report[160];
+static unsigned task_codes;
 void StartLink_Publish(const char *line)
 {
     snprintf(last_report,sizeof(last_report),"%s",line);
+    if(strncmp(line,"TASK,",5U)==0) {
+        assert(expected_leg==2U); /* 走完NAV_QR才加载/读取任务码。 */
+#ifdef FIXED_QR
+        assert(strstr(line,"," MISSION_FIXED_QR_TEXT "\n"));
+#else
+        assert(strstr(line,",156+123+516+231\n"));
+#endif
+        ++task_codes;
+    }
     if(strstr(line,"CARD_DONE")) ++cards;
+    if(strstr(line,",PARALLEL\n")) parallel_sample=0;
     if(strstr(line,",STARTING,")) {
         start_cards=cards; stack_puts=0;
         aligning=false; searching=false; undoing=false;
@@ -59,16 +75,33 @@ bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *result)
     ++requests;
     char frame[100];
     switch(kind) {
-    case TASK_QR: snprintf(frame,sizeof(frame),"VISION,999,QR,156+123+516+231"); break;
+    case TASK_PARALLEL: {
+        ++parallel_reads;
+        unsigned sample=parallel_sample++;
+        if(parallel_not_converging) sample=5U;
+        const char *points=sample==0?"100,150,100,150,300,150":
+            sample==2||parallel_not_converging?"100,150,200,151.5,300,153":
+            sample==3?"100,153,200,151.5,300,150":
+            sample==1?"100,150,200,160,300,150":"100,150,200,150,300,150";
+        if(parallel_converging) {
+            static const char *residuals[]={"100,140,200,150,300,160",
+                "100,148,200,150,300,152", "100,149.4,200,150,300,150.6"};
+            assert(sample<3U); /* 第三次修正后不应再请求结果。 */
+            points=residuals[sample];
+        }
+        snprintf(frame,sizeof(frame),"VISION,999,PARALLEL,%u,%s",target,points);
+        break;
+    }
+    case TASK_QR:
+#ifdef FIXED_QR
+        assert(false); /* 固定任务码固件不能向相机请求扫码。 */
+#endif
+        snprintf(frame,sizeof(frame),"VISION,999,QR,156+123+516+231"); break;
     case TASK_NEAR:
         assert(arm_r==110&&arm_z==0&&arm_base==180); /* 先等到位，再伸出下降。 */
         ++raw_waits; snprintf(frame,sizeof(frame),"VISION,999,NEAR,%u,2",target); break;
     case TASK_PICK:
-        assert(arm_base==180&&cards-start_cards>=21U&&cards-start_cards<24U);
-        ++pick_waits;
-        /* 模拟下层5/1/6位于图像位置3/1/2，区别于二维码推断位置。 */
-        snprintf(frame,sizeof(frame),"VISION,999,PICK,%u,%u",target,target==5U?3U:target==1U?1U:2U);
-        break;
+        ++pick_waits; assert(false); return false;
     default: {
         assert(aligning&&align_samples<=MISSION_ALIGN_FINE_MAX_MOVES+1U);
         if(!align_samples) {
@@ -90,7 +123,12 @@ bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *result)
                 dy=fine_one_axis?1:align_samples%2U?3:-2;
             } else { dx=1; dy=-1; } /* 误差恰好1像素也应通过。 */
         }
-        if(!zero_offsets&&kind==TASK_TABLE&&align_samples==0&&target==516U) {
+#ifdef FIXED_QR
+        const unsigned second_colors=132U;
+#else
+        const unsigned second_colors=516U;
+#endif
+        if(!zero_offsets&&kind==TASK_TABLE&&align_samples==0&&target==second_colors) {
             dx=-30; dy=10; /* 第二批原料验证相反方向的固定粗调。 */
         }
         align_dx=(float)dx; align_dy=(float)dy;
@@ -104,6 +142,7 @@ bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *result)
 }
 bool CameraLink_Observe(TaskVisionKind kind,unsigned target,TaskVision *result)
 {
+    if(kind==TASK_PARALLEL) return CameraLink_Wait(kind,target,result);
     ++coarse_queries;
     if(searching) {
         static const float targets[4][2]={{100,0},{-100,0},{0,50},{0,-50}};
@@ -118,6 +157,28 @@ bool CameraLink_Observe(TaskVisionKind kind,unsigned target,TaskVision *result)
 bool ServoControl_SetAngle(char c,uint16_t a) { (void)c; (void)a; return true; }
 void Motion_Wait(uint32_t ms) { (void)ms; }
 bool Motion_Reference(void) { ++references; return true; }
+float Motion_Yaw(void)
+{
+    if(yaw_reads++%2U==0U) return 0;
+    /* 人工90°反馈检验回原位的轴变换，不用理想轮子模型模拟实机。 */
+    float f=forward_offset;
+    forward_offset=-left_offset; left_offset=f;
+    return 90;
+}
+bool Motion_TurnFine(float degrees,uint16_t rpm)
+{
+    if(parallel_converging) {
+        static const float expected[]={5.710593f,1.145763f,.343771f};
+        assert(parallel_sample>=1U&&parallel_sample<=3U);
+        assert(fabsf(degrees-expected[parallel_sample-1U])<.0001f);
+        assert(rpm==(parallel_sample==1U?PARALLEL_RPM:PARALLEL_FINE_RPM));
+        ++parallel_turns; return true;
+    }
+    assert(rpm==PARALLEL_FINE_RPM);
+    float expected=0.859372f; /* atan(3/200)转换为度；正斜率应右转。 */
+    assert(fabsf(degrees-(parallel_not_converging?expected:(parallel_turns%2U?-expected:expected)))<.0001f);
+    ++parallel_turns; return true;
+}
 int32_t Motion_Radial(void) { ++stows; stowing=true; return 110; }
 bool ServoControl_GetAngle(char c,uint16_t *v) { assert(c=='B'); *v=248; return true; }
 bool RoutePlan_Prepare(uint32_t id) { (void)id; return true; }
@@ -186,8 +247,12 @@ bool Motion_MoveAll(int32_t r,int32_t z,uint16_t b,uint16_t rpm)
     assert(r>=0&&r<=1850&&z<=0&&b<=360&&rpm==(stowing?MOTION_STOW_RPM:MOTION_ARM_RPM));
     if(cards-start_cards>=21U&&cards-start_cards<24U&&z<0&&r!=ARM_SLOT_R) {
         static const StationPose poses[]=ARM_STACK_POSES;
-        /* 跟随PICK实际返回的3/1/2，不按二维码推断下层位置。 */
-        static const unsigned positions[]={2,0,1};
+        /* 第二批顺序对应第一批同色工位，不再询问视觉。 */
+#ifdef FIXED_QR
+        static const unsigned positions[]={0,2,1};
+#else
+        static const unsigned positions[]={1,2,0};
+#endif
         const StationPose *p=&poses[positions[cards-start_cards-21U]];
         assert(r==p->put_r&&z==p->z+ARM_STACK_HEIGHT&&b==p->base);
         ++stack_puts;
@@ -219,10 +284,12 @@ int main(void)
     }
     assert(direct_gets==2);
     MissionRunner_Run(100);
+    assert(task_codes==1U);
     assert(!MissionRunner_Running()&&strstr(last_report,"AUTO,100,DONE,8,3,24,24,S2"));
     assert(alignment_reads==24&&alignment_moves==36);
     assert(stack_puts==3);
-    assert(motion==8&&cards==24&&raw_waits==6&&pick_waits==3&&turntables==24&&references==1&&stows==7&&stops==0);
+    assert(motion==8&&cards==24&&raw_waits==6&&pick_waits==0&&turntables==24&&references==5&&stows==7&&stops==0);
+    assert(parallel_reads==20&&parallel_turns==8);
     expected_leg=1; fail_motion=true;
     MissionRunner_Run(101); assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==1);
     expected_leg=1; fail_motion=false; fail_camera=true;
@@ -270,5 +337,17 @@ int main(void)
     /* 六组均三次后仍超差：不做第四次，继续全部取放并正常撤销净位移。 */
     assert(alignment_reads==reads+30&&alignment_moves==moves+48&&stack_puts==3);
     assert(fabsf(forward_offset)<0.001f&&fabsf(left_offset)<0.001f);
+    /* 平行始终未达标：每站只转3次，不复核，直接完成全部取放。 */
+    expected_leg=1; fine_corrections=2; parallel_not_converging=true;
+    unsigned turns_before=parallel_turns,parallel_before=parallel_reads;
+    old_stops=stops;
+    MissionRunner_Run(113);
+    assert(strstr(last_report,",DONE,")&&!MissionRunner_Running()&&stops==old_stops);
+    assert(parallel_turns==turns_before+12U&&parallel_reads==parallel_before+12U);
+    expected_leg=1; yaw_reads=0; parallel_not_converging=false; parallel_converging=true;
+    turns_before=parallel_turns; parallel_before=parallel_reads; old_stops=stops;
+    MissionRunner_Run(114);
+    assert(strstr(last_report,",DONE,")&&!MissionRunner_Running()&&stops==old_stops);
+    assert(parallel_turns==turns_before+12U&&parallel_reads==parallel_before+12U);
     puts("PASS: 8 downloaded navigation legs, 1-pixel fine alignment, up to 3 corrections with final verification, one-axis skip, continue after nonconvergence, 24 transfers and net-offset undo");
 }

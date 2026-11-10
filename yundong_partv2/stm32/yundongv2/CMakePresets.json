@@ -10,6 +10,22 @@
             "cacheVariables": {}
         },
         {
+            "name": "FixedQr",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "FIXED_QR": "ON"
+            }
+        },
+        {
+            "name": "StackTest",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "STACK_TEST": "ON"
+            }
+        },
+        {
             "name": "NavigationOnly",
             "inherits": "default",
             "cacheVariables": {
@@ -33,6 +49,22 @@
             }
         },
         {
+            "name": "GrabTest",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "GRAB_TEST": "ON"
+            }
+        },
+        {
+            "name": "PlaceTest",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "PLACE_TEST": "ON"
+            }
+        },
+        {
             "name": "GripperTest",
             "inherits": "default",
             "cacheVariables": {
@@ -50,8 +82,24 @@
     ],
     "buildPresets": [
         {
+            "name": "StackTest",
+            "configurePreset": "StackTest"
+        },
+        {
+            "name": "FixedQr",
+            "configurePreset": "FixedQr"
+        },
+        {
             "name": "NavigationOnly",
             "configurePreset": "NavigationOnly"
+        },
+        {
+            "name": "GrabTest",
+            "configurePreset": "GrabTest"
+        },
+        {
+            "name": "PlaceTest",
+            "configurePreset": "PlaceTest"
         },
         {
             "name": "GripperTest",
