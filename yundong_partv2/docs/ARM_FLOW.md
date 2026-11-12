@@ -74,7 +74,7 @@ static const ArmStep my_store_action[]={
 | `ARM_ALIGN_BASE` | 视觉对准时底座角度 |
 | `ARM_PREPARE_STEPS` | 启动时直接设置三路舵机输出 |
 | `ARM_PICK_APPROACH(area,pos)` | 声明区域、张爪、到工位准备位置 |
-| `ARM_PICK_FINISH(area,pos)` | 声明区域、伸出下降、闭爪、抬升、放到车载槽位 |
+| `ARM_PICK_FINISH(area,pos)` | 声明区域、伸出下降、闭爪、抬升、沿工位方向收回准备位，再转向车载槽位放料 |
 | `ARM_PUT_STEPS(area,pos)` | 声明区域、从车载槽位取出、放到工位或码垛 |
 | `ARM_STOW_STEPS(r,b)` | 保持当前伸缩和底座先抬升，再收臂和转盘回零 |
 
@@ -103,6 +103,7 @@ ARM_WAIT(500),                    // 等待 500 ms
     ARM_SERVO('G',0), \
     ARM_WAIT(700), \
     ARM_ABOVE_PICK(pos), \
+    ARM_TO_READY(pos), \
     ARM_MOVE(110,0,57), \
     ARM_MOVE(110,-36,57), \
     ARM_SERVO('G',30), \
@@ -110,6 +111,6 @@ ARM_WAIT(500),                    // 等待 500 ms
     ARM_MOVE(110,0,57)
 ```
 
-两批原料都先张爪并到准备位（11 mm、0 mm、180°），在 APPROACH 和 FINISH 之间等待相机 `NEAR`，确认后才伸出下降并闭爪。加工取回不等待 NEAR，准备位之后直接伸出下降。扫码、选工位和视觉对准仍由站点流程负责。
+两批原料都先张爪并到准备位（11 mm、0 mm、180°），在 APPROACH 和 FINISH 之间等待相机 `NEAR`，确认后才伸出下降并闭爪。加工取回不等待 NEAR，准备位之后直接伸出下降。两类抓取均先保持伸缩和底座抬升到Z=0，再保持工位底座角度收回R=11 mm准备位，之后转向60°车载槽位、伸缩到R=15 mm并下降到Z=-10 mm放料。扫码、选工位和视觉对准仍由站点流程负责。
 
 `ArmFlow_Run()` 只循环执行数组，任一动作返回失败就立即退出。多轴仍按预计最长时间等待，不增加到位反馈或动作总超时。保留先抬升再收臂的机械避障顺序；修改姿态后需要实车验证。

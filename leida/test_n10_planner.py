@@ -217,11 +217,12 @@ class PlannerTests(unittest.TestCase):
             bound_poses.append(vehicle_pose(player, args[-1]))
             zones.append((args[4], args[-1]))
             return real_render(*args, **kwargs)
-        events = iter(('plan', None, 'pause', 'pause', 'replay', 'top', 'bottom', 'keytop', 'quit'))
+        events = iter(('plan', None, 'pause', 'pause', 'replay', 'top', 'bottom', 'keytop', 'keybottom', 'quit'))
         def wait(delay):
             event = next(events)
             if event == 'quit': return ord('q')
-            if event == 'keytop': return ord('2')
+            if event == 'keytop': return ord('1')
+            if event == 'keybottom': return ord('2')
             if event:
                 _, rect, _ = next(b for b in BUTTONS if b[0] == event)
                 x0, y0, x1, y1 = rect
@@ -246,6 +247,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(bound_poses[6], (*center(1, 5), 180.))
         self.assertEqual(bound_poses[7], (*center(5, 5), 0.))
         self.assertEqual(bound_poses[8], (*center(1, 5), 180.))
+        self.assertEqual(bound_poses[9], (*center(5, 5), 0.))
         recorder.capture.assert_not_called()
 
 

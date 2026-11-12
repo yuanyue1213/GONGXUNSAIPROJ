@@ -1,21 +1,36 @@
 #include "robot_config.h"
-/* 当前底盘只使用 Emm 的 FD/F6 同步命令。ACK 表示接收成功，不表示到位。 */
+/* 底盘使用Emm协议；FD/F6的ACK表示接收成功，不表示到位。 */
 #include "zdt_motor.h"
 #include "zdt_motor_transport.h"
 #include <string.h>
 #define FRAME_TAIL 0x6BU
 static UART_HandleTypeDef *s_uart;
+#if defined(FORWARD_TEST)
+static bool tx_sent;
+static uint32_t tx_finished;
+#endif
 /* 左前、右前、右后、左后：软件正值的实际电机方向，0=CW，1=CCW。 */
 static const uint8_t forward[4]=CHASSIS_FORWARD_POLARITY;
 void ZDT_Motor_Init(UART_HandleTypeDef *uart)
 {
     s_uart=uart; ZDT_Transport_Start(uart);
+#if defined(FORWARD_TEST)
+    tx_sent=false;
+#endif
 }
 static HAL_StatusTypeDef send_raw(const uint8_t *frame,uint16_t length)
 {
     if(!s_uart) return HAL_ERROR;
+#if defined(FORWARD_TEST)
+    /* UART逐条发送，给驱动器处理上一帧留出时间。 */
+    while(tx_sent&&(uint32_t)(HAL_GetTick()-tx_finished)<FORWARD_TEST_FRAME_GAP_MS) {}
+#endif
     ZDT_Transport_PrepareTx();
-    return HAL_UART_Transmit(s_uart,(uint8_t *)frame,length,MOTOR_ACK_TIMEOUT_MS);
+    HAL_StatusTypeDef result=HAL_UART_Transmit(s_uart,(uint8_t *)frame,length,MOTOR_ACK_TIMEOUT_MS);
+#if defined(FORWARD_TEST)
+    tx_finished=HAL_GetTick(); tx_sent=true;
+#endif
+    return result;
 }
 static HAL_StatusTypeDef send_command(const uint8_t *frame,uint16_t length)
 {
@@ -52,6 +67,19 @@ static HAL_StatusTypeDef trigger(void)
     const uint8_t frame[]={0,0xFF,0x66,FRAME_TAIL};
     return send_raw(frame,sizeof(frame));
 }
+#if defined(FORWARD_TEST)
+HAL_StatusTypeDef ZDT_Motor_StopWheelsImmediate(void)
+{
+    const uint8_t broadcast[]={0,0xFE,0x98,0,FRAME_TAIL};
+    bool ok=send_raw(broadcast,sizeof(broadcast))==HAL_OK;
+    /* 出错时先广播停机，再逐台发立即停止；不等待ACK，失败也继续停其他轮子。 */
+    for(uint8_t id=1;id<=4;++id) {
+        const uint8_t frame[]={id,0xFE,0x98,0,FRAME_TAIL};
+        if(send_raw(frame,sizeof(frame))!=HAL_OK) ok=false;
+    }
+    return ok?HAL_OK:HAL_ERROR;
+}
+#endif
 HAL_StatusTypeDef ZDT_Motor_MoveWheelSynchronous(const int32_t pulses[4],uint16_t rpm,uint8_t acceleration)
 {
     if(!pulses||!rpm||rpm>STEPPER_MAX_SPEED_RPM) return HAL_ERROR;

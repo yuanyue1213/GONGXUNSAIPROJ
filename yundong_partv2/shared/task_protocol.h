@@ -45,6 +45,19 @@ static inline bool TaskProtocol_Pixel(const char **cursor, float *value, char de
     return true;
 }
 
+/* 两色补点的外侧工位可能落在画面外；仅平行校准坐标允许有限外推。 */
+static inline bool TaskProtocol_ParallelPixel(const char **cursor,float *value,char delimiter,uint32_t limit)
+{
+    const char *p=*cursor;
+    bool negative=*p=='-';
+    if(negative) ++p;
+    float magnitude;
+    if(!TaskProtocol_Pixel(&p,&magnitude,delimiter,2U*limit)) return false;
+    *value=negative?-magnitude:magnitude;
+    if(*value< -(float)limit) return false;
+    *cursor=p; return true;
+}
+
 typedef struct { uint8_t colors[2][3], places[2][3]; } TaskCode;
 static inline bool TaskProtocol_Code(const char *s, TaskCode *code)
 {
@@ -69,7 +82,7 @@ static inline bool TaskProtocol_Code(const char *s, TaskCode *code)
     return true;
 }
 typedef enum { TASK_QR, TASK_RING, TASK_NONE, TASK_TABLE, TASK_OCCUPIED, TASK_PICK, TASK_NEAR, TASK_PARALLEL } TaskVisionKind;
-/* Three distinct task-code color IDs, e.g. 156 = red, black, light_blue. */
+/* Three distinct color IDs. OCCUPIED及其PARALLEL按第一批工位左、中、右顺序。 */
 static inline bool TaskProtocol_TableColors(uint32_t target)
 {
     unsigned a=target/100U,b=target/10U%10U,c=target%10U;
@@ -85,7 +98,7 @@ typedef struct {
     uint32_t request, target, position;
     TaskVisionKind kind;
     TaskPoint center;
-    TaskPoint rings[3]; /* PARALLEL：同一帧、从左到右的三个圆心。 */
+    TaskPoint rings[3]; /* PARALLEL：从左到右的三工位，可含两色推算的画面外点。 */
     TaskCode code;
     char text[16];
 } TaskVision;
@@ -104,8 +117,8 @@ static inline bool TaskProtocol_Vision(const char *s, TaskVision *v)
         v->kind=TASK_PARALLEL; p+=9;
         if(!TaskProtocol_U32(&p,&v->target,',')||!TaskProtocol_Target(v->kind,v->target)) return false;
         for(unsigned i=0;i<3U;++i)
-            if(!TaskProtocol_Pixel(&p,&v->rings[i].x,',',512U)||
-               !TaskProtocol_Pixel(&p,&v->rings[i].y,i==2U?'\0':',',320U)) return false;
+            if(!TaskProtocol_ParallelPixel(&p,&v->rings[i].x,',',512U)||
+               !TaskProtocol_ParallelPixel(&p,&v->rings[i].y,i==2U?'\0':',',320U)) return false;
         return true;
     }
     if(strncmp(p,"PICK,",5U)==0||strncmp(p,"NEAR,",5U)==0) {

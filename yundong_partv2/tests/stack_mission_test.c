@@ -11,7 +11,7 @@
 static UART_HandleTypeDef uart;
 static uint8_t *rx;
 static unsigned puts_count,picks,stops,starts,grips;
-static unsigned parallel_frames,chassis_moves;
+static unsigned parallel_frames,chassis_moves,center_reads;
 static float offset;
 static int32_t radial;
 static uint16_t base;
@@ -28,7 +28,7 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *u,uint8_t *p,uint16_t n,
 {
     (void)timeout; assert(u==&uart&&n<sizeof(status));
     memcpy(status,p,n); status[n]=0;
-    if(strstr(status,",STARTING,")) ++starts;
+    if(strstr(status,",STARTING,")) { ++starts; center_reads=0; }
     return HAL_OK;
 }
 void RoutePlan_Init(void) {}
@@ -47,28 +47,31 @@ bool CameraLink_ErrorCallback(UART_HandleTypeDef *u) { (void)u; return false; }
 void CameraLink_Idle(void) {}
 bool CameraLink_Observe(TaskVisionKind kind,unsigned target,TaskVision *v)
 {
-    assert(target==132U);
+    assert(target==123U); /* 第一批123放321：左、中、右颜色为123。 */
     *v=(TaskVision){.kind=kind,.target=target,.center={260,160},
                    .rings={{100,160},{256,160},{400,160}}};
     if(kind==TASK_PARALLEL) ++parallel_frames;
-    assert(kind==TASK_OCCUPIED||kind==TASK_PARALLEL); return true;
+    assert(kind==TASK_PARALLEL); return true; /* 堆叠不请求粗调。 */
 }
 bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *v)
 {
     if(kind==TASK_OCCUPIED) {
-        assert(target==132U);
-        *v=(TaskVision){.kind=kind,.target=target,.center={256,160}}; return true;
+        assert(target==123U); /* 第一批123放321：左、中、右颜色为123。 */
+        *v=(TaskVision){.kind=kind,.target=target,.center={center_reads++==0?260:256,160}}; return true;
     }
     ++picks; assert(false); return false; /* 校准后不能再请求视觉确认。 */
 }
 bool Motion_Reference(void) { return true; }
 float Motion_Yaw(void) { return 0; }
-bool Motion_Move(char d,float mm,uint16_t rpm)
+bool Motion_MoveAt(char d,float mm,uint16_t rpm,uint8_t acceleration)
 {
+    assert(acceleration==MISSION_ALIGN_ACCEL);
     assert((d=='B'||d=='F')&&fabsf(mm-4*MISSION_ALIGN_MM_PER_PIXEL)<.001f);
-    assert(rpm==MISSION_ALIGN_COARSE_RPM||rpm==MISSION_UNALIGN_RPM);
+    assert(rpm==MISSION_ALIGN_FINE_RPM||rpm==MISSION_UNALIGN_RPM);
     offset+=d=='F'?mm:-mm; ++chassis_moves; return true;
 }
+bool Motion_Move(char d,float mm,uint16_t rpm)
+{ (void)d; (void)mm; (void)rpm; assert(false); return false; }
 bool Motion_Turn(char d,float deg,uint16_t rpm)
 { (void)d; (void)deg; (void)rpm; assert(false); return false; }
 bool Motion_TurnPulses(int32_t p,uint16_t rpm)
@@ -76,6 +79,8 @@ bool Motion_TurnPulses(int32_t p,uint16_t rpm)
 bool Motion_TurnFine(float degrees,uint16_t rpm)
 { (void)degrees; (void)rpm; assert(false); return false; }
 void Motion_Stop(void) { ++stops; }
+bool Motion_RestoreYaw(float yaw,uint16_t rpm)
+{ (void)yaw; (void)rpm; assert(false); return false; } /* 水平画面没有转动，不恢复。 */
 int32_t Motion_Radial(void) { return radial; }
 bool ServoControl_GetAngle(char c,uint16_t *a) { assert(c=='B'); *a=base; return true; }
 bool ServoControl_SetAngle(char c,uint16_t a) { if(c=='B') base=a; return true; }

@@ -29,6 +29,7 @@
 #include "servo_control.h"
 #include "camera_link.h"
 #include "imu_link.h"
+#include "task_display.h"
 
 /* USER CODE END Includes */
 
@@ -66,6 +67,7 @@ UART_HandleTypeDef huart3;
 void SystemClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
+#if !defined(SCREEN_TEST)
 static void MX_USART1_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USART2_UART_Init(void);
@@ -73,6 +75,7 @@ static void MX_TIM1_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_UART4_Init(void);
 static void MX_UART5_Init(void);
+#endif
 /* USER CODE BEGIN PFP */
 
 
@@ -114,6 +117,10 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+#if defined(SCREEN_TEST)
+  extern _Noreturn void ScreenTest_Run(void);
+  ScreenTest_Run();
+#else
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   MX_USART2_UART_Init();
@@ -130,6 +137,14 @@ int main(void)
   /* 独立夹爪测试：上电直接输出15度，不启动比赛、串口任务或其他舵机。 */
   extern _Noreturn void GripperTest_Run(TIM_HandleTypeDef *tim1,TIM_HandleTypeDef *tim3);
   GripperTest_Run(&htim1,&htim3);
+#elif defined(TURNTABLE_TEST)
+  /* 独立转盘测试：上电直接输出0度并保持，不启动其他舵机或任务。 */
+  extern _Noreturn void TurntableTest_Run(TIM_HandleTypeDef *tim1,TIM_HandleTypeDef *tim3);
+  TurntableTest_Run(&htim1,&htim3);
+#elif defined(BASE_TEST)
+  /* 独立底座测试：上电直接输出配置角度并保持，不执行其他动作。 */
+  extern _Noreturn void BaseTest_Run(TIM_HandleTypeDef *tim1,TIM_HandleTypeDef *tim3);
+  BaseTest_Run(&htim1,&htim3);
 #elif defined(GRAB_TEST)
   /* 独立抓取测试：上电循环抓取并存入0度槽位，不等待App或视觉。 */
   extern _Noreturn void GrabTest_Run(UART_HandleTypeDef *uart,TIM_HandleTypeDef *tim1,TIM_HandleTypeDef *tim3);
@@ -143,6 +158,7 @@ int main(void)
    * UART4 PA1 接收摄像头坐标。MX 初始化失败会进入 Error_Handler。 */
   ZDT_Motor_Init(&huart1);
 #if !defined(NAVIGATION_ONLY)
+  TaskDisplay_Init();
   LiftMotor_Init(&huart2);
   if(!ServoControl_Init(&htim1,&htim3)) Error_Handler();
 #endif
@@ -150,8 +166,10 @@ int main(void)
 #if !defined(NAVIGATION_ONLY)
   CameraLink_Init(&huart4, StartLink_Service);
 #endif
+#if !defined(FORWARD_TEST)
   ImuLink_Init(&huart3);
   ImuLink_StartConfiguration();
+#endif
   Motion_Init(StartLink_Service);
 
 
@@ -170,6 +188,7 @@ int main(void)
     StartLink_Tick();
   }
   /* USER CODE END 3 */
+#endif /* SCREEN_TEST */
 }
 
 /**
@@ -235,6 +254,7 @@ void SystemClock_Config(void)
   * @param None
   * @retval None
   */
+#if !defined(SCREEN_TEST)
 static void MX_TIM1_Init(void)
 {
 
@@ -577,6 +597,7 @@ static void MX_USART3_UART_Init(void)
   * @param None
   * @retval None
   */
+#endif /* 非屏幕测试的串口和PWM初始化 */
 static void MX_GPIO_Init(void)
 {
   /* USER CODE BEGIN MX_GPIO_Init_1 */

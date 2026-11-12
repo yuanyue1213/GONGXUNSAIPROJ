@@ -1,4 +1,4 @@
-/* 底盘 USART1：只保留使能、同步位置、同步轮速及立即停止。 */
+/* 底盘 USART1：使能、同步位置、轮速及立即停止。 */
 #ifndef ZDT_MOTOR_H
 #define ZDT_MOTOR_H
 #include "stm32h7xx_hal.h"
@@ -9,4 +9,7 @@ HAL_StatusTypeDef ZDT_Motor_Enable(uint8_t id);
 HAL_StatusTypeDef ZDT_Motor_MoveWheelSynchronous(const int32_t pulses[4],uint16_t rpm,uint8_t acceleration);
 HAL_StatusTypeDef ZDT_Motor_SetWheelSpeedsSynchronous(const int16_t rpm[4],uint8_t acceleration);
 HAL_StatusTypeDef ZDT_Motor_Stop(uint8_t id);
+#if defined(FORWARD_TEST)
+HAL_StatusTypeDef ZDT_Motor_StopWheelsImmediate(void);
+#endif
 #endif

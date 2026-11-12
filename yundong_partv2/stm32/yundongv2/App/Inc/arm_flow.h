@@ -13,12 +13,14 @@
     ARM_SERVO('G',ARM_GRIP_OPEN), \
     ARM_TO_READY(pos)
 
+/* 抓起抬升后，先沿工位方向收回准备位，再转向车载槽位。 */
 #define ARM_PICK_FINISH(area,pos) \
     ARM_AREA(area), \
     ARM_TO_PICK(pos), \
     ARM_SERVO('G',ARM_GRIP_CLOSED), \
     ARM_WAIT(ARM_GRIP_SETTLE_MS), \
     ARM_ABOVE_PICK(pos), \
+    ARM_TO_READY(pos), \
     ARM_MOVE(ARM_SLOT_R,0,ARM_SLOT_BASE), \
     ARM_MOVE(ARM_SLOT_R,ARM_SLOT_Z,ARM_SLOT_BASE), \
     ARM_SERVO('G',ARM_GRIP_OPEN), \

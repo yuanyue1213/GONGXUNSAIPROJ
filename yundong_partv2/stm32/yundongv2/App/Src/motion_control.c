@@ -13,7 +13,7 @@
 
 static MotionService service;
 static int32_t radial, height;
-static float heading;
+static float heading; /* 初始参考航向＋累计路线指令转角；视觉微调不改此目标。 */
 
 void Motion_Init(MotionService callback)
 {
@@ -62,10 +62,14 @@ static bool wheels_enable(void)
 }
 static bool wheels_stop(void)
 {
+#if defined(FORWARD_TEST)
+    return ZDT_Motor_StopWheelsImmediate()==HAL_OK;
+#else
     bool ok=true;
     for(uint8_t id=1;id<=4;++id)
         if(ZDT_Motor_Stop(id)!=HAL_OK) ok=false;
     return ok;
+#endif
 }
 /* Emm加速度是0..255档位，不能直接作为RPM/s；0表示无加减速。 */
 static uint32_t emm_duration(double revolutions,uint16_t rpm,uint8_t acceleration)
@@ -76,6 +80,10 @@ static uint32_t emm_duration(double revolutions,uint16_t rpm,uint8_t acceleratio
         Motion_EstimateMs(revolutions,rpm,20000.0/(256.0-acceleration));
 }
 bool Motion_Move(char direction,float mm,uint16_t rpm)
+{
+    return Motion_MoveAt(direction,mm,rpm,MISSION_WHEEL_ACCEL);
+}
+bool Motion_MoveAt(char direction,float mm,uint16_t rpm,uint8_t acceleration)
 {
     if(mm<0||!rpm||rpm>STEPPER_MAX_SPEED_RPM) return false;
     bool lateral=direction=='L'||direction=='R';
@@ -91,11 +99,11 @@ bool Motion_Move(char direction,float mm,uint16_t rpm)
     }
     for(unsigned i=0;i<4;++i) wheel[i]=(int32_t)target[i];
     if(!wheels_enable()) return false;
-    if(ZDT_Motor_MoveWheelSynchronous(wheel,rpm,MISSION_WHEEL_ACCEL)!=HAL_OK) return false;
+    if(ZDT_Motor_MoveWheelSynchronous(wheel,rpm,acceleration)!=HAL_OK) return false;
     double revolutions=(double)pulses/MISSION_WHEEL_PPR;
     /* Emm档位不是RPM/s：每(256-acc)*50us改变1RPM，acc=0为无加减速。
      * 见X42S手册Emm相对位置控制章节；不能把档位10当成10RPM/s。 */
-    uint32_t duration=emm_duration(revolutions,rpm,MISSION_WHEEL_ACCEL);
+    uint32_t duration=emm_duration(revolutions,rpm,acceleration);
     Motion_Wait(duration);
     return true;
 }
@@ -148,6 +156,7 @@ static bool turn_to(float target,uint16_t rpm,float tolerance,bool fine)
 bool Motion_Turn(char direction,float degrees,uint16_t rpm)
 {
     if((direction!='L'&&direction!='R')||degrees<=0||degrees>360||!rpm||rpm>STEPPER_MAX_SPEED_RPM) return false;
+    /* 累加上次目标，不把上次实际停止角度的误差带入下一次。 */
     heading+=direction=='L'?-degrees:degrees;
     return turn_to(heading,rpm,TURN_ANGLE_TOLERANCE,false);
 }
@@ -157,6 +166,12 @@ bool Motion_TurnFine(float degrees,uint16_t rpm)
     return turn_to(wait_imu().yaw+degrees,rpm,PARALLEL_TURN_TOLERANCE_DEG,true);
 }
 #if !defined(NAVIGATION_ONLY)
+/* 三次平行修正的累计角度可能超过单次15度，直接恢复原绝对航向。 */
+bool Motion_RestoreYaw(float yaw,uint16_t rpm)
+{
+    if(!isfinite(yaw)||!rpm||rpm>STEPPER_MAX_SPEED_RPM) return false;
+    return turn_to(yaw,rpm,PARALLEL_TURN_TOLERANCE_DEG,true);
+}
 static bool servo_start(char channel,uint16_t target,uint16_t dps,uint32_t *duration)
 {
     uint16_t current;

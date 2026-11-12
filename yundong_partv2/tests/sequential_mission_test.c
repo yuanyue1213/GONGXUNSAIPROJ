@@ -12,10 +12,13 @@
 static unsigned motion,raw_waits,pick_waits,cards,turntables,stows,references,stops,requests;
 static unsigned expected_leg=1;
 static unsigned parallel_reads,parallel_turns;
+static unsigned yaw_restores;
+static bool fail_restore;
 static bool parallel_not_converging;
 static bool parallel_converging;
 static unsigned parallel_sample;
-static unsigned yaw_reads;
+static float current_yaw;
+static bool needs_restore;
 static unsigned start_cards,stack_puts;
 static bool stowing;
 static bool fail_undo;
@@ -50,6 +53,7 @@ void StartLink_Publish(const char *line)
         start_cards=cards; stack_puts=0;
         aligning=false; searching=false; undoing=false;
         forward_offset=left_offset=0;
+        current_yaw=0; needs_restore=false;
     }
     if(strstr(line,",RUNNING,")||strstr(line,",TURNING,")) {
         assert(fabsf(forward_offset)<0.001f&&fabsf(left_offset)<0.001f);
@@ -76,6 +80,13 @@ bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *result)
     char frame[100];
     switch(kind) {
     case TASK_PARALLEL: {
+        if(target!=2U) {
+#ifdef FIXED_QR
+            assert(target==123U); /* 第一批123+321，不能使用第二批取料顺序132。 */
+#else
+            assert(target==651U); /* 第一批156+123，不能使用第二批取料顺序516。 */
+#endif
+        }
         ++parallel_reads;
         unsigned sample=parallel_sample++;
         if(parallel_not_converging) sample=5U;
@@ -104,23 +115,32 @@ bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *result)
         ++pick_waits; assert(false); return false;
     default: {
         assert(aligning&&align_samples<=MISSION_ALIGN_FINE_MAX_MOVES+1U);
+        unsigned coarse_samples=kind==TASK_TABLE?1U:0U;
+        unsigned fine_pass=align_samples>=coarse_samples?align_samples-coarse_samples:0U;
         if(!align_samples) {
             unsigned corrections=fine_corrections>MISSION_ALIGN_FINE_MAX_MOVES?
                 MISSION_ALIGN_FINE_MAX_MOVES:fine_corrections;
-            required_samples=zero_offsets?2U:corrections+2U;
+            required_samples=coarse_samples+1U+(zero_offsets?0U:corrections);
         }
         alignment_kind=kind;
+        if(kind==TASK_OCCUPIED) {
+#ifdef FIXED_QR
+            assert(target==123U);
+#else
+            assert(target==651U);
+#endif
+        }
         assert(align_samples<required_samples);
         if(align_samples) assert(align_axes==expected_axes);
         if(fail_fine&&align_samples==1) return false;
-        if(fail_refresh&&kind==TASK_OCCUPIED&&align_samples==fine_corrections+1U) return false;
+        if(fail_refresh&&kind==TASK_OCCUPIED&&fine_pass==fine_corrections) return false;
         const char *name=kind==TASK_TABLE?"TABLE":kind==TASK_OCCUPIED?"OCCUPIED":"RING";
         int dx=0,dy=0;
         if(!zero_offsets) {
-            if(align_samples==0) { dx=30; dy=-10; }
-            else if(align_samples<=fine_corrections) {
-                dx=align_samples%2U?-2:4;
-                dy=fine_one_axis?1:align_samples%2U?3:-2;
+            if(align_samples==0&&coarse_samples) { dx=30; dy=-10; }
+            else if(fine_pass<fine_corrections) {
+                dx=fine_pass%2U?4:-2;
+                dy=fine_one_axis?1:fine_pass%2U?-2:3;
             } else { dx=1; dy=-1; } /* 误差恰好1像素也应通过。 */
         }
 #ifdef FIXED_QR
@@ -132,7 +152,7 @@ bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *result)
             dx=-30; dy=10; /* 第二批原料验证相反方向的固定粗调。 */
         }
         align_dx=(float)dx; align_dy=(float)dy;
-        float tolerance=align_samples?MISSION_ALIGN_FINE_TOLERANCE_PX:0;
+        float tolerance=align_samples==0&&coarse_samples?0:MISSION_ALIGN_FINE_TOLERANCE_PX;
         expected_axes=(fabsf(align_dx)>tolerance)+(fabsf(align_dy)>tolerance);
         snprintf(frame,sizeof(frame),"VISION,999,%s,%u,%d,%d",name,target,256+dx,160+dy);
         ++align_samples; ++alignment_reads; align_axes=0; break;
@@ -143,6 +163,7 @@ bool CameraLink_Wait(TaskVisionKind kind,unsigned target,TaskVision *result)
 bool CameraLink_Observe(TaskVisionKind kind,unsigned target,TaskVision *result)
 {
     if(kind==TASK_PARALLEL) return CameraLink_Wait(kind,target,result);
+    assert(kind==TASK_TABLE); /* 粗加工、暂存和堆叠不能进入粗调/搜索。 */
     ++coarse_queries;
     if(searching) {
         static const float targets[4][2]={{100,0},{-100,0},{0,50},{0,-50}};
@@ -159,14 +180,11 @@ void Motion_Wait(uint32_t ms) { (void)ms; }
 bool Motion_Reference(void) { ++references; return true; }
 float Motion_Yaw(void)
 {
-    if(yaw_reads++%2U==0U) return 0;
-    /* 人工90°反馈检验回原位的轴变换，不用理想轮子模型模拟实机。 */
-    float f=forward_offset;
-    forward_offset=-left_offset; left_offset=f;
-    return 90;
+    return current_yaw;
 }
 bool Motion_TurnFine(float degrees,uint16_t rpm)
 {
+    current_yaw+=degrees; needs_restore=true;
     if(parallel_converging) {
         static const float expected[]={5.710593f,1.145763f,.343771f};
         assert(parallel_sample>=1U&&parallel_sample<=3U);
@@ -180,16 +198,29 @@ bool Motion_TurnFine(float degrees,uint16_t rpm)
     ++parallel_turns; return true;
 }
 int32_t Motion_Radial(void) { ++stows; stowing=true; return 110; }
+bool Motion_RestoreYaw(float yaw,uint16_t rpm)
+{
+    /* 必须在返回平移前恢复航向，位移仍处于中心校准的原始坐标系。 */
+    assert(undoing&&needs_restore);
+    assert(yaw==0&&rpm==PARALLEL_RPM);
+    ++yaw_restores;
+    if(fail_restore) return false;
+    current_yaw=yaw; needs_restore=false; return true;
+}
 bool ServoControl_GetAngle(char c,uint16_t *v) { assert(c=='B'); *v=248; return true; }
 bool RoutePlan_Prepare(uint32_t id) { (void)id; return true; }
 bool RoutePlan_Run(unsigned leg)
 {
     assert(leg==expected_leg++&&fabsf(forward_offset)<0.001f&&fabsf(left_offset)<0.001f);
+    assert(!needs_restore&&fabsf(current_yaw)<.0001f);
     ++motion; return !fail_motion;
 }
-bool Motion_Move(char d,float mm,uint16_t rpm)
+bool Motion_MoveAt(char d,float mm,uint16_t rpm,uint8_t acceleration)
 {
+    assert(acceleration==MISSION_ALIGN_ACCEL);
+    if(mm<.001f) return true; /* 90度坐标换算的浮点残差，实驱动换算为0脉冲。 */
     if(undoing) {
+        assert(!needs_restore&&fabsf(current_yaw)<.0001f);
         assert(rpm==MISSION_UNALIGN_RPM);
         if(fail_undo) return false;
         if(fabsf(left_offset)>0.001f) {
@@ -226,14 +257,15 @@ bool Motion_Move(char d,float mm,uint16_t rpm)
     if(aligning) {
         assert(!zero_offsets&&align_samples>=1&&align_axes<expected_axes);
         unsigned pass=align_samples-1U;
-        float tolerance=pass?MISSION_ALIGN_FINE_TOLERANCE_PX:0;
+        bool coarse=alignment_kind==TASK_TABLE&&pass==0;
+        float tolerance=coarse?0:MISSION_ALIGN_FINE_TOLERANCE_PX;
         bool x_axis=fabsf(align_dx)>tolerance&&align_axes==0;
         float pixels=x_axis?align_dx:align_dy;
         assert(d==(x_axis?(pixels>0?'B':'F'):(pixels>0?'L':'R')));
-        float distance=alignment_kind==TASK_TABLE&&pass==0?
+        float distance=coarse?
             (x_axis?RAW_COARSE_FORWARD_MM:RAW_COARSE_LATERAL_MM):fabsf(pixels)*MISSION_ALIGN_MM_PER_PIXEL;
         assert(fabsf(mm-distance)<0.001f);
-        assert(rpm==(pass==0?MISSION_ALIGN_COARSE_RPM:MISSION_ALIGN_FINE_RPM));
+        assert(rpm==(coarse?MISSION_ALIGN_COARSE_RPM:MISSION_ALIGN_FINE_RPM));
         ++align_axes; ++alignment_moves; return true;
     }
     assert(false); return false;
@@ -260,6 +292,8 @@ bool Motion_MoveAll(int32_t r,int32_t z,uint16_t b,uint16_t rpm)
     arm_r=r; arm_z=z; arm_base=b;
     return true;
 }
+bool Motion_Move(char d,float mm,uint16_t rpm)
+{ (void)d; (void)mm; (void)rpm; assert(false); return false; }
 bool Motion_Servo(char c,uint16_t a,uint16_t dps)
 {
     if(c=='B'&&aligning&&align_samples==0) assert(a==180);
@@ -286,10 +320,13 @@ int main(void)
     MissionRunner_Run(100);
     assert(task_codes==1U);
     assert(!MissionRunner_Running()&&strstr(last_report,"AUTO,100,DONE,8,3,24,24,S2"));
-    assert(alignment_reads==24&&alignment_moves==36);
+    assert(alignment_reads==20&&alignment_moves==28&&coarse_queries==2);
     assert(stack_puts==3);
-    assert(motion==8&&cards==24&&raw_waits==6&&pick_waits==0&&turntables==24&&references==5&&stows==7&&stops==0);
+    extern unsigned display_progress;
+    assert(display_progress==24);
+    assert(motion==8&&cards==24&&raw_waits==6&&pick_waits==0&&turntables==24&&references==1&&stows==7&&stops==0);
     assert(parallel_reads==20&&parallel_turns==8);
+    assert(yaw_restores==4); /* 两批加工、暂存、堆叠；原料区不执行恢复航向。 */
     expected_leg=1; fail_motion=true;
     MissionRunner_Run(101); assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==1);
     expected_leg=1; fail_motion=false; fail_camera=true;
@@ -297,14 +334,14 @@ int main(void)
     expected_leg=1; fail_camera=false; zero_offsets=true;
     unsigned reads=alignment_reads,moves=alignment_moves;
     MissionRunner_Run(103);
-    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+12&&alignment_moves==moves);
+    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+8&&alignment_moves==moves);
     expected_leg=1; zero_offsets=false; fail_fine=true;
     MissionRunner_Run(104);
     assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==3);
     expected_leg=1; fail_fine=false; misses=6;
     unsigned search_before=search_moves,coarse_before=coarse_queries;
     MissionRunner_Run(105);
-    assert(strstr(last_report,",DONE,")&&search_moves==search_before+8&&coarse_queries==coarse_before+12);
+    assert(strstr(last_report,",DONE,")&&search_moves==search_before+8&&coarse_queries==coarse_before+8);
     expected_leg=1; misses=1; fail_search=true;
     MissionRunner_Run(106);
     assert(!MissionRunner_Running()&&strstr(last_report,"STOPPED")&&stops==4&&search_axis==1);
@@ -325,17 +362,17 @@ int main(void)
     expected_leg=1; fail_refresh=false; fine_corrections=3;
     reads=alignment_reads; moves=alignment_moves;
     MissionRunner_Run(110);
-    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+30&&alignment_moves==moves+48);
+    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+26&&alignment_moves==moves+40);
     expected_leg=1; fine_corrections=1; fine_one_axis=true;
     reads=alignment_reads; moves=alignment_moves;
     MissionRunner_Run(111);
-    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+18&&alignment_moves==moves+18);
+    assert(strstr(last_report,",DONE,")&&alignment_reads==reads+14&&alignment_moves==moves+10);
     expected_leg=1; fine_one_axis=false; fine_corrections=4;
     reads=alignment_reads; moves=alignment_moves; old_cards=cards; old_stops=stops;
     MissionRunner_Run(112);
     assert(strstr(last_report,",DONE,")&&!MissionRunner_Running()&&cards==old_cards+24&&stops==old_stops);
     /* 六组均三次后仍超差：不做第四次，继续全部取放并正常撤销净位移。 */
-    assert(alignment_reads==reads+30&&alignment_moves==moves+48&&stack_puts==3);
+    assert(alignment_reads==reads+26&&alignment_moves==moves+40&&stack_puts==3);
     assert(fabsf(forward_offset)<0.001f&&fabsf(left_offset)<0.001f);
     /* 平行始终未达标：每站只转3次，不复核，直接完成全部取放。 */
     expected_leg=1; fine_corrections=2; parallel_not_converging=true;
@@ -344,10 +381,14 @@ int main(void)
     MissionRunner_Run(113);
     assert(strstr(last_report,",DONE,")&&!MissionRunner_Running()&&stops==old_stops);
     assert(parallel_turns==turns_before+12U&&parallel_reads==parallel_before+12U);
-    expected_leg=1; yaw_reads=0; parallel_not_converging=false; parallel_converging=true;
+    expected_leg=1; parallel_not_converging=false; parallel_converging=true;
     turns_before=parallel_turns; parallel_before=parallel_reads; old_stops=stops;
     MissionRunner_Run(114);
     assert(strstr(last_report,",DONE,")&&!MissionRunner_Running()&&stops==old_stops);
     assert(parallel_turns==turns_before+12U&&parallel_reads==parallel_before+12U);
-    puts("PASS: 8 downloaded navigation legs, 1-pixel fine alignment, up to 3 corrections with final verification, one-axis skip, continue after nonconvergence, 24 transfers and net-offset undo");
+    expected_leg=1; fail_restore=true; old_stops=stops; old_cards=cards;
+    MissionRunner_Run(115);
+    assert(strstr(last_report,",STOPPED,")&&cards==old_cards+9&&stops==old_stops+1);
+    assert(needs_restore&&(fabsf(forward_offset)>.001f||fabsf(left_offset)>.001f));
+    puts("PASS: 8 navigation legs, 24 transfers, original-frame offsets, yaw restore before translation undo, restore failure prevents return movement");
 }

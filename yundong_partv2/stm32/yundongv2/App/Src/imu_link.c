@@ -152,7 +152,7 @@ static bool setup_query(void)
 static bool setup_response(void) { return s_setup.sequence!=s_setup.query_sequence; }
 static bool setup_parameters(void)
 {
-    return s_setup.registers[0]==0x0CU&&s_setup.registers[1]==0x06U&&s_setup.registers[2]==0x02U;
+    return s_setup.registers[0]==0x0CU&&s_setup.registers[1]==IMU_OUTPUT_RATE_REG&&s_setup.registers[2]==0x02U;
 }
 static void setup_scan(void)
 {
@@ -192,7 +192,7 @@ static void setup_tick(void)
         if(elapsed>=50U&&setup_write(0x69,0xB588)) setup_state(SETUP_RATE_UNLOCK);
         return;
     case SETUP_RATE_UNLOCK:
-        if(elapsed>=50U&&setup_write(0x03,0x06)) setup_state(SETUP_RATE);
+        if(elapsed>=50U&&setup_write(0x03,IMU_OUTPUT_RATE_REG)) setup_state(SETUP_RATE);
         return;
     case SETUP_RATE:
         if(elapsed>=100U) {

@@ -5,19 +5,19 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-X_EDGES = (150, 550, 1000, 1400, 1850, 2400)
-Y_FROM_TOP = (80, 550, 1000, 1400, 1850, 2250)
+X_EDGES = (0, 400, 850, 1250, 1700, 2250)
+Y_FROM_TOP = (0, 470, 920, 1320, 1770, 2170)
 WIDTHS = (400, 450, 400, 450, 550)
 HEIGHTS = (470, 450, 400, 450, 400)
-# 沿用外框左下角坐标；红线导航区不是2400×2400的正方形。
-FIELD_SIZE_MM = 2400
+# 红线区域左下角为(0,0)，X向右、Y向上；STM32与PC共用此坐标系。
 GRID_LEFT_MM, GRID_RIGHT_MM = X_EDGES[0], X_EDGES[-1]
-GRID_BOTTOM_MM = FIELD_SIZE_MM-Y_FROM_TOP[-1]
-GRID_TOP_MM = FIELD_SIZE_MM-Y_FROM_TOP[0]
+GRID_BOTTOM_MM = 0
+GRID_TOP_MM = Y_FROM_TOP[-1]
 GRID_WIDTH_MM = GRID_RIGHT_MM-GRID_LEFT_MM
 GRID_HEIGHT_MM = GRID_TOP_MM-GRID_BOTTOM_MM
 FIXED_BLOCKED = frozenset({(2, 2), (2, 4), (4, 2), (4, 4)})
-START_CELLS = {1: (5, 5), 2: (1, 5)}  # Viewer keys: 1 bottom-right, 2 top-right.
+WORK_CELLS = frozenset({(1, 3), (5, 3), (3, 1)})  # 原料、粗加工、暂存：点云不计障碍。
+START_CELLS = {1: (5, 5), 2: (1, 5)}  # 通信zone：1右下、2右上；键盘：1右上、2右下。
 
 
 def cell_at(x, y):
@@ -25,15 +25,15 @@ def cell_at(x, y):
 
     Internal boundaries belong to the right/lower cell; outside the grid is ignored.
     """
-    down = FIELD_SIZE_MM - y
-    if not (150 <= x < 2400 and 80 <= down < 2250):
+    down = GRID_TOP_MM - y
+    if not (GRID_LEFT_MM <= x < GRID_RIGHT_MM and 0 <= down < GRID_HEIGHT_MM):
         return None
     return bisect_right(Y_FROM_TOP, down), bisect_right(X_EDGES, x)
 
 
 def cell_rect(row, col):
-    return (X_EDGES[col-1], FIELD_SIZE_MM-Y_FROM_TOP[row],
-            X_EDGES[col], FIELD_SIZE_MM-Y_FROM_TOP[row-1])
+    return (X_EDGES[col-1], GRID_TOP_MM-Y_FROM_TOP[row],
+            X_EDGES[col], GRID_TOP_MM-Y_FROM_TOP[row-1])
 
 
 class TwoSnapshots:
@@ -61,11 +61,12 @@ class TwoSnapshots:
         points = json.loads(json.dumps(points, allow_nan=False))
         start_cell = START_CELLS.get(metadata.get('zone'))
         start_cells = self.start_cells | ({start_cell} if start_cell else set())
+        ignored = start_cells | WORK_CELLS
         hits = sorted({cell for p in points if (cell := cell_at(p['x_mm'], p['y_mm']))}
-                      - start_cells)
+                      - ignored)
         # Both samples share the same start exclusions, even if the second start
         # was seen as an obstacle from the first viewpoint before being selected.
-        detected = (self.detected | set(hits)) - start_cells
+        detected = (self.detected | set(hits)) - ignored
         blocked = set(FIXED_BLOCKED) | detected
         snapshot = {
             'number': len(self.snapshots) + 1,
@@ -76,9 +77,9 @@ class TwoSnapshots:
         }
         snapshots = self.snapshots + [snapshot]
         document = {
-            'schema': 'n10-two-snapshots-v1', 'demo': self.demo,
+            'schema': 'n10-two-snapshots-v2', 'demo': self.demo,
             'complete': len(snapshots) == 2,
-            'grid': {'units': 'mm', 'origin': 'bottom-left',
+            'grid': {'units': 'mm', 'origin': 'red-grid-bottom-left',
                      'rows': 'top-to-bottom, 1-based', 'columns': 'left-to-right, 1-based',
                      'widths': WIDTHS, 'heights': HEIGHTS,
                      'x_edges': X_EDGES, 'y_edges_from_top': Y_FROM_TOP,

@@ -7,7 +7,7 @@ import struct
 import time
 from pathlib import Path
 from n10_grid import (TwoSnapshots, FIXED_BLOCKED, X_EDGES, Y_FROM_TOP, cell_rect,
-                      FIELD_SIZE_MM, GRID_WIDTH_MM, GRID_HEIGHT_MM)
+                      GRID_WIDTH_MM, GRID_HEIGHT_MM)
 from n10_planner import RoutePlayer, handle_control, vehicle_pose, lidar_to_pose
 from n10_plan_ui import control_at, draw_route, draw_toolbar
 
@@ -98,8 +98,9 @@ def render(cloud, now, args, view, zone, bad, error="", recording=None, points=N
     points = cloud.points(now) if points is None else points
     origin, size = 60, 780
     def map_pixel(x, y):
-        return (round(origin + x / FIELD_SIZE_MM * size),
-                round(origin + (FIELD_SIZE_MM-y) / FIELD_SIZE_MM * size))
+        scale = size / max(GRID_WIDTH_MM, GRID_HEIGHT_MM)
+        return (round(origin + x * scale),
+                round(origin + (GRID_HEIGHT_MM-y) * scale))
     if view == "map":
         blocked = recording.blocked if recording else set(FIXED_BLOCKED)
         for row in range(1, 6):
@@ -112,18 +113,19 @@ def render(cloud, now, args, view, zone, bad, error="", recording=None, points=N
                 label = f'{row},{col} ' + ('BLOCK' if (row, col) in blocked else 'OPEN')
                 cv2.putText(image, label, (px-43, py+5), 0, .43, (220, 220, 220), 1)
         for x in X_EDGES:
-            cv2.line(image, map_pixel(x, 150), map_pixel(x, 2320), (170, 170, 170))
+            cv2.line(image, map_pixel(x, 0), map_pixel(x, GRID_HEIGHT_MM), (170, 170, 170))
         for down in Y_FROM_TOP:
-            cv2.line(image, map_pixel(150, 2400-down), map_pixel(2400, 2400-down), (170, 170, 170))
+            cv2.line(image, map_pixel(0, GRID_HEIGHT_MM-down),
+                     map_pixel(GRID_WIDTH_MM, GRID_HEIGHT_MM-down), (170, 170, 170))
         if recording:
             for snapshot in recording.snapshots:
                 for point in snapshot['points']:
                     x, y = point['x_mm'], point['y_mm']
-                    if 0 <= x < 2400 and 0 <= y < 2400:
+                    if 0 <= x < GRID_WIDTH_MM and 0 <= y <= GRID_HEIGHT_MM:
                         cv2.circle(image, map_pixel(x, y), 3, (200, 160, 70), 1)
         for point in map_cloud_points(points, start_zone, robot.radar_pose if robot else pose):
             x, y = point['x_mm'], point['y_mm']
-            if 0 <= x < 2400 and 0 <= y < 2400:
+            if 0 <= x < GRID_WIDTH_MM and 0 <= y <= GRID_HEIGHT_MM:
                 cv2.circle(image, map_pixel(x, y), 2, (60, 210, 255), -1)
         draw_route(image, player, start_zone, map_pixel, pose, robot.radar_pose if robot else None)
         title = f"Grid {GRID_WIDTH_MM}x{GRID_HEIGHT_MM} mm | X {pose[0]:.0f} Y {pose[1]:.0f} | heading {pose[2]:.0f} deg | " + ('command pose' if robot else 'preview pose')
@@ -152,7 +154,7 @@ def render(cloud, now, args, view, zone, bad, error="", recording=None, points=N
                 (20, 50), 0, .52, (90, 160, 255) if stale else (100, 255, 150), 1)
     count = len(recording.snapshots) if recording else 0
     draw_toolbar(image, player, start_zone, hardware=robot is not None)
-    help_text = 'Robot mode: select start before App START; scans and planning are automatic' if robot else f"Saved {count}/2 | Click MAP: capture | P: plan | SPACE: pause | R: reset | 1/2: car + radar"
+    help_text = '1: upper-right | 2: lower-right | Select start before App START' if robot else f"Saved {count}/2 | Click: scan | P: plan | SPACE: pause | R: reset | 1: top | 2: bottom"
     cv2.putText(image, help_text, (20, 915), 0, .48, (220, 220, 220), 1)
     cv2.putText(image, robot.status if robot else player.status() if player else 'Virtual car preview | no commands sent to robot',
                 (20, 940), 0, .48, (100, 240, 220), 1)
@@ -178,7 +180,8 @@ def main():
     parser.add_argument("--esp", default="192.168.4.1")
     parser.add_argument("--port", type=int, default=3334)
     parser.add_argument("--view", choices=["radar", "map"], default="map")
-    parser.add_argument("--zone", type=int, choices=[1, 2], default=1)
+    parser.add_argument("--zone", type=int, choices=[1, 2], default=1,
+                        help="zone 1=lower-right, 2=upper-right; keyboard 1=upper-right, 2=lower-right")
     parser.add_argument("--range-mm", type=int, default=6000)
     parser.add_argument("--max-age", type=float, default=.35, help="point expiry in seconds")
     parser.add_argument("--demo", action="store_true", help="synthetic data, no ESP needed")
@@ -321,7 +324,7 @@ def main():
                     player.clear()
                     capture_message = 'New pair started; previous JSON kept'
                 if key in (ord('1'), ord('2')):
-                    control('bottom' if key == ord('1') else 'top')
+                    control('top' if key == ord('1') else 'bottom')
                 if key in (ord('+'), ord('=')): args.range_mm = min(50000, args.range_mm + 500)
                 if key == ord('-'): args.range_mm = max(500, args.range_mm - 500)
         except KeyboardInterrupt:

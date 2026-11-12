@@ -27,6 +27,8 @@ bool Motion_Move(char d,float mm,uint16_t rpm)
 {
     (void)d; (void)mm; (void)rpm; record('C'); return true;
 }
+bool Motion_MoveAt(char d,float mm,uint16_t rpm,uint8_t acceleration)
+{ (void)d; (void)mm; (void)rpm; (void)acceleration; assert(false); return false; }
 bool Motion_MoveAll(int32_t r,int32_t z,uint16_t b,uint16_t rpm)
 {
     assert(r==110&&z==0&&b==180&&rpm==MOTION_ARM_RPM);
@@ -45,6 +47,8 @@ bool Motion_Turn(char d,float deg,uint16_t rpm) { (void)d; (void)deg; (void)rpm;
 bool Motion_TurnPulses(int32_t p,uint16_t rpm) { (void)p; (void)rpm; assert(false); return false; }
 bool Motion_TurnFine(float degrees,uint16_t rpm) { (void)degrees; (void)rpm; assert(false); return false; }
 float Motion_Yaw(void) { assert(false); return 0; }
+bool Motion_RestoreYaw(float yaw,uint16_t rpm)
+{ (void)yaw; (void)rpm; assert(false); return false; }
 void CameraLink_Idle(void) {}
 bool CameraLink_Wait(TaskVisionKind k,unsigned t,TaskVision *v)
 {

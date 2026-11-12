@@ -49,7 +49,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(cloud.points(1.1))
 
     def test_default_projection_uses_car_start_cell_center(self):
-        for zone, expected in [(1, (2125, 450)), (2, (2125, 1985))]:
+        for zone, expected in [(1, (1975, 300)), (2, (1975, 1835))]:
             point = map_cloud_points([(0, 100, 180, 1)], zone)[0]
             self.assertAlmostEqual(point['x_mm'], expected[0])
             self.assertAlmostEqual(point['y_mm'], expected[1])

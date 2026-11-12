@@ -14,6 +14,9 @@ bool Motion_MoveAll(int32_t r,int32_t z,uint16_t b,uint16_t rpm)
 {
     assert(rpm==MOTION_ARM_RPM||rpm==MOTION_STOW_RPM);
     if(!next()) return false;
+    /* 持料转向槽位前，必须已抬升并沿工位方向收回准备位。 */
+    if(b==ARM_SLOT_BASE&&base!=b&&grip==ARM_GRIP_CLOSED)
+        assert(radial==ARM_READY_R&&height==0);
     last_r[0]=last_r[1]; last_z[0]=last_z[1];
     last_r[1]=r; last_z[1]=z;
     if(r==observe_r&&b==observe_base&&z!=0) { observed_z=z; ++observed; }
@@ -48,6 +51,9 @@ int main(void)
         assert(ArmFlow_Run(finish,ARM_COUNT(finish)));
         assert(radial==ARM_SLOT_R&&height==0&&base==180&&grip==30);
         assert(waits==before+2&&waited==before_ms+ARM_GRIP_SETTLE_MS+ARM_RELEASE_SETTLE_MS);
+        const ArmStep process_pick[]={ARM_PICK_APPROACH(ARM_AREA_PROCESS,i),ARM_PICK_FINISH(ARM_AREA_PROCESS,i)};
+        assert(ArmFlow_Run(process_pick,ARM_COUNT(process_pick)));
+        assert(radial==ARM_SLOT_R&&height==0&&base==ARM_SLOT_BASE&&grip==ARM_GRIP_OPEN);
         for(unsigned stack=0;stack<2;++stack) {
             ArmArea area=stack?ARM_AREA_STACK:ARM_AREA_PROCESS;
             const ArmStep put[]={ARM_PUT_STEPS(area,i)};

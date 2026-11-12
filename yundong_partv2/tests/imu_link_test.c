@@ -36,17 +36,20 @@ static void samples(uint16_t raw_yaw,unsigned count)
 }
 int main(void)
 {
-    for(unsigned changed=0;changed<2;++changed) {
-        tick=queries=writes=baud_changes=0; output=changed?0:0x0C; rate=changed?0:6;
+    for(unsigned changed=0;changed<3;++changed) {
+        tick=queries=writes=baud_changes=0;
+        output=changed==1?0:0x0C;
+        rate=changed==0?IMU_OUTPUT_RATE_REG:changed==1?0:6; /* 包含由旧10Hz升级的情况。 */
+        bool needs_write=output!=0x0C||rate!=IMU_OUTPUT_RATE_REG;
         ImuLink_Init(&uart); ImuLink_StartConfiguration();
         ImuSample s; assert(!ImuLink_Read(&s));
         for(unsigned i=0;i<70;++i) {
             tick+=100; ImuLink_Process();
-            if(output==0x0C&&rate==6) samples(0x4000,1);
+            if(output==0x0C&&rate==IMU_OUTPUT_RATE_REG) samples(0x4000,1);
         }
         samples(0x4000,10); assert(ImuLink_Read(&s)&&s.yaw==-90&&s.rate==0);
-        assert(queries>=2&&baud_changes==1&&output==0x0C&&rate==6);
-        assert(changed?writes>0:writes==0);
+        assert(queries>=2&&baud_changes==1&&output==0x0C&&rate==IMU_OUTPUT_RATE_REG);
+        assert(needs_write?writes>0:writes==0);
         tick+=201; assert(!ImuLink_Read(&s));
         samples(0x7F00,12); assert(ImuLink_Read(&s));
         float before=s.yaw; tick+=50;

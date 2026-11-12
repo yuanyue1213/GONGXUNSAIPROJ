@@ -118,10 +118,11 @@ bool RoutePlan_Command(const char *frame)
 }
 static void scan(unsigned number,unsigned heading)
 {
-    unsigned edge=number==1U?NAV_SCAN_1_EDGE_MM:NAV_SCAN_2_EDGE_MM;
-    unsigned right=number==1U?NAV_SCAN_1_RIGHT_MM:NAV_SCAN_2_RIGHT_MM;
-    unsigned x=NAV_GRID_LEFT_MM+NAV_GRID_WIDTH_MM-right;
-    int y=(int)(NAV_GRID_BOTTOM_MM+(run_zone==2U?NAV_GRID_HEIGHT_MM-edge:edge));
+    unsigned x=NAV_SCAN_CAR_X_MM;
+    int y=run_zone==2U?NAV_SCAN_TOP_CAR_Y_MM:NAV_SCAN_BOTTOM_CAR_Y_MM;
+    /* 车中心不变：首扫朝下/朝上，第二扫朝地图左侧。 */
+    if(number==1U) y+=run_zone==2U?-(int)NAV_RADAR_FORWARD_MM:(int)NAV_RADAR_FORWARD_MM;
+    else x-=NAV_RADAR_FORWARD_MM;
     scan_wait=number;
     uint32_t sent=HAL_GetTick()-1000U;
     while(scan_wait) {

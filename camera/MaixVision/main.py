@@ -28,7 +28,7 @@ import numpy as np
 WIDTH, HEIGHT = 512, 320
 WORK_WIDTH = 384                 # 56% of full-resolution pixels
 PROCESS_INTERVAL = 0.10          # target ceiling 10 Hz, NOT a measured speed
-VISION_BUILD = "20261107-vision-cleanup"
+VISION_BUILD = "20261111-occupied-two-colors"
 ERROR_LOG_PATH = os.path.expanduser("~/vision_error.log")
 FOOTER_HEIGHT = 100              # 状态区放在图像外，不遮挡物料和识别标记。
 CAMERA_UART_DEVICE = "/dev/ttyS2"  # must match the installed TX/RX wiring
@@ -488,6 +488,29 @@ def unique_triple(objects, colors):
 
 
 
+def occupied_points(objects, colors):
+    """colors按二维码第一批工位左中右排列；只缺一种颜色时按等间距补点。"""
+    selected = [[o for o in objects if o["color"] == color] for color in colors]
+    if any(len(matches) > 1 for matches in selected):
+        return None, None  # 同色多候选有歧义，不能凭空选一个。
+    seen = [i for i, matches in enumerate(selected) if matches]
+    if len(seen) == 3:
+        group = unique_triple(objects, colors)
+        return (np.array(sorted((o["center"] for o in group), key=lambda p: p[0])), None) if group else (None, None)
+    if len(seen) != 2:
+        return None, None
+    i, j = seen
+    a, b = selected[i][0], selected[j][0]
+    pa, pb = np.asarray(a["center"], dtype=float), np.asarray(b["center"], dtype=float)
+    if np.linalg.norm(pb-pa) < 18 or max(a["area"], b["area"]) > min(a["area"], b["area"])*3.5:
+        return None, None
+    step = (pb-pa)/(j-i)
+    if step[0] <= 0:
+        return None, None  # 两色左右次序与已知工位不符时不推算。
+    points = np.array([pa+(slot-i)*step for slot in range(3)])
+    return points, next(slot for slot in range(3) if slot not in seen)
+
+
 # ===== QR and shared HSV calibration =====
 DEFAULT_CONFIG_PATH = os.path.join(os.path.expanduser("~"), "hsv_thresholds.json")
 
@@ -887,6 +910,7 @@ class Engine:
         self.state = "IDLE / HOLD 1.5s HSV"
         self.objects = []
         self.ring_points = None
+        self.inferred_slot = None
 
     def select(self, request):
         if request[1] == "ACK":
@@ -910,6 +934,7 @@ class Engine:
             self.anchors = None
             self.station_colors = ()
         self.ring_points = None
+        self.inferred_slot = None
 
     def process(self, bgr, qr_codes=()):
         if self.stopped:
@@ -922,6 +947,7 @@ class Engine:
 
     def _process(self, bgr, qr_codes=()):
         self.objects = []
+        self.inferred_slot = None
         if self.request is None or self.request[1] == "IDLE":
             self.state = "IDLE / HOLD 1.5s HSV"
             return None
@@ -972,17 +998,18 @@ class Engine:
             return "VISION,%d,NONE\n" % req
         else:
             colors = triple(target) if mode == "OCCUPIED" else (target,)
-            missing = [COLORS[c] for c in colors if COLORS[c] not in self.table.calibrated]
-            if missing:
+            available = tuple(c for c in colors if COLORS[c] in self.table.calibrated)
+            missing = [COLORS[c] for c in colors if c not in available]
+            if (mode == "OCCUPIED" and len(available) < 2) or (mode != "OCCUPIED" and missing):
                 self.stable.reset()
                 self.state = mode + " / NEED HSV: " + "/".join(missing)
                 return "VISION,%d,NONE\n" % req
-            self.objects = self.detector.materials(bgr, mode, colors)
+            self.objects = self.detector.materials(bgr, mode, available)
             if mode == "OCCUPIED":
-                group = unique_triple(self.objects, colors)
-                if group:
-                    # 堆叠按实际X位置编号，不要求三物块共线或水平间距均匀。
-                    value = np.array(sorted((o["center"] for o in group), key=lambda p: p[0]))
+                value, self.inferred_slot = occupied_points(self.objects, colors)
+                self.ring_points = value
+                if value is None:
+                    self.state = "OCCUPIED / WAIT 2 DISTINCT COLORS"
             elif mode == "PICK":
                 if self.anchors is None or target not in self.station_colors:
                     self.state = "PICK / NEED OCCUPIED FIRST"
@@ -998,6 +1025,8 @@ class Engine:
                 self.state = mode + " / STABILIZING"
             return "VISION,%d,NONE\n" % req
         self.state = mode + " / STABLE"
+        if self.inferred_slot is not None:
+            self.state += " / 2 COLORS + EST " + COLORS[colors[self.inferred_slot]]
         if mode == "OCCUPIED":
             self.anchors = np.array(result, copy=True)
             self.station_colors = colors
@@ -1042,10 +1071,11 @@ def draw_status(img, engine, elapsed_ms, config_state):
         # 图像左/中/右，不是比赛场地上的数字编号；坐标为原始512x320像素。
         names = ("L", "M", "R") if len(engine.ring_points) == 3 else tuple(
             "C%d" % (i+1) for i in range(len(engine.ring_points)))
-        for name, point in zip(names, engine.ring_points):
+        for slot, (name, point) in enumerate(zip(names, engine.ring_points)):
             x, y = (int(round(v)) for v in point)
-            cv2.drawMarker(img, (x, y), (0, 255, 255), cv2.MARKER_CROSS, 14, 1)
-            label = "%s(%.1f,%.1f)" % (name, *point)
+            inferred = slot == engine.inferred_slot
+            cv2.drawMarker(img, (x, y), (0, 128, 255) if inferred else (0, 255, 255), cv2.MARKER_CROSS, 14, 1)
+            label = "%s%s(%.1f,%.1f)" % ("EST-" if inferred else "", name, *point)
             width = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, .35, 1)[0][0]
             cv2.putText(img, label, (max(0, min(x+6, WIDTH-width-1)), max(66, y-10)),
                         cv2.FONT_HERSHEY_SIMPLEX, .35, (0, 255, 255), 1)

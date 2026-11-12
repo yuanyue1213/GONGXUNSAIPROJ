@@ -2,6 +2,38 @@
     "version": 3,
     "configurePresets": [
         {
+            "name": "BaseTest",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "BASE_TEST": "ON"
+            }
+        },
+        {
+            "name": "TurntableTest",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "TURNTABLE_TEST": "ON"
+            }
+        },
+        {
+            "name": "ScreenTest",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SCREEN_TEST": "ON"
+            }
+        },
+        {
+            "name": "ForwardTest",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "FORWARD_TEST": "ON"
+            }
+        },
+        {
             "name": "default",
             "hidden": true,
             "generator": "Ninja",
@@ -81,6 +113,22 @@
         }
     ],
     "buildPresets": [
+        {
+            "name": "BaseTest",
+            "configurePreset": "BaseTest"
+        },
+        {
+            "name": "TurntableTest",
+            "configurePreset": "TurntableTest"
+        },
+        {
+            "name": "ScreenTest",
+            "configurePreset": "ScreenTest"
+        },
+        {
+            "name": "ForwardTest",
+            "configurePreset": "ForwardTest"
+        },
         {
             "name": "StackTest",
             "configurePreset": "StackTest"

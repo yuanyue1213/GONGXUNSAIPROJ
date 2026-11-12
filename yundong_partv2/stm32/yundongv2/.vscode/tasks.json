@@ -2,6 +2,74 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "STM32: Configure BaseTest",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "BaseTest",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build BaseTest",
+      "type": "cmake",
+      "command": "build",
+      "preset": "BaseTest",
+      "dependsOn": "STM32: Configure BaseTest",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "STM32: Configure TurntableTest",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "TurntableTest",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build TurntableTest",
+      "type": "cmake",
+      "command": "build",
+      "preset": "TurntableTest",
+      "dependsOn": "STM32: Configure TurntableTest",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "STM32: Configure ScreenTest",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "ScreenTest",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build ScreenTest",
+      "type": "cmake",
+      "command": "build",
+      "preset": "ScreenTest",
+      "dependsOn": "STM32: Configure ScreenTest",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "STM32: Configure ForwardTest",
+      "type": "cmake",
+      "command": "configure",
+      "preset": "ForwardTest",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Build ForwardTest",
+      "type": "cmake",
+      "command": "build",
+      "preset": "ForwardTest",
+      "dependsOn": "STM32: Configure ForwardTest",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
       "label": "STM32: Configure StackTest",
       "type": "cmake",
       "command": "configure",
@@ -14,7 +82,9 @@
       "command": "build",
       "preset": "StackTest",
       "dependsOn": "STM32: Configure StackTest",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": [
+        "$gcc"
+      ]
     },
     {
       "label": "STM32: Configure FixedQr",
@@ -29,7 +99,9 @@
       "command": "build",
       "preset": "FixedQr",
       "dependsOn": "STM32: Configure FixedQr",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": [
+        "$gcc"
+      ]
     },
     {
       "label": "STM32: Configure PlaceTest",
@@ -44,7 +116,9 @@
       "command": "build",
       "preset": "PlaceTest",
       "dependsOn": "STM32: Configure PlaceTest",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": [
+        "$gcc"
+      ]
     },
     {
       "label": "STM32: Configure GrabTest",
@@ -59,7 +133,9 @@
       "command": "build",
       "preset": "GrabTest",
       "dependsOn": "STM32: Configure GrabTest",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": [
+        "$gcc"
+      ]
     },
     {
       "label": "STM32: Configure NavigationOnly",

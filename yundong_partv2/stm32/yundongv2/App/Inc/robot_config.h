@@ -6,6 +6,20 @@
 /* 仅 FixedQr 固件使用；仍到二维码区，再加载此任务码。 */
 #define MISSION_FIXED_QR_TEXT "123+321+132+312"
 
+/* ILI9341任务码屏；PE1实际连接BLK，不是复位。 */
+#define LCD_MOSI_PORT GPIOB
+#define LCD_MOSI_PIN GPIO_PIN_2
+#define LCD_SCK_PORT GPIOC
+#define LCD_SCK_PIN GPIO_PIN_10
+#define LCD_CS_PORT GPIOE
+#define LCD_CS_PIN GPIO_PIN_2
+#define LCD_DC_PORT GPIOD
+#define LCD_DC_PIN GPIO_PIN_11
+#define LCD_BLK_PORT GPIOE
+#define LCD_BLK_PIN GPIO_PIN_1
+#define LCD_SPI_DELAY_LOOPS 12U
+#define LCD_MADCTL 0x28U /* MV+BGR，横屏320x240；反向横屏用0xE8。 */
+
 /* Software ceiling in motor-shaft RPM, shared by protocol parsers/controllers
  * and Emm/X drivers. This does not set the operating speed or servo degrees/s. */
 #ifndef STEPPER_MAX_SPEED_RPM
@@ -21,8 +35,8 @@
 #define SERVO_TURNTABLE_MAX_DPS 360U
 
 /* 步进速度直接填写电机轴RPM；舵机独立使用角度/秒。 */
-#define MOTION_ROUTE_RPM          1500U
-#define MOTION_FINE_RPM           1000U
+#define MOTION_ROUTE_RPM          300U
+#define MOTION_FINE_RPM           200U
 #define MOTION_TURN_RPM           150U
 #define MOTION_ARM_RPM            2000U
 #define MOTION_STOW_RPM           1500U
@@ -40,7 +54,7 @@ _Static_assert(MOTION_GRIPPER_DPS<=SERVO_GRIPPER_MAX_DPS&&
                MOTION_TURNTABLE_DPS<=SERVO_TURNTABLE_MAX_DPS,"Servo speed exceeds protocol limit");
 
 /* 距离单位为毫米，PPM 为每米脉冲；下方机械臂姿态 r=0.1 mm、z=mm。 */
-#define MISSION_FORWARD_PPM 12585U
+#define MISSION_FORWARD_PPM 13064U /* 实测标定：原12585 × 300/289，供全流程与测试共用。 */
 #define MISSION_LATERAL_PPM 13228U
 #define MISSION_ROUTE_RPM MOTION_ROUTE_RPM
 #define MISSION_FINE_RPM MOTION_FINE_RPM
@@ -52,11 +66,11 @@ _Static_assert(MOTION_GRIPPER_DPS<=SERVO_GRIPPER_MAX_DPS&&
 #define MISSION_IMAGE_DOWN_DIRECTION 'L'
 /* 粗调和精调共用本车当前相机标定。 */
 #define MISSION_ALIGN_MM_PER_PIXEL 1.090819f
-#define MISSION_ALIGN_COARSE_RPM MOTION_ROUTE_RPM
+#define MISSION_ALIGN_COARSE_RPM MOTION_FINE_RPM
 #define MISSION_ALIGN_FINE_RPM MOTION_FINE_RPM
 #define MISSION_ALIGN_FINE_TOLERANCE_PX 1.0f
 #define MISSION_ALIGN_FINE_MAX_MOVES 3U
-#define MISSION_UNALIGN_RPM MOTION_ROUTE_RPM
+#define MISSION_UNALIGN_RPM MOTION_FINE_RPM
 /* 仅用于原料区识别成功后的粗调，方向由图像位置决定，单位mm。 */
 #define RAW_COARSE_FORWARD_MM 100.0f
 #define RAW_COARSE_LATERAL_MM 5.0f
@@ -66,9 +80,11 @@ _Static_assert(MOTION_GRIPPER_DPS<=SERVO_GRIPPER_MAX_DPS&&
 /* NONE 也可能是相机正在积累稳定帧，先留出识别窗口再触发移动。 */
 #define MISSION_ALIGN_NONE_SETTLE_MS 1500U
 /* Emm加速度为0..255档位；底盘和机械臂估时均换算RPM/s，0为无加减速。 */
-#define MISSION_WHEEL_ACCEL 10U
+#define MISSION_WHEEL_ACCEL 20U /* 约84.75 RPM/s；正常路线移动使用。 */
 _Static_assert(MISSION_WHEEL_ACCEL<=255U,"Emm acceleration level must be 0..255");
-#define MISSION_ARM_EMM_ACCEL 128U /* 约156.25 RPM/s；估时与下发共用。 */
+#define MISSION_ALIGN_ACCEL 30U /* 约88.50 RPM/s；校准、搜索及回原位使用。 */
+_Static_assert(MISSION_ALIGN_ACCEL<=255U,"Alignment Emm acceleration level must be 0..255");
+#define MISSION_ARM_EMM_ACCEL 150U /* 约188.68 RPM/s；伸缩、升降及收臂的估时与下发共用。 */
 _Static_assert(MISSION_ARM_EMM_ACCEL<=255U,"Arm Emm acceleration level must be 0..255");
 #define MISSION_MOTION_SETTLE_MS 50U
 /* 各区按左、中、右填写 {抓取伸缩,放置伸缩,高度,底座角度}。
@@ -88,6 +104,8 @@ _Static_assert(MISSION_ARM_EMM_ACCEL<=255U,"Arm Emm acceleration level must be 0
 #define ARM_INITIAL_GRIP 15U
 #define ARM_INITIAL_BASE 90U
 #define ARM_INITIAL_TURNTABLE 0U
+#define TURNTABLE_TEST_ANGLE 0U /* 仅TurntableTest独立上电固件使用。 */
+#define BASE_TEST_ANGLE 0U /* 仅BaseTest独立上电固件使用。 */
 #define ARM_GRIP_OPEN 30U
 #define ARM_GRIP_CLOSED 0U
 #define ARM_SLOT_R 150 /* 15 mm；原料放入和各区从车上取料共用。 */
@@ -138,18 +156,22 @@ _Static_assert(MISSION_ARM_EMM_ACCEL<=255U,"Arm Emm acceleration level must be 0
 #define NAV_PC_FRESH_MS 5000U
 #define NAV_ENTRY_LEFT_MM 125U
 #define NAV_ENTRY_FORWARD_MM 165U
-/* 红线导航区2250×2170，沿用外框左下角坐标。测距以红线边界为基准。 */
-#define NAV_GRID_LEFT_MM 150U
-#define NAV_GRID_BOTTOM_MM 150U
+#define FORWARD_TEST_DISTANCE_MM 3000U /* 独立直行测试：App启动后向前300cm。 */
+#define FORWARD_TEST_PPM MISSION_FORWARD_PPM
+#define FORWARD_TEST_RPM 200U /* 仅300cm测试固件使用。 */
+#define FORWARD_TEST_ACCEL 20U /* 约84.75RPM/s，仅300cm测试的主直行使用。 */
+#define FORWARD_TEST_FRAME_GAP_MS 3U
+/* 红线导航区2250×2170，左下角为(0,0)，与PC坐标一致。 */
 #define NAV_GRID_WIDTH_MM 2250U
 #define NAV_GRID_HEIGHT_MM 2170U
-#define NAV_SCAN_1_EDGE_MM 248U
-#define NAV_SCAN_1_RIGHT_MM 275U
-#define NAV_SCAN_2_EDGE_MM 235U
-#define NAV_SCAN_2_RIGHT_MM 288U
+#define NAV_SCAN_CAR_X_MM 1975U
+#define NAV_SCAN_TOP_CAR_Y_MM 1935U
+#define NAV_SCAN_BOTTOM_CAR_Y_MM 200U
+#define NAV_RADAR_FORWARD_MM 130U /* 雷达在车体旋转中心正前方13cm。 */
 #define NAV_SCAN_SETTLE_MS 300U
 #define START_UART_BAUD 115200U
 #define IMU_UART_BAUD_RATE 9600U
+#define IMU_OUTPUT_RATE_REG 0x06U /* 普通固件沿用10Hz；纯直行测试不初始化IMU。 */
 #define UART_TX_TIMEOUT_MS 20U
 #define MOTOR_ACK_TIMEOUT_MS 20U
 #define IMU_YAW_SIGN (-1.0f)

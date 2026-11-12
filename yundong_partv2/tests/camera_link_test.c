@@ -105,6 +105,13 @@ int main(void)
     assert(TaskProtocol_Vision("VISION,1,PARALLEL,156,100,150,200,150,300,150",&v));
     assert(!TaskProtocol_Vision("VISION,1,PARALLEL,111,100,150,200,150,300,150",&v));
     assert(!TaskProtocol_Vision("VISION,1,PARALLEL,2,100,150,200,150,300",&v));
+    assert(TaskProtocol_Vision("VISION,1,PARALLEL,651,-100,120,100,150,300,180",&v));
+    assert(v.rings[0].x==-100&&v.rings[1].x==100);
+    assert(TaskProtocol_Vision("VISION,1,PARALLEL,651,100,100,400,200,700,300",&v));
+    assert(!TaskProtocol_Vision("VISION,1,PARALLEL,651,-513,120,100,150,300,180",&v));
+    assert(!TaskProtocol_Vision("VISION,1,PARALLEL,651,100,100,400,200,1024,300",&v));
+    assert(!TaskProtocol_Vision("VISION,1,OCCUPIED,651,-1,160",&v));
+    assert(!TaskProtocol_Vision("VISION,1,PARALLEL,651,NaN,100,400,200,700,300",&v));
     CameraLink_Init(&uart,NULL); assert(!CameraLink_Wait(TASK_QR,0,&v));
     puts("PASS: camera result ACK/retry, request/type/target matching, CRLF, oversized frames, no re-entry, TX recovery and coarse-only confirmed NONE");
 }

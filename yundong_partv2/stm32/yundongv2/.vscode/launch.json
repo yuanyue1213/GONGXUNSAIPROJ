@@ -2,6 +2,78 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "STM32 · 底座0°测试（上电执行）",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "deviceName": "STM32H743ZIT6",
+      "deviceCore": "Cortex-M7",
+      "preLaunchTask": "STM32: Build BaseTest",
+      "preBuild": "",
+      "runEntry": "main",
+      "serverInterface": "SWD",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${workspaceFolder}/build/BaseTest/yundongv2.elf",
+          "symbolFileName": "${workspaceFolder}/build/BaseTest/yundongv2.elf"
+        }
+      ]
+    },
+    {
+      "name": "STM32 · 转盘0°测试（上电执行）",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "deviceName": "STM32H743ZIT6",
+      "deviceCore": "Cortex-M7",
+      "preLaunchTask": "STM32: Build TurntableTest",
+      "preBuild": "",
+      "runEntry": "main",
+      "serverInterface": "SWD",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${workspaceFolder}/build/TurntableTest/yundongv2.elf",
+          "symbolFileName": "${workspaceFolder}/build/TurntableTest/yundongv2.elf"
+        }
+      ]
+    },
+    {
+      "name": "STM32 · 固定任务码屏幕测试（上电显示，无电机）",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "deviceName": "STM32H743ZIT6",
+      "deviceCore": "Cortex-M7",
+      "preLaunchTask": "STM32: Build ScreenTest",
+      "preBuild": "",
+      "runEntry": "main",
+      "serverInterface": "SWD",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${workspaceFolder}/build/ScreenTest/yundongv2.elf",
+          "symbolFileName": "${workspaceFolder}/build/ScreenTest/yundongv2.elf"
+        }
+      ]
+    },
+    {
+      "name": "STM32 · 向前300cm测试（App启动）",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "deviceName": "STM32H743ZIT6",
+      "deviceCore": "Cortex-M7",
+      "preLaunchTask": "STM32: Build ForwardTest",
+      "preBuild": "",
+      "runEntry": "main",
+      "serverInterface": "SWD",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${workspaceFolder}/build/ForwardTest/yundongv2.elf",
+          "symbolFileName": "${workspaceFolder}/build/ForwardTest/yundongv2.elf"
+        }
+      ]
+    },
+    {
       "name": "STM32 · 堆叠测试（App启动）",
       "type": "stlinkgdbtarget",
       "request": "launch",

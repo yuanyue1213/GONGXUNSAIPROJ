@@ -9,6 +9,7 @@
 #include "start_link.h"
 #include "camera_link.h"
 #include "task_protocol.h"
+#include "task_display.h"
 #include <math.h>
 #include <stdio.h>
 
@@ -19,11 +20,13 @@ static TaskCode code;
 static TaskVision reply;
 static bool aligned,record_alignment;
 static float align_forward,align_left;
+static float parallel_yaw;
+static bool parallel_recorded;
 
 /* 只记录成功下发并等待结束的校准位移；单位 mm，含搜索动作。 */
 static bool align_move(char direction,float mm,uint16_t rpm)
 {
-    if(!Motion_Move(direction,mm,rpm)) return false;
+    if(!Motion_MoveAt(direction,mm,rpm,MISSION_ALIGN_ACCEL)) return false;
     if(record_alignment) {
         if(direction=='F') align_forward+=mm;
         else if(direction=='B') align_forward-=mm;
@@ -35,6 +38,9 @@ static bool align_move(char direction,float mm,uint16_t rpm)
 
 static void report(const char *state,const char *reason)
 {
+    if(!strcmp(state,"STARTING")) { TaskDisplay_Task(NULL); TaskDisplay_State(DISPLAY_RUNNING); }
+    else if(!strcmp(state,"DONE")) TaskDisplay_State(DISPLAY_DONE);
+    else if(!strcmp(state,"STOPPED")||!strcmp(state,"ERROR")) TaskDisplay_State(DISPLAY_ERROR);
     char line[128];
     snprintf(line,sizeof(line),"AUTO,%lu,%s,%u,%u,%u,%u,%s\n",
         (unsigned long)run,state,node,item,transfers,transfers,reason);
@@ -83,7 +89,7 @@ static bool align_coarse(TaskVisionKind kind,unsigned target,uint16_t rpm)
     float y=(reply.center.y-MISSION_TARGET_Y)*MISSION_ALIGN_MM_PER_PIXEL;
     if(kind==TASK_TABLE) {
         /* 原料粗调：图像偏差只决定方向，车体前后/左右使用固定步长。
-         * 精调及其他站点仍按像素偏差换算距离。 */
+         * 后续精调按像素偏差换算距离。 */
         bool x_forward=MISSION_IMAGE_RIGHT_DIRECTION=='F'||MISSION_IMAGE_RIGHT_DIRECTION=='B';
         if(x!=0.0f) x=copysignf(x_forward?RAW_COARSE_FORWARD_MM:RAW_COARSE_LATERAL_MM,x);
         if(y!=0.0f) y=copysignf(x_forward?RAW_COARSE_LATERAL_MM:RAW_COARSE_FORWARD_MM,y);
@@ -107,6 +113,20 @@ static bool align_fine(TaskVisionKind kind,unsigned target)
                      MISSION_ALIGN_FINE_RPM)) return false;
     }
 }
+/* OCCUPIED/PARALLEL的三位颜色按第一批实际左、中、右工位排列。
+ * 物理工位编号从左到右为3、2、1；第二批码垛沿用第一批同色工位。 */
+static unsigned alignment_target(TaskVisionKind kind,unsigned batch)
+{
+    if(kind==TASK_RING) return 2U;
+    if(kind==TASK_OCCUPIED) {
+        unsigned target=0;
+        for(unsigned place=3U;place>0;--place)
+            for(unsigned i=0;i<3U;++i)
+                if(code.places[0][i]==place) target=target*10U+code.colors[0][i];
+        return target;
+    }
+    return code.colors[batch][0]*100U+code.colors[batch][1]*10U+code.colors[batch][2];
+}
 static bool align_station(TaskVisionKind kind,unsigned batch)
 {
     unsigned target;
@@ -114,13 +134,14 @@ static bool align_station(TaskVisionKind kind,unsigned batch)
     if(kind!=TASK_TABLE&&kind!=TASK_OCCUPIED&&kind!=TASK_RING) return false;
     if(kind!=TASK_RING&&batch>=2U) return false;
     align_forward=align_left=0;
+    parallel_recorded=false;
     aligned=true;
     record_alignment=true;
     report("WORK","ALIGN");
-    target=kind==TASK_RING?2U:code.colors[batch][0]*100U+code.colors[batch][1]*10U+code.colors[batch][2];
+    target=alignment_target(kind,batch);
     if(!Motion_Servo('B',ARM_ALIGN_BASE,MOTION_BASE_ALIGN_DPS)) return false;
-    /* 粗调一次，精调最多修正三次；达标提前结束，超次则按最后位置继续。 */
-    if(!align_coarse(kind,target,MISSION_ALIGN_COARSE_RPM)) return false;
+    /* 只有原料区先粗调；粗加工、暂存和堆叠直接精调，再由流程执行平行校准。 */
+    if(kind==TASK_TABLE&&!align_coarse(kind,target,MISSION_ALIGN_COARSE_RPM)) return false;
     return align_fine(kind,target);
 }
 static bool unalign(void)
@@ -128,20 +149,24 @@ static bool unalign(void)
     if(!aligned) return false;
     record_alignment=false;
     report("WORK","UNALIGN");
-    /* 先撤销横向、再撤销前后；两者抵消累计净位移，不是重走完整搜索路径。 */
+    /* 校准顺序为中心、平行；逆序撤销，先恢复记录的原车头方向。 */
+    if(parallel_recorded&&!Motion_RestoreYaw(parallel_yaw,PARALLEL_RPM)) return false;
+    /* 位移一直保留在中心校准时的车体坐标，先撤销左右、再撤销前后。 */
     if(!align_axis(-align_left,'L',MISSION_UNALIGN_RPM)) return false;
     if(!align_axis(-align_forward,'F',MISSION_UNALIGN_RPM)) return false;
     aligned=false;
+    parallel_recorded=false;
     align_forward=align_left=0;
     return true;
 }
-/* 先中心搜索/对准，再校平行；旋转后把原位移换到新车体坐标，供UNALIGN撤销。 */
+/* 先中心精调，再校平行；保留原朝向，UNALIGN先恢复朝向再撤销平移。 */
 static bool parallel_align(TaskVisionKind kind,unsigned batch)
 {
     if(!aligned||!Motion_Servo('B',ARM_ALIGN_BASE,MOTION_BASE_ALIGN_DPS)) return false;
     if(kind!=TASK_RING&&(kind!=TASK_OCCUPIED||batch>=2U)) return false;
-    unsigned target=kind==TASK_RING?2U:code.colors[batch][0]*100U+code.colors[batch][1]*10U+code.colors[batch][2];
+    unsigned target=alignment_target(kind,batch);
     float start_yaw=Motion_Yaw();
+    if(!parallel_recorded) parallel_yaw=start_yaw;
     report("WORK","PARALLEL");
     unsigned moves=0;
     while(moves<PARALLEL_MAX_MOVES) {
@@ -171,12 +196,10 @@ static bool parallel_align(TaskVisionKind kind,unsigned batch)
         ++moves;
         Motion_Wait(PARALLEL_SETTLE_MS);
     }
-    /* 校准结束直接继续，不再追加视觉复核；保留回原位必需的坐标换算。 */
-    float angle=(Motion_Yaw()-start_yaw)*0.01745329252f;
-    float f=align_forward,l=align_left;
-    align_forward=cosf(angle)*f-sinf(angle)*l;
-    align_left=sinf(angle)*f+cosf(angle)*l;
-    return Motion_Reference();
+    /* 不旋转位移记录；去校准时先恢复parallel_yaw，再使用原坐标返回。 */
+    if(moves) parallel_recorded=true;
+    /* 视觉微调不重设路线航向参考，下一次路线转向仍按初始角度累计。 */
+    return true;
 }
 static bool pick_material(ArmArea area,unsigned position,unsigned color)
 {
@@ -230,6 +253,8 @@ static bool station(const FlowStep *step)
         if(!ok) return false;
         /* 每张取放动作均完成一次抓取和一次释放，与 App 原有统计语义一致。 */
         ++transfers;
+        unsigned stage=raw?0U:step->op==FLOW_OP_PROCESS_PUT?1U:step->op==FLOW_OP_PROCESS_GET?2U:3U;
+        TaskDisplay_Progress(batch,item,stage);
         report("WORK","CARD_DONE");
     }
     return true;
@@ -246,6 +271,7 @@ void MissionRunner_Run(uint32_t id)
     if(running) return;
     run=id; node=item=transfers=0;
     aligned=record_alignment=false;
+    parallel_recorded=false;
     align_forward=align_left=0;
     const char *error=Flow_Check(mission_flow,FLOW_COUNT(mission_flow));
     if(error) {
@@ -308,7 +334,7 @@ void MissionRunner_Run(uint32_t id)
 #else
             ok=CameraLink_Wait(TASK_QR,0,&reply);
 #endif
-            if(ok) code=reply.code;
+            if(ok) { code=reply.code; TaskDisplay_Task(&code); }
             if(ok) {
                 char text[96];
                 snprintf(text,sizeof(text),"TASK,%lu,%s\n",(unsigned long)run,reply.text);

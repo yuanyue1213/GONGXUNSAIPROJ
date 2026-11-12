@@ -9,6 +9,7 @@
 static UART_HandleTypeDef uart;
 static uint8_t *rx;
 static uint32_t tick;
+static uint32_t last_frame;
 static uint8_t frames[16][16];
 static unsigned lengths[16],count;
 static unsigned fail_id,mode;
@@ -19,6 +20,10 @@ static void emit(uint8_t b) { *rx=b; assert(ZDT_Motor_RxCallback(&uart)); }
 HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *u,uint8_t *f,uint16_t n,uint32_t timeout)
 {
     assert(u==&uart&&timeout==20&&count<16&&n<=16);
+#if defined(FORWARD_TEST)
+    if(count) assert((uint32_t)(tick-last_frame)>=FORWARD_TEST_FRAME_GAP_MS);
+#endif
+    last_frame=tick;
     memcpy(frames[count],f,n); lengths[count++]=n;
     if(f[0]==fail_id) return HAL_ERROR;
     if(!f[0]) return HAL_OK;
@@ -47,5 +52,15 @@ int main(void)
     reset(); mode=3; assert(ZDT_Motor_Enable(1)!=HAL_OK);
     reset(); mode=4; assert(ZDT_Motor_Enable(1)!=HAL_OK); /* 接收溢出拒绝整帧。 */
     reset(); tick=UINT32_MAX-5; assert(ZDT_Motor_Stop(4)==HAL_OK&&frames[0][3]==0);
-    puts("PASS: live wheel UART transport, early ACK, synchronous FD/F6 encoding, 1500 RPM, no trigger after failure and overflow rejection");
+#if defined(FORWARD_TEST)
+    reset(); mode=3;
+    assert(ZDT_Motor_StopWheelsImmediate()==HAL_OK&&count==5);
+    assert(!memcmp(frames[0],(uint8_t[]){0,0xFE,0x98,0,0x6B},5));
+    for(unsigned i=0;i<4;++i)
+        assert(!memcmp(frames[1+i],(uint8_t[]){i+1,0xFE,0x98,0,0x6B},5));
+    reset(); fail_id=2;
+    assert(ZDT_Motor_StopWheelsImmediate()!=HAL_OK&&count==5);
+    for(unsigned i=0;i<count;++i) assert(frames[i][1]!=0xFF);
+#endif
+    puts("PASS: wheel UART, FD/F6 sync, wheel mapping, malformed ACK/timeout handling and test-only immediate stop");
 }

@@ -22,6 +22,7 @@ static unsigned high_speeds,low_speeds,braking_speeds,limited_speeds,speed_calls
 static uint16_t turn_limit=MISSION_TURN_RPM;
 static int16_t yaw_speed;
 static int32_t last_wheel[4];
+static uint8_t expected_accel=MISSION_WHEEL_ACCEL;
 static bool fail_arm;
 static char firmware_codes[2]={'X','X'};
 static bool inject_gap,recovered,fail_stop;
@@ -64,8 +65,8 @@ bool ImuLink_Read(ImuSample *s)
 HAL_StatusTypeDef ZDT_Motor_Enable(uint8_t id) { assert(id>=1&&id<=4); return HAL_OK; }
 HAL_StatusTypeDef ZDT_Motor_MoveWheelSynchronous(const int32_t p[4],uint16_t rpm,uint8_t a)
 {
-    assert(rpm<=1500&&a==MISSION_WHEEL_ACCEL);
-    if(!wheel_calls) for(unsigned i=0;i<4;++i) assert(p[i]==12585);
+    assert(rpm<=1500&&a==expected_accel);
+    if(!wheel_calls) for(unsigned i=0;i<4;++i) assert(p[i]==13064);
     memcpy(last_wheel,p,sizeof(last_wheel));
     ++wheel_calls; return HAL_OK;
 }
@@ -113,16 +114,17 @@ int main(void)
     uint32_t wheel_start=tick;
     assert(Motion_Move('F',1000,MISSION_ROUTE_RPM)&&wheel_calls==1&&services>0);
     uint32_t wheel_ms=tick-wheel_start;
-    /* 12585/3200圈，档位10=81.3RPM/s，耗时约3.41秒+余量。
-     * 旧代码误用10RPM/s，会等约9.72秒。 */
-    uint32_t wheel_expected=(uint32_t)ceil(2.0*sqrt((12585.0/3200.0)*60.0*246.0/20000.0)*1000.0)+MISSION_MOTION_SETTLE_MS;
+    /* 路线300RPM、20档，1米仍是三角形曲线。 */
+    uint32_t wheel_expected=(uint32_t)ceil(2.0*sqrt((13064.0/3200.0)*60.0*236.0/20000.0)*1000.0)+MISSION_MOTION_SETTLE_MS;
     assert(wheel_ms>=wheel_expected&&wheel_ms<wheel_expected+30U);
-    /* 短距离同样使用正确加速度，不能套用错误的旧等待时间。 */
+    /* 校准保留200RPM、30档，等待时间必须与本次下发档位一致。 */
     wheel_start=tick;
-    assert(Motion_Move('L',100,MISSION_FINE_RPM));
+    expected_accel=MISSION_ALIGN_ACCEL;
+    assert(Motion_MoveAt('L',100,MISSION_FINE_RPM,MISSION_ALIGN_ACCEL));
     wheel_ms=tick-wheel_start;
-    wheel_expected=(uint32_t)ceil(2.0*sqrt((1323.0/3200.0)*60.0*246.0/20000.0)*1000.0)+MISSION_MOTION_SETTLE_MS;
+    wheel_expected=(uint32_t)ceil(2.0*sqrt((1323.0/3200.0)*60.0*226.0/20000.0)*1000.0)+MISSION_MOTION_SETTLE_MS;
     assert(wheel_ms>=wheel_expected&&wheel_ms<wheel_expected+30U);
+    expected_accel=MISSION_WHEEL_ACCEL;
     uint32_t before=tick;
     assert(Motion_TurnPulses(-3,5));
     assert(last_wheel[0]==-3&&last_wheel[1]==3&&last_wheel[2]==3&&last_wheel[3]==-3);
@@ -137,14 +139,14 @@ int main(void)
     assert(duration>=estimate&&duration<estimate+30); /* max, not sum */
     unsigned old_arm=arm_calls,old_lift=lift_calls;
     assert(Motion_MoveAll(1270,40,200,300)&&arm_calls==old_arm&&lift_calls==old_lift);
-    /* Emm两轴均一圈：档位128=156.25 RPM/s，估时同步使用新加速度。 */
+    /* Emm两轴均一圈：档位150约188.68 RPM/s，估时同步使用下发加速度。 */
     firmware_codes[0]=firmware_codes[1]='E';
     before=tick;
     assert(Motion_MoveAll(2540,80,200,MOTION_ARM_RPM));
     duration=tick-before;
-    estimate=(uint32_t)ceil(2.0*sqrt(60.0/156.25)*1000.0)+MISSION_MOTION_SETTLE_MS;
+    estimate=(uint32_t)ceil(2.0*sqrt(60.0*106.0/20000.0)*1000.0)+MISSION_MOTION_SETTLE_MS;
     assert(duration>=estimate&&duration<estimate+30U);
-    /* 混合固件取两轴最大时间；Emm的156.25RPM/s比X的400RPM/s更慢。 */
+    /* 混合固件取两轴最大时间；Emm约188.68RPM/s比X的400RPM/s更慢。 */
     firmware_codes[0]='X';
     before=tick;
     assert(Motion_MoveAll(1270,40,200,MOTION_ARM_RPM));
@@ -189,9 +191,31 @@ int main(void)
     assert(Motion_TurnFine(-.3f,turn_limit)&&fabsf(yaw-turn_target)<=.05f);
     assert(!Motion_TurnFine(0,5)&&!Motion_TurnFine(NAN,5)&&!Motion_TurnFine(PARALLEL_MAX_ANGLE_DEG+1,5));
     assert(!Motion_TurnFine(1,0)&&!Motion_TurnFine(1,STEPPER_MAX_SPEED_RPM+1U));
+    /* 初始30°，第一次停在120.5°，第二次目标仍是210°，不是210.5°。 */
+    fine_feedback=turn_feedback=false; yaw_speed=0; yaw=30; turn_limit=MISSION_TURN_RPM;
+    assert(Motion_Reference());
+    set_turn_feedback(120);
+    assert(Motion_Turn('R',90,turn_limit)&&fabsf(yaw-120.5f)<.001f);
+    set_turn_feedback(210);
+    assert(Motion_Turn('R',90,turn_limit)&&fabsf(yaw-210.5f)<.001f);
+    /* 工位视觉微调独立执行，不累加到后续路线转角。 */
+    fine_feedback=true; turn_feedback=false; turn_limit=PARALLEL_FINE_RPM;
+    turn_target=yaw+.2f;
+    assert(Motion_TurnFine(.2f,turn_limit)&&fabsf(yaw-turn_target)<=.05f);
+    fine_feedback=false; turn_limit=MISSION_TURN_RPM;
+    /* 恢复正负累计角度，可超过单次视觉修正15度，且不改路线目标。 */
+    fine_feedback=true; turn_limit=PARALLEL_RPM;
+    turn_target=yaw+40;
+    assert(Motion_RestoreYaw(turn_target,turn_limit)&&fabsf(yaw-turn_target)<=.05f);
+    turn_target=yaw-40;
+    assert(Motion_RestoreYaw(turn_target,turn_limit)&&fabsf(yaw-turn_target)<=.05f);
+    assert(!Motion_RestoreYaw(NAN,10)&&!Motion_RestoreYaw(0,0)&&!Motion_RestoreYaw(0,STEPPER_MAX_SPEED_RPM+1U));
+    fine_feedback=false; turn_limit=MISSION_TURN_RPM;
+    set_turn_feedback(120);
+    assert(Motion_Turn('L',90,turn_limit)&&fabsf(yaw-119.5f)<.001f);
     assert(!Motion_Move('F',100,STEPPER_MAX_SPEED_RPM+1U)&&!Motion_MoveAll(0,0,0,STEPPER_MAX_SPEED_RPM+1U));
     fail_arm=true; assert(!Motion_MoveAll(0,0,248,300));
     Motion_Stop(); assert(stop_calls>=4);
     tick=UINT32_MAX-10; Motion_Wait(30); assert(tick<100);
-    puts("PASS: sequential motion, parallel waits, PD turns, decreasing speed, rate braking, RPM cap, IMU recovery and timer wrap");
+    puts("PASS: sequential motion, parallel waits, PD turns, cumulative route targets without stop-error or visual-offset accumulation, decreasing speed, rate braking, RPM cap, IMU recovery and timer wrap");
 }

@@ -49,7 +49,7 @@ int main(void)
         assert(LiftMotor_Stop()==HAL_OK&&tx_count==0);
         assert(LiftMotor_MoveAngle('U',900,MOTION_ARM_RPM,3200)==HAL_OK&&last[0]==1&&last[2]==1);
         assert(LiftMotor_FirmwareCode(1)==(size==0x21?'E':'X'));
-        if(size==0x21) assert(last_length==13&&last[3]==7&&last[4]==0xD0&&last[5]==128&&last[8]==3&&last[9]==0x20&&last[10]==2);
+        if(size==0x21) assert(last_length==13&&last[3]==7&&last[4]==0xD0&&last[5]==150&&last[8]==3&&last[9]==0x20&&last[10]==2);
         else assert(last_length==16&&last[3]==1&&last[4]==0x90&&last[5]==1&&last[6]==0x90&&last[7]==0x4E&&last[8]==0x20&&last[11]==3&&last[12]==0x84&&last[13]==2);
         assert(LiftMotor_MoveAngle('D',900,300,3200)==HAL_OK&&last[2]==0&&queries[0]==1);
         assert(ArmMotor_MoveAngle('E',900,300,3200)==HAL_OK&&last[0]==2&&last[2]==0);
